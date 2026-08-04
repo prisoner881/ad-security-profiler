@@ -79,8 +79,10 @@ SCOPE, HONESTLY
 """
 
 import argparse
+import atexit
 import getpass
 import json
+import re
 import sys
 from datetime import datetime, timezone
 
@@ -88,11 +90,15 @@ import requests
 import psycopg2
 import psycopg2.extras
 
-PG_HOST = "192.168.1.125"
+# [test-candidate-branch] Always overwritten by main() from
+# --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
+# connect_postgres() is ever called -- placeholders, not a real
+# client's connection details.
+PG_HOST = None
 PG_PORT = 5432
 PG_DBNAME = "adprofiler"
-PG_USER = "postgres"
-PG_PASSWORD = "Project2501"
+PG_USER = None
+PG_PASSWORD = None
 
 VERSION = "0.4.0"
 
@@ -175,6 +181,32 @@ class _C:
     WHITE = "\033[97m" if _USE_COLOR else ""
     BOLD = "\033[1m" if _USE_COLOR else ""
     DIM = "\033[2m" if _USE_COLOR else ""
+
+
+class _TeeStream:
+    """[test-candidate-branch] Same class, same reasoning, as
+    adprofiler.py's own _TeeStream -- see that docstring. Duplicated
+    here rather than imported from adprofiler.py since these two
+    scripts have always been fully independent (see this script's own
+    module docstring on why entra_graph_collector.py is separate from
+    adprofiler.py at all), and this project's plugins are the only
+    thing genuinely meant to be shared between files."""
+    _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
+
+    def __init__(self, console_stream, log_fh):
+        self._console = console_stream
+        self._log_fh = log_fh
+
+    def write(self, data):
+        self._console.write(data)
+        self._log_fh.write(self._ANSI_RE.sub("", data).replace("\r", "\n"))
+
+    def flush(self):
+        self._console.flush()
+        self._log_fh.flush()
+
+    def isatty(self):
+        return self._console.isatty()
 
 
 def _ts():
@@ -733,22 +765,53 @@ def sync_dangerous_permission_grants(pg_conn, client_id, grants):
 # ============================================================================
 
 def parse_args():
+    """
+    [test-candidate-branch] --tenant-id/--app-id/--domain-fqdn were
+    argparse required=True, which meant --version failed with a usage
+    error before main() ever got a chance to check it -- the exact bug
+    adprofiler.py's own parse_args() already documents fixing in its
+    v0.0.3 changelog entry. Never fixed here until now; caught while
+    touching this function for an unrelated reason (adding the PG
+    connection flags below) and fixed the same way: no longer required
+    at the argparse level, validated manually after --version is
+    checked.
+    """
     parser = argparse.ArgumentParser(
         description="entra_graph_collector.py -- Microsoft Graph email collector, v" + VERSION,
     )
-    parser.add_argument("--tenant-id", required=True,
-                         help="Entra ID tenant ID (GUID) or verified domain name.")
-    parser.add_argument("--app-id", required=True,
-                         help="Entra App Registration's Application (client) ID.")
+    parser.add_argument("--tenant-id", default=None,
+                         help="Entra ID tenant ID (GUID) or verified domain name. "
+                              "Required unless --version is given.")
+    parser.add_argument("--app-id", default=None,
+                         help="Entra App Registration's Application (client) ID. "
+                              "Required unless --version is given.")
     parser.add_argument("--app-secret", default=None,
                          help="App Registration client secret. If omitted, you "
                               "will be prompted securely (recommended).")
-    parser.add_argument("--domain-fqdn", required=True,
+    parser.add_argument("--domain-fqdn", default=None,
                          help="The on-prem AD domain FQDN already collected by "
-                              "adprofiler.py (e.g. forge.local) -- used to find "
-                              "the existing client record to enrich.")
+                              "adprofiler.py (e.g. contoso.local) -- used to find "
+                              "the existing client record to enrich. Required "
+                              "unless --version is given.")
     parser.add_argument("--version", action="store_true", help="Print version and exit.")
+    parser.add_argument("--pg-host", default=None,
+                         help="PostgreSQL server hostname or IP. Required unless --version is given.")
+    parser.add_argument("--pg-port", type=int, default=5432,
+                         help="PostgreSQL server port. Default: 5432.")
+    parser.add_argument("--pg-dbname", default="adprofiler",
+                         help="PostgreSQL database name. Default: adprofiler.")
+    parser.add_argument("--pg-user", default=None,
+                         help="PostgreSQL username. Required unless --version is given.")
+    parser.add_argument("--pg-password", default=None,
+                         help="PostgreSQL password. If omitted, you will be prompted "
+                              "securely (recommended).")
     args = parser.parse_args()
+
+    if not args.version and (not args.tenant_id or not args.app_id or not args.domain_fqdn):
+        parser.error("the following arguments are required: --tenant-id, --app-id, --domain-fqdn")
+    if not args.version and (not args.pg_host or not args.pg_user):
+        parser.error("the following arguments are required: --pg-host, --pg-user")
+
     return args
 
 
@@ -758,7 +821,33 @@ def main():
         print(f"entra_graph_collector.py version {VERSION}")
         return
 
+    # [test-candidate-branch] Same reasoning as adprofiler.py's identical
+    # addition -- see that script's main() for the full comment.
+    log_filename = f"entra-graph-collector-results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    log_fh = open(log_filename, "w")
+    real_stdout = sys.stdout
+    sys.stdout = _TeeStream(real_stdout, log_fh)
+
+    def _restore_stdout():
+        sys.stdout = real_stdout
+        log_fh.close()
+    atexit.register(_restore_stdout)
+
     log_header(f"entra_graph_collector.py v{VERSION} -- Microsoft Graph Email Collector")
+    log_info(f"Mirroring console output to {log_filename}")
+
+    global PG_HOST, PG_PORT, PG_DBNAME, PG_USER, PG_PASSWORD
+    PG_HOST = args.pg_host
+    PG_PORT = args.pg_port
+    PG_DBNAME = args.pg_dbname
+    PG_USER = args.pg_user
+    if args.pg_password:
+        log_warn("PostgreSQL password supplied via --pg-password is visible in shell "
+                  "history and process listings. Prefer omitting it and entering it "
+                  "at the secure prompt.")
+        PG_PASSWORD = args.pg_password
+    else:
+        PG_PASSWORD = getpass.getpass(f"PostgreSQL password for {args.pg_user}@{args.pg_host}: ")
 
     if args.app_secret:
         log_warn("App secret supplied via --app-secret is visible in shell history "

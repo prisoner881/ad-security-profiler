@@ -88,7 +88,9 @@ USAGE:
 
 import sys
 import argparse
+import getpass
 import importlib.util
+import re
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -97,11 +99,15 @@ import psycopg2.extras
 
 VERSION = "0.7.1"
 
-PG_HOST = "192.168.1.125"
+# [test-candidate-branch] Always overwritten by main() from
+# --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
+# connect_postgres() is ever called -- placeholders, not a real
+# client's connection details.
+PG_HOST = None
 PG_PORT = 5432
 PG_DBNAME = "adprofiler"
-PG_USER = "postgres"
-PG_PASSWORD = "Project2501"
+PG_USER = None
+PG_PASSWORD = None
 
 DEFAULT_PLUGINS_DIR = Path(__file__).parent / "plugins"
 
@@ -671,6 +677,169 @@ def print_inventory_report(inventory_results):
     print("=" * 78)
 
 
+def write_excel_report(plugin_summaries, all_findings, inventory_results, filename):
+    """[test-candidate-branch] Excel companion to the console report,
+    for a test client + reviewer going through results together --
+    easier to filter/sort/skim in a spreadsheet than a scrollback
+    buffer or text log.
+
+    Deliberately reuses the exact same data (plugin_summaries,
+    all_findings, inventory_results) and the same category/plugin
+    grouping print_report() and print_inventory_report() already
+    build, rather than re-querying anything -- this is a second
+    rendering of data already assembled, not a separate code path
+    that could drift from what the console shows.
+
+    Only FAIL/WARN findings are written to each category tab (a PASS
+    result has no triggering data point to show, same reasoning
+    print_report() itself already uses to skip evidence/references
+    for a pass) -- the Summary tab is where full FAIL/WARN/PASS/ERROR
+    counts live, so nothing is actually lost, just not repeated
+    per-category. Inventory tabs are the one exception: those get
+    every row, unfiltered, since there's no status to filter by at all.
+    """
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="404040", end_color="404040", fill_type="solid")
+    fail_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    warn_fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
+
+    used_sheet_names = set()
+
+    def sheet_name(name):
+        # Excel forbids \ / ? * [ ] : in sheet names and caps them at
+        # 31 characters -- sanitized generically rather than trusting
+        # today's category/plugin names to always be safe, since a
+        # future plugin could introduce a name that isn't.
+        cleaned = re.sub(r'[\\/?*\[\]:]', '', name)[:31]
+        candidate = cleaned
+        suffix = 2
+        while candidate in used_sheet_names:
+            candidate = f"{cleaned[:28]}_{suffix}"
+            suffix += 1
+        used_sheet_names.add(candidate)
+        return candidate
+
+    def write_header_row(ws, headers):
+        ws.append(headers)
+        for col_idx in range(1, len(headers) + 1):
+            cell = ws.cell(row=1, column=col_idx)
+            cell.font = header_font
+            cell.fill = header_fill
+        ws.freeze_panes = "A2"
+
+    # --- Summary tab (first, so it's what opens by default) ---
+    ws_summary = wb.create_sheet(sheet_name("Summary"))
+    by_category = {}
+    for p in plugin_summaries:
+        by_category.setdefault(p["category"], []).append(p)
+
+    write_header_row(ws_summary, ["Category", "FAIL", "WARN", "PASS", "ERROR", "Total Plugins"])
+    grand_fail = grand_warn = grand_pass = grand_error = 0
+    for category in sorted(by_category):
+        in_cat = by_category[category]
+        n_fail = sum(1 for p in in_cat if p["rollup"] == "fail")
+        n_warn = sum(1 for p in in_cat if p["rollup"] == "warn")
+        n_pass = sum(1 for p in in_cat if p["rollup"] == "pass")
+        n_error = sum(1 for p in in_cat if p["rollup"] == "error")
+        ws_summary.append([category, n_fail, n_warn, n_pass, n_error, len(in_cat)])
+        grand_fail += n_fail
+        grand_warn += n_warn
+        grand_pass += n_pass
+        grand_error += n_error
+    ws_summary.append(["TOTAL", grand_fail, grand_warn, grand_pass, grand_error, len(plugin_summaries)])
+    for col_idx in range(1, 7):
+        ws_summary.cell(row=ws_summary.max_row, column=col_idx).font = Font(bold=True)
+    ws_summary.auto_filter.ref = ws_summary.dimensions
+    for col_idx, width in enumerate([28, 8, 8, 8, 8, 14], start=1):
+        ws_summary.column_dimensions[get_column_letter(col_idx)].width = width
+
+    # --- One tab per category, FAIL/WARN findings only ---
+    findings_by_plugin = {}
+    for f in all_findings:
+        findings_by_plugin.setdefault(f["plugin_id"], []).append(f)
+
+    finding_headers = ["Plugin ID", "Plugin Name", "Version", "Status", "Severity",
+                       "Change Status", "Summary", "Evidence", "References"]
+    for category in sorted(by_category):
+        ws = wb.create_sheet(sheet_name(category))
+        write_header_row(ws, finding_headers)
+
+        plugins_in_cat = sorted(by_category[category],
+                                  key=lambda p: (STATUS_ORDER.get(p["rollup"], -1), -p["plugin_id"]),
+                                  reverse=True)
+        for p in plugins_in_cat:
+            for f in findings_by_plugin.get(p["plugin_id"], []):
+                if f["status"] not in ("fail", "warn"):
+                    continue
+                sev_bits = [f"fd:{f['fd_severity']}"]
+                if f["stig_severity"]:
+                    sev_bits.append(f"stig:{f['stig_severity']}")
+                if f["tool_severity"]:
+                    sev_bits.append(f"tool:{f['tool_severity']}")
+                evidence_str = ", ".join(f"{k}={v}" for k, v in (f.get("detail") or {}).items())
+                references_str = "; ".join(
+                    f"{r['title']} ({r['url']})" for r in (f.get("references") or [])
+                )
+                ws.append([
+                    f["plugin_id"], p["name"], f["plugin_version"], f["status"].upper(),
+                    "/".join(sev_bits), f["change_status"], f["summary"],
+                    evidence_str, references_str,
+                ])
+                fill = fail_fill if f["status"] == "fail" else warn_fill
+                for col_idx in range(1, len(finding_headers) + 1):
+                    ws.cell(row=ws.max_row, column=col_idx).fill = fill
+
+        if ws.max_row == 1:
+            ws.append(["(no FAIL/WARN findings in this category this run)"])
+        ws.auto_filter.ref = ws.dimensions
+        for col_idx, width in enumerate([10, 45, 8, 8, 22, 14, 65, 55, 55], start=1):
+            ws.column_dimensions[get_column_letter(col_idx)].width = width
+
+    # --- One tab per inventory plugin, full data, unfiltered ---
+    for plugin, rows in inventory_results:
+        ws = wb.create_sheet(sheet_name(plugin["name"]))
+        if rows is None:
+            ws.append(["(query failed -- see console output/log for detail)"])
+            continue
+        if not rows:
+            ws.append(["(no rows)"])
+            continue
+        headers = list(rows[0].keys())
+        write_header_row(ws, headers)
+        for row in rows:
+            values = []
+            for key in headers:
+                v = row.get(key)
+                if isinstance(v, list):
+                    v = ", ".join(str(x) for x in v) if v else "(none)"
+                elif isinstance(v, datetime) and v.tzinfo is not None:
+                    # openpyxl rejects timezone-aware datetimes outright
+                    # ("Excel does not support timezones in datetimes") --
+                    # every timestamp in this project is already stored
+                    # and displayed in UTC throughout (confirmed by every
+                    # console/log timestamp elsewhere in this codebase
+                    # using the same convention), so stripping tzinfo
+                    # here doesn't change the actual moment in time being
+                    # shown, just what Python object represents it -- and
+                    # keeps it a real, sortable Excel date/time cell
+                    # rather than degrading it to a plain string.
+                    v = v.replace(tzinfo=None)
+                values.append(v)
+            ws.append(values)
+        ws.auto_filter.ref = ws.dimensions
+        for col_idx in range(1, len(headers) + 1):
+            ws.column_dimensions[get_column_letter(col_idx)].width = 25
+
+    wb.save(filename)
+
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -684,11 +853,38 @@ def main():
     parser.add_argument("--category", nargs="+", default=None,
                          help="Run only plugins in these categories")
     parser.add_argument("--version", action="store_true")
+    parser.add_argument("--pg-host", default=None,
+                         help="PostgreSQL server hostname or IP. Required unless --version is given.")
+    parser.add_argument("--pg-port", type=int, default=5432,
+                         help="PostgreSQL server port. Default: 5432.")
+    parser.add_argument("--pg-dbname", default="adprofiler",
+                         help="PostgreSQL database name. Default: adprofiler.")
+    parser.add_argument("--pg-user", default=None,
+                         help="PostgreSQL username. Required unless --version is given.")
+    parser.add_argument("--pg-password", default=None,
+                         help="PostgreSQL password. If omitted, you will be prompted "
+                              "securely (recommended).")
     args = parser.parse_args()
 
     if args.version:
         print(f"adaudit.py v{VERSION}")
         return
+
+    if not args.pg_host or not args.pg_user:
+        parser.error("the following arguments are required: --pg-host, --pg-user")
+
+    global PG_HOST, PG_PORT, PG_DBNAME, PG_USER, PG_PASSWORD
+    PG_HOST = args.pg_host
+    PG_PORT = args.pg_port
+    PG_DBNAME = args.pg_dbname
+    PG_USER = args.pg_user
+    if args.pg_password:
+        print("[WARN] PostgreSQL password supplied via --pg-password is visible in "
+              "shell history and process listings. Prefer omitting it and entering "
+              "it at the secure prompt.")
+        PG_PASSWORD = args.pg_password
+    else:
+        PG_PASSWORD = getpass.getpass(f"PostgreSQL password for {args.pg_user}@{args.pg_host}: ")
 
     print("=" * 62)
     print(f"  adaudit.py v{VERSION} -- AD Security & Compliance Plugin Runner")
@@ -799,17 +995,28 @@ def main():
     if finding_plugins:
         print_report(plugin_summaries, all_findings)
 
+    inventory_results = []
     if inventory_plugins:
         # No control_evidence_run/control_catalog/control_test involvement
         # at all -- inventory plugins run fresh every time with no
         # persistence and no change tracking, per their whole design intent.
-        inventory_results = []
         for plugin in inventory_plugins:
             rows = run_inventory_query(conn, plugin, client_id, run_id)
             if rows is None:
                 conn.rollback()
             inventory_results.append((plugin, rows))
         print_inventory_report(inventory_results)
+
+    # [test-candidate-branch] Excel companion to the console report --
+    # see write_excel_report()'s own docstring for why. Generated
+    # whenever there's anything at all to put in it (finding or
+    # inventory plugins ran), not gated behind finding_plugins alone,
+    # since an inventory-only filtered run (--category "User Accounts"
+    # matching only 8001, say) should still get a workbook.
+    if finding_plugins or inventory_plugins:
+        excel_filename = f"adaudit-findings_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        write_excel_report(plugin_summaries, all_findings, inventory_results, excel_filename)
+        log(f"Wrote Excel findings report to {excel_filename}")
 
 
 if __name__ == "__main__":
