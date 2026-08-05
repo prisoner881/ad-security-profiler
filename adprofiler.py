@@ -4,9 +4,12 @@
  adprofiler.py -- Active Directory Security & Compliance Profiler (Collector)
 ================================================================================
 
-VERSION: 0.5.4
+VERSION: 0.5.5
 
 CHANGELOG:
+    0.5.5 - Domain controller computer-object ownership scanning (targeted
+            owner-only SD read, same low-cost profile as domain root/
+            AdminSDHolder -- not full ACE scanning). Supports plugin 4023.
     0.5.4 - ADCS ACL collection: certificate template objects, CA
             (pKIEnrollmentService) objects, each CA's own computer
             object (cross-referenced via dNSHostName), and the Public
@@ -584,7 +587,7 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
-VERSION = "0.5.4"
+VERSION = "0.5.5"
 # [test-candidate-branch] These are always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
 # connect_postgres() is ever called -- the values here are placeholders,
@@ -3707,6 +3710,43 @@ def main():
                         "UPDATE directory_object SET owner_sid = %s WHERE object_guid = %s AND client_id = %s",
                         (ou_owner_sid, ou_guid, client_id),
                     )
+
+            # [v0.5.5] Domain controller computer-object ownership. Not
+            # part of the bulk computer collection (COMPUTER_ATTRS
+            # deliberately excludes nTSecurityDescriptor, matching the
+            # established "SD reads are targeted, not bulk" pattern),
+            # so scanned here separately -- there are only ever a
+            # handful of DCs, the same low-cost profile as domain
+            # root/AdminSDHolder above. Owner-only: reuses
+            # build_acl_desired_edges() for its already-proven SD
+            # parsing, but its ACE output is deliberately discarded
+            # into a scratch dict rather than merged into acl_desired --
+            # this is specifically about "who owns this DC's account,"
+            # not a request to also start scanning DC computer-object
+            # ACEs generally, which wasn't asked for and would add
+            # LDAP read cost with no plugin currently using it.
+            dc_owner_read_failures = 0
+            for comp_guid, comp_full in computers:
+                if not (int(comp_full.get("userAccountControl") or 0) & UAC_SERVER_TRUST_ACCOUNT):
+                    continue
+                comp_dn = comp_full.get("distinguishedName")
+                if not comp_dn:
+                    continue
+                raw_dc_sd = get_object_security_descriptor(ldap_conn, comp_dn)
+                _scratch_edges = {}
+                ok, dc_owner_sid = build_acl_desired_edges(
+                    comp_guid, raw_dc_sd, comp_dn, _scratch_edges,
+                )
+                if not ok:
+                    dc_owner_read_failures += 1
+                    continue
+                if dc_owner_sid:
+                    cur.execute(
+                        "UPDATE directory_object SET owner_sid = %s WHERE object_guid = %s AND client_id = %s",
+                        (dc_owner_sid, comp_guid, client_id),
+                    )
+            log_success(f"DC computer object ownership: scanned, "
+                        f"{dc_owner_read_failures} read failure(s)")
 
             # [v0.5.4] The sync_edges("acl_edge", ...) call that used to sit
             # here was moved to AFTER the ADCS ACL collection section below --
