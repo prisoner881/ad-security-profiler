@@ -4,9 +4,16 @@
  adprofiler.py -- Active Directory Security & Compliance Profiler (Collector)
 ================================================================================
 
-VERSION: 0.5.4
+VERSION: 0.5.6
 
 CHANGELOG:
+    0.5.6 - AD-integrated DNS zone collection (domain-scoped zones only,
+            DomainDnsZones partition). Parses dNSProperty per [MS-DNSP]
+            2.3.2.1 to extract DSPROPERTY_ZONE_ALLOW_UPDATE. Supports
+            plugin 4025 (nonsecure dynamic updates).
+    0.5.5 - Domain controller computer-object ownership scanning (targeted
+            owner-only SD read, same low-cost profile as domain root/
+            AdminSDHolder -- not full ACE scanning). Supports plugin 4023.
     0.5.4 - ADCS ACL collection: certificate template objects, CA
             (pKIEnrollmentService) objects, each CA's own computer
             object (cross-referenced via dNSHostName), and the Public
@@ -584,7 +591,7 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
-VERSION = "0.5.4"
+VERSION = "0.5.6"
 PG_HOST = "192.168.1.125"
 PG_PORT = 5432
 PG_DBNAME = "adprofiler"
@@ -798,6 +805,20 @@ DISPLAY_SPECIFIER_FILTER = "(objectClass=displaySpecifier)"
 CERT_OID_ATTRS = ["objectGUID", "distinguishedName", "cn", "msDS-OIDToGroupLink"]
 CERT_OID_FILTER = "(objectClass=msPKI-Enterprise-Oid)"
 
+# [v0.5.6] AD-integrated DNS zones. Lives in an entirely different
+# naming context from everything else this collector queries -- the
+# DomainDnsZones application partition, not the domain NC or the
+# Configuration NC. Deliberately scoped to domain-scoped zones only
+# (DC=DomainDnsZones,<domain>) -- forest-scoped zones
+# (DC=ForestDnsZones,<forest root>) would need the forest root's own
+# base DN, which can differ from the domain's in a multi-domain forest
+# and isn't currently resolved anywhere in this collector. A
+# non-AD-integrated (file-based) zone is invisible to LDAP entirely,
+# regardless of scope -- not a gap this collector can close.
+DNS_ZONE_ATTRS = ["objectGUID", "distinguishedName", "name"]
+DNS_ZONE_FILTER = "(objectClass=dnsZone)"
+DNSPROPERTY_ID_ALLOW_UPDATE = 2  # DSPROPERTY_ZONE_ALLOW_UPDATE, [MS-DNSP] 2.3.2.1.1
+
 class CollectorAbort(Exception):
     """
     [v0.0.3] Raised for expected, already-logged failure conditions (LDAP
@@ -818,7 +839,8 @@ KNOWN_TYPED_TABLES = {"ad_user", "ad_group", "ad_computer", "ad_domain",
                        "ad_trust", "ad_gpo", "ad_fgpp", "ad_cert_template",
                        "ad_enrollment_service", "ad_foreign_security_principal",
                        "ad_ou", "ad_ntauth_store", "ad_site", "ad_subnet",
-                       "ad_schema_object", "ad_display_specifier", "ad_cert_oid"}
+                       "ad_schema_object", "ad_display_specifier", "ad_cert_oid",
+                       "ad_dns_zone"}
 KNOWN_EDGE_TABLES = {"group_member_edge", "spn_edge", "delegation_edge",
                       "fgpp_applies_to_edge", "cert_template_enabled_edge",
                       "acl_edge", "gpo_link_edge", "gmsa_password_reader_edge",
@@ -940,6 +962,49 @@ ACE_TYPE_DENIED = 0x01
 ACE_TYPE_ALLOWED_OBJECT = 0x05
 ACE_TYPE_DENIED_OBJECT = 0x06
 ACE_INHERITED_FLAG = 0x10  # from ACE.INHERITED_ACE in impacket's ldaptypes
+
+
+def parse_dns_zone_allow_update(raw_dns_property_values):
+    """[v0.5.6] Extracts DSPROPERTY_ZONE_ALLOW_UPDATE from a zone's raw,
+    multi-valued dNSProperty attribute. Format confirmed directly
+    against Microsoft's own [MS-DNSP] 2.3.2.1 spec, not guessed at or
+    inferred from a third party's tool: each dNSProperty value is one
+    complete, self-contained property structure -- a fixed 20-byte
+    header (5 little-endian DWORDs: DataLength, NameLength, Flag,
+    Version, Id) followed by DataLength bytes of Data, then a 1-byte
+    trailing Name field (unused, always ignored per spec). No existing
+    library (impacket's dns.py only covers dnsRecord, a different
+    attribute entirely) was found to already parse this, so this is a
+    from-scratch parser -- verified via a full construct-serialize-
+    parse round trip against synthetic property values before being
+    trusted against real collection data, the same discipline already
+    applied to security descriptor parsing elsewhere in this file.
+
+    Iterates every value looking for Id == DNSPROPERTY_ID_ALLOW_UPDATE
+    (0x2) specifically -- a zone's dNSProperty holds many unrelated
+    properties (zone type, refresh intervals, aging state, etc.) in
+    the same multi-valued attribute, not just this one.
+
+    Returns the raw ZONE_UPDATE_* integer (0=off, 1=unsecure+secure,
+    2=secure only) if found, else None (property not present in this
+    zone's values at all -- treated by the caller as "could not
+    determine", not assumed to be any particular default)."""
+    if not raw_dns_property_values:
+        return None
+    for raw in raw_dns_property_values:
+        if len(raw) < 20:
+            continue
+        try:
+            data_length, _name_length, _flag, _version, prop_id = struct.unpack_from("<5I", raw, 0)
+        except struct.error:
+            continue
+        if prop_id != DNSPROPERTY_ID_ALLOW_UPDATE:
+            continue
+        data = raw[20:20 + data_length]
+        if len(data) < 4:
+            return None
+        return struct.unpack_from("<I", data, 0)[0]
+    return None
 
 
 def parse_security_descriptor(raw_sd_bytes):
@@ -1659,6 +1724,8 @@ REQUIRED_SCHEMA_COLUMNS = {
                               "valid_to", "schema_cn", "admin_context_menu"},
     "ad_cert_oid": {"object_guid", "client_id", "version_id", "valid_from",
                      "valid_to", "schema_cn", "oid_to_group_link"},
+    "ad_dns_zone": {"object_guid", "client_id", "version_id", "valid_from",
+                     "valid_to", "zone_name", "allow_update"},
     "ad_trust": {"object_guid", "client_id", "version_id", "valid_from", "valid_to",
                  "trust_partner", "trust_direction", "trust_type",
                  "trust_attributes", "sid_filtering_enabled"},
@@ -2311,6 +2378,7 @@ def label_to_object_class(label):
         "schema (Java extension check)": "other",
         "schema (possSuperiors check)": "other",
         "DisplaySpecifiers": "other", "certificate OIDs": "other",
+        "DNS zones": "other",
     }[label]
 
 
@@ -2723,6 +2791,27 @@ def cert_oid_typed_columns(full):
     return {
         "schema_cn": full.get("cn"),
         "oid_to_group_link": full.get("msDS-OIDToGroupLink"),
+    }
+
+
+def dns_zone_typed_columns(full):
+    """[v0.5.6, corrected] dNSProperty is deliberately NOT read through
+    this function -- see the targeted raw_attributes read in main()
+    for why. Discovered directly via testing, not assumed: the
+    bulk-collection path's generic bytes-handling
+    (normalize_value()) tries UTF-8 decoding first and only
+    base64-encodes on a decode FAILURE, but dNSProperty's packed
+    little-endian DWORDs are frequently small integers (0, 1, 2 for
+    ZONE_UPDATE_*, for example) whose byte representation happens to be
+    valid, if unprintable, UTF-8 -- meaning normalize_value's embedded-
+    NUL-stripping (`.replace("\\x00", "")`, needed elsewhere for a
+    genuine PostgreSQL limitation) silently corrupts the packed
+    struct's byte alignment before this function would ever see it. A
+    real construct-parse round-trip test caught this before it shipped
+    -- allow_update ended up None for every zone until the read moved
+    to raw_attributes."""
+    return {
+        "zone_name": full.get("name") or full.get("cn"),
     }
 
 
@@ -3616,6 +3705,44 @@ def main():
                         (ou_owner_sid, ou_guid, client_id),
                     )
 
+            # [v0.5.5] Domain controller computer-object ownership. Not
+            # part of the bulk computer collection (COMPUTER_ATTRS
+            # deliberately excludes nTSecurityDescriptor, matching the
+            # established "SD reads are targeted, not bulk" pattern),
+            # so scanned here separately -- there are only ever a
+            # handful of DCs, the same low-cost profile as domain
+            # root/AdminSDHolder above. Owner-only: reuses
+            # build_acl_desired_edges() for its already-proven SD
+            # parsing, but its ACE output is deliberately discarded
+            # into a scratch dict rather than merged into acl_desired --
+            # this is specifically about "who owns this DC's account,"
+            # not a request to also start scanning DC computer-object
+            # ACEs generally, which wasn't asked for and would add
+            # LDAP read cost with no plugin currently using it.
+            dc_owner_read_failures = 0
+            for comp_guid, comp_full in computers:
+                if not (int(comp_full.get("userAccountControl") or 0) & UAC_SERVER_TRUST_ACCOUNT):
+                    continue
+                comp_dn = comp_full.get("distinguishedName")
+                if not comp_dn:
+                    continue
+                raw_dc_sd = get_object_security_descriptor(ldap_conn, comp_dn)
+                _scratch_edges = {}
+                ok, dc_owner_sid = build_acl_desired_edges(
+                    comp_guid, raw_dc_sd, comp_dn, _scratch_edges,
+                )
+                if not ok:
+                    dc_owner_read_failures += 1
+                    continue
+                if dc_owner_sid:
+                    cur.execute(
+                        "UPDATE directory_object SET owner_sid = %s WHERE object_guid = %s AND client_id = %s",
+                        (dc_owner_sid, comp_guid, client_id),
+                    )
+            log_success(f"DC computer object ownership: scanned, "
+                        f"{dc_owner_read_failures} read failure(s)")
+
+
             # [v0.5.4] The sync_edges("acl_edge", ...) call that used to sit
             # here was moved to AFTER the ADCS ACL collection section below --
             # cert templates, CA objects, and the PKI containers all need
@@ -3933,6 +4060,58 @@ def main():
                 )
             except LDAPException as exc:
                 log_warn(f"Certificate OID collection failed (non-fatal): {exc}")
+
+            try:
+                # [v0.5.6] Domain-scoped AD-integrated DNS zones live in
+                # their own application partition, not the domain NC or
+                # Configuration NC anything else here queries -- see
+                # DNS_ZONE_ATTRS's own comment for why this is
+                # deliberately scoped to domain-scoped zones only, not
+                # forest-scoped ones too.
+                dns_zones_container = f"CN=MicrosoftDNS,DC=DomainDnsZones,{base_dn}"
+                dns_zone_entries = collect_object_class(
+                    ldap_conn, cur, client_id, run_id, args.dc_host, dns_zones_container,
+                    DNS_ZONE_FILTER, DNS_ZONE_ATTRS, args.page_size,
+                    "DNS zones", "ad_dns_zone",
+                    dns_zone_typed_columns, dn_to_guid, stats, run_timestamp,
+                )
+                # [v0.5.6] dNSProperty is read separately, per zone, via
+                # a targeted raw_attributes search -- NOT through the
+                # bulk collect_object_class() path above, which routes
+                # everything through normalize_value()'s generic
+                # bytes-handling. That path silently corrupts this
+                # specific attribute's packed binary structure (see
+                # dns_zone_typed_columns's own docstring for the
+                # mechanism, found via real testing, not assumed). Same
+                # small-object-count, targeted-read pattern already
+                # used for domain root/AdminSDHolder/DC ownership above.
+                dns_property_read_failures = 0
+                for zone_guid, zone_full in dns_zone_entries:
+                    zone_dn = zone_full.get("distinguishedName")
+                    if not zone_dn:
+                        continue
+                    try:
+                        ldap_conn.search(zone_dn, "(objectClass=*)", search_scope=ldap3.BASE,
+                                          attributes=["dNSProperty"])
+                        if not ldap_conn.response:
+                            dns_property_read_failures += 1
+                            continue
+                        raw_props = ldap_conn.response[0]["raw_attributes"].get("dNSProperty") or []
+                        allow_update = parse_dns_zone_allow_update(raw_props)
+                    except LDAPException as exc:
+                        log_warn(f"Could not read dNSProperty for {zone_dn}: {exc}")
+                        dns_property_read_failures += 1
+                        continue
+                    cur.execute(
+                        "UPDATE ad_dns_zone SET allow_update = %s "
+                        "WHERE object_guid = %s AND client_id = %s AND valid_to IS NULL",
+                        (allow_update, zone_guid, client_id),
+                    )
+                log_success(f"DNS zone dynamic-update settings: {len(dns_zone_entries)} zone(s), "
+                            f"{dns_property_read_failures} read failure(s)")
+            except LDAPException as exc:
+                log_warn(f"DNS zone collection failed (non-fatal, possibly no "
+                          f"AD-integrated DNS zones or no DomainDnsZones partition): {exc}")
 
             if run_type == "delta":
                 collect_deleted_objects(
