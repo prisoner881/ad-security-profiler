@@ -7,14 +7,38 @@ free text readable by any authenticated domain user via a basic LDAP
 query, no special rights required. Confirmed against multiple sources
 including a real lab writeup showing the exact PowerView pattern
 attackers use to hunt for this.
+
+[v1.5, corrected] The previous version used a bare ILIKE '%pass%'
+substring match -- caught in real production data flagging a user
+whose description was literally "Compass User" (matching a display
+name of "Compass User"), since "Compass" contains "pass" as a
+mid-word substring. Rebuilt as a word-boundary regex requiring "pass"
+to be a genuinely standalone word (not embedded as a substring of a
+longer word in either direction), which correctly excludes Compass,
+Passport, passenger, Passover, bypass, surpass, trespass, overpass,
+and encompass -- all verified directly, not assumed -- while still
+separately matching "password", "passwd", and "passphrase" explicitly
+as their own terms, since those remain valid matches even though they
+aren't the bare word "pass" alone.
+
+Known, honest remaining limitation, not attempted to be solved here:
+"pass" is also an ordinary English verb ("please pass this along to
+HR"), and no regex can distinguish that usage from a genuine
+credential hint using the same word -- this is a real ambiguity in
+the language itself, not a matching defect like the original
+substring bug. Judged an acceptable, disclosed tradeoff: administrative
+description/notes fields are short, account-specific annotations, not
+general correspondence, so this specific collision is expected to be
+substantially rarer in practice than the class of false positives this
+fix actually eliminates.
 """
 
 PLUGIN = {
     "plugin_id": 1021,
     "category": "User Accounts",
     "name": "Account Description/Notes Field May Contain Password Material",
-    "version": "1.4",
-    "revision_date": "2026-07-15",
+    "version": "1.5",
+    "revision_date": "2026-08-05",
     "remediation": (
     'Remove the sensitive text from the field immediately, but do not treat '
     'that as sufficient remediation on its own -- the exposure already '
@@ -33,10 +57,12 @@ PLUGIN = {
         "plain LDAP query -- no elevated rights needed. A well-documented, "
         "extremely common real-world finding is admins leaving passwords "
         "or credential hints here during onboarding or password resets "
-        "(e.g. \"temp pass: Summer2026!\"). Detection here is a simple "
-        "substring match against 'pass'/'pwd', the same basic pattern "
-        "used in the real-world PowerView-based hunting technique this "
-        "is modeled on. A match should be treated as a probable "
+        "(e.g. \"temp pass: Summer2026!\"). Detection here is a "
+        "word-boundary match against the standalone word 'pass', or "
+        "against 'password'/'passwd'/'passphrase'/'pwd' -- not a bare "
+        "substring match, which would incorrectly flag ordinary words "
+        "like Compass, Passport, or bypass that merely contain 'pass' "
+        "as part of a longer word. A match should be treated as a probable "
         "credential exposure requiring rotation, not a formatting issue "
         "to quietly clean up. NOT downgraded when the account is "
         "disabled: the readable password value doesn't disappear when "
@@ -123,8 +149,8 @@ PLUGIN = {
         WHERE u.valid_to IS NULL
           AND u.client_id = %(client_id)s
           AND (
-                u.description ILIKE '%%pass%%' OR u.description ILIKE '%%pwd%%'
-                OR u.notes ILIKE '%%pass%%' OR u.notes ILIKE '%%pwd%%'
+                u.description ~* '\\mpass\\M|password|passwd|passphrase|\\mpwd\\M'
+                OR u.notes ~* '\\mpass\\M|password|passwd|passphrase|\\mpwd\\M'
               )
     """,
 }
