@@ -3438,6 +3438,33 @@ CREATE INDEX idx_ad_cert_oid_open ON ad_cert_oid (client_id, object_guid) WHERE 
 
 
 -- ============================================================================
+-- v30 ADDITIONS -- AD-integrated DNS zone dynamic-update posture.
+-- Added from the same discipline as the v29 batch: real primary-source
+-- verification ([MS-DNSP] itself) before building, not guessed at.
+-- ============================================================================
+
+SET search_path TO ad_intel, public;
+
+CREATE TABLE ad_dns_zone (
+    object_guid    UUID NOT NULL,
+    client_id      UUID NOT NULL,
+    version_id     BIGINT NOT NULL,
+    valid_from     TIMESTAMPTZ NOT NULL,
+    valid_to       TIMESTAMPTZ,
+    zone_name      TEXT NOT NULL,
+    allow_update   INTEGER,
+    PRIMARY KEY (version_id),
+    CHECK (valid_to IS NULL OR valid_to > valid_from),
+    FOREIGN KEY (object_guid, client_id) REFERENCES directory_object(object_guid, client_id) ON DELETE RESTRICT
+);
+COMMENT ON COLUMN ad_dns_zone.allow_update IS
+    'DSPROPERTY_ZONE_ALLOW_UPDATE per [MS-DNSP] 2.3.2.1.1 -- 0 = ZONE_UPDATE_OFF (no dynamic updates), '
+    '1 = ZONE_UPDATE_UNSECURE (both secure and nonsecure updates allowed -- the concerning value), '
+    '2 = ZONE_UPDATE_SECURE (secure updates only). NULL means the DSPROPERTY_ZONE_ALLOW_UPDATE '
+    'entry was not found in this zone''s dNSProperty values at all.';
+CREATE INDEX idx_ad_dns_zone_open ON ad_dns_zone (client_id, object_guid) WHERE valid_to IS NULL;
+
+-- ============================================================================
 -- PARTITIONED TABLE REGISTRY + INITIAL PARTITION CREATION
 -- [Consolidated manually -- this is DATA, not schema, so pg_dump
 --  --schema-only (which produced the rest of this file) correctly
