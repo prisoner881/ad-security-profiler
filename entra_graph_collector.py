@@ -2,7 +2,20 @@
 """
 entra_graph_collector.py -- Microsoft Entra ID / Graph API Email Collector
 
-VERSION: 0.4.0
+VERSION: 0.4.2
+
+CHANGELOG:
+    0.4.2 - Every 403 error message now explicitly explains the Delegated-
+            vs-Application permission-type distinction, not just consent
+            status -- a real case showed Entra's admin-consent checkmark
+            can be genuinely green while the permission is still useless
+            for this script's client_credentials (no signed-in user) auth
+            flow, because it was granted under the wrong permission type.
+    0.4.1 - resolve_client_id()'s --domain-fqdn lookup is now case-insensitive
+            (was an exact-case match, which caused a real "No client found"
+            failure from a one-character casing difference). Added --client-id
+            as a direct alternative that bypasses the domain-name lookup
+            entirely.
 
 WHAT THIS IS
     Harvests user email data (mail, proxyAddresses, and related fields)
@@ -94,7 +107,7 @@ PG_DBNAME = "adprofiler"
 PG_USER = "postgres"
 PG_PASSWORD = "Project2501"
 
-VERSION = "0.4.0"
+VERSION = "0.4.2"
 
 GRAPH_TOKEN_URL_TMPL = "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
 GRAPH_USERS_URL = "https://graph.microsoft.com/v1.0/users"
@@ -234,7 +247,11 @@ def get_graph_token(tenant_id, app_id, app_secret):
         raise CollectorAbort(
             f"Token request failed (HTTP {resp.status_code}): {detail}\n"
             "Common causes: wrong tenant ID, wrong app ID/secret, secret "
-            "expired, or the application permission was never admin-consented."
+            "expired, or an application permission was never admin-consented. "
+            "If a downstream Graph call fails with 403 despite Entra showing "
+            "the permission as granted, see that error for a more specific "
+            "explanation -- it's very often a Delegated-vs-Application "
+            "permission-type mix-up, not a consent problem at all."
         )
     return resp.json()["access_token"]
 
@@ -263,9 +280,16 @@ def fetch_all_users(token):
         if resp.status_code == 403:
             raise CollectorAbort(
                 "Graph returned HTTP 403 (Forbidden). The application permission "
-                "(User.Read.All) likely was never admin-consented in the Entra "
-                "admin center -- API permissions must show 'Granted for <tenant>', "
-                "not just 'Not granted'."
+                "(User.Read.All) is likely either not admin-consented, or -- just "
+                "as commonly -- consented under the wrong permission TYPE. Entra "
+                "lists 'Delegated permissions' and 'Application permissions' as "
+                "two entirely separate sections that can both contain a "
+                "permission with this exact same name; only the Application-type "
+                "grant works for this script, since it authenticates unattended "
+                "(client_credentials) with no signed-in user. In the App "
+                "Registration's API permissions blade, confirm User.Read.All is "
+                "listed under 'Application permissions' specifically (not "
+                "'Delegated permissions'), showing 'Granted for <tenant>'."
             )
         if resp.status_code != 200:
             raise CollectorAbort(f"Graph request failed (HTTP {resp.status_code}): {resp.text}")
@@ -302,9 +326,17 @@ def fetch_directory_roles_with_members(token):
     if resp.status_code == 403:
         raise CollectorAbort(
             "Graph returned HTTP 403 (Forbidden) fetching directory roles. The "
-            "application permission (RoleManagement.Read.Directory) likely was "
-            "never granted or admin-consented -- API permissions must show "
-            "'Granted for <tenant>', not just 'Not granted'."
+            "application permission (RoleManagement.Read.Directory) is likely "
+            "either not admin-consented, or -- just as commonly -- consented "
+            "under the wrong permission TYPE. Entra lists 'Delegated "
+            "permissions' and 'Application permissions' as two entirely "
+            "separate sections that can both contain a permission with this "
+            "exact same name; only the Application-type grant works for this "
+            "script, since it authenticates unattended (client_credentials) "
+            "with no signed-in user. In the App Registration's API permissions "
+            "blade, confirm RoleManagement.Read.Directory is listed under "
+            "'Application permissions' specifically (not 'Delegated "
+            "permissions'), showing 'Granted for <tenant>'."
         )
     if resp.status_code != 200:
         raise CollectorAbort(f"Graph request failed (HTTP {resp.status_code}): {resp.text}")
@@ -341,9 +373,20 @@ def fetch_security_defaults(token):
         raise CollectorAbort(f"Could not reach Microsoft Graph: {exc}")
     if resp.status_code == 403:
         raise CollectorAbort(
-            "Graph returned HTTP 403 (Forbidden) fetching Security Defaults status. "
-            "The application permission (Policy.Read.All) likely was never granted "
-            "or admin-consented."
+            "Graph returned HTTP 403 (Forbidden) fetching Security Defaults "
+            "status. The application permission (Policy.Read.All) is likely "
+            "either not admin-consented, or -- just as commonly -- consented "
+            "under the wrong permission TYPE. Entra lists 'Delegated "
+            "permissions' and 'Application permissions' as two entirely "
+            "separate sections that can both contain a permission with this "
+            "exact same name; only the Application-type grant works for this "
+            "script, since it authenticates unattended (client_credentials) "
+            "with no signed-in user, and admin consent on the Delegated "
+            "version won't apply here even though Entra will still show it as "
+            "granted. In the App Registration's API permissions blade, confirm "
+            "Policy.Read.All is listed under 'Application permissions' "
+            "specifically (not 'Delegated permissions'), showing 'Granted for "
+            "<tenant>'."
         )
     if resp.status_code != 200:
         raise CollectorAbort(f"Graph request failed (HTTP {resp.status_code}): {resp.text}")
@@ -362,8 +405,19 @@ def fetch_conditional_access_policies(token):
     if resp.status_code == 403:
         raise CollectorAbort(
             "Graph returned HTTP 403 (Forbidden) fetching Conditional Access "
-            "policies. The application permission (Policy.Read.All) likely was "
-            "never granted or admin-consented."
+            "policies. The application permission (Policy.Read.All) is likely "
+            "either not admin-consented, or -- just as commonly -- consented "
+            "under the wrong permission TYPE. Entra lists 'Delegated "
+            "permissions' and 'Application permissions' as two entirely "
+            "separate sections that can both contain a permission with this "
+            "exact same name; only the Application-type grant works for this "
+            "script, since it authenticates unattended (client_credentials) "
+            "with no signed-in user, and admin consent on the Delegated "
+            "version won't apply here even though Entra will still show it as "
+            "granted. In the App Registration's API permissions blade, confirm "
+            "Policy.Read.All is listed under 'Application permissions' "
+            "specifically (not 'Delegated permissions'), showing 'Granted for "
+            "<tenant>'."
         )
     if resp.status_code != 200:
         raise CollectorAbort(f"Graph request failed (HTTP {resp.status_code}): {resp.text}")
@@ -393,8 +447,18 @@ def fetch_applications(token):
         if resp.status_code == 403:
             raise CollectorAbort(
                 "Graph returned HTTP 403 (Forbidden) fetching applications. The "
-                "application permission (Application.Read.All) likely was never "
-                "granted or admin-consented."
+                "application permission (Application.Read.All) is likely "
+                "either not admin-consented, or -- just as commonly -- "
+                "consented under the wrong permission TYPE. Entra lists "
+                "'Delegated permissions' and 'Application permissions' as two "
+                "entirely separate sections that can both contain a permission "
+                "with this exact same name; only the Application-type grant "
+                "works for this script, since it authenticates unattended "
+                "(client_credentials) with no signed-in user. In the App "
+                "Registration's API permissions blade, confirm "
+                "Application.Read.All is listed under 'Application "
+                "permissions' specifically (not 'Delegated permissions'), "
+                "showing 'Granted for <tenant>'."
             )
         if resp.status_code != 200:
             raise CollectorAbort(f"Graph request failed (HTTP {resp.status_code}): {resp.text}")
@@ -434,7 +498,16 @@ def fetch_dangerous_permission_grants(token):
         raise CollectorAbort(
             "Graph returned HTTP 403 (Forbidden) fetching the Microsoft Graph "
             "service principal. The application permission (Directory.Read.All) "
-            "likely was never granted or admin-consented."
+            "is likely either not admin-consented, or -- just as commonly -- "
+            "consented under the wrong permission TYPE. Entra lists 'Delegated "
+            "permissions' and 'Application permissions' as two entirely "
+            "separate sections that can both contain a permission with this "
+            "exact same name; only the Application-type grant works for this "
+            "script, since it authenticates unattended (client_credentials) "
+            "with no signed-in user. In the App Registration's API "
+            "permissions blade, confirm Directory.Read.All is listed under "
+            "'Application permissions' specifically (not 'Delegated "
+            "permissions'), showing 'Granted for <tenant>'."
         )
     if resp.status_code != 200:
         raise CollectorAbort(f"Graph request failed (HTTP {resp.status_code}): {resp.text}")
@@ -490,25 +563,54 @@ def connect_postgres():
     return conn
 
 
-def resolve_client_id(pg_conn, domain_fqdn):
+def resolve_client_id(pg_conn, domain_fqdn=None, client_id_override=None):
     """Looks up the EXISTING client row created by adprofiler.py's own
     LDAP collection -- deliberately does not create a new client row
     here. A Graph-only client with no prior LDAP baseline is a real,
     supportable scenario in principle, but this script's whole value is
     correlating cloud users back to on-prem accounts, which needs that
     baseline to already exist -- so absence is treated as a setup
-    error to fix, not silently worked around."""
+    error to fix, not silently worked around.
+
+    [v0.4.1] Two changes, both prompted by a real case: an operator
+    typed --domain-fqdn PCC-domain.pima.edu (lowercase 'd') when the
+    value adprofiler.py actually stored was PCC-Domain.pima.edu
+    (capital 'D') -- a one-character casing mismatch against what used
+    to be a case-sensitive exact match, producing a "No client found"
+    error that looked like a deeper domain-mismatch problem but wasn't.
+    First, the domain_fqdn lookup is now case-insensitive (LOWER() on
+    both sides) -- AD domain names are not case-sensitive in any
+    practical sense, so an exact-case match was never actually
+    protecting against anything real, only creating a footgun. Second,
+    --client-id is now available as a direct alternative: skips the
+    domain_fqdn lookup (and its casing question) entirely for anyone
+    who'd rather just supply the GUID from the client table directly."""
+    if client_id_override:
+        with pg_conn.cursor() as cur:
+            cur.execute("SET search_path TO ad_intel, public;")
+            cur.execute("SELECT client_id FROM client WHERE client_id = %s;", (client_id_override,))
+            row = cur.fetchone()
+        if row is None:
+            raise CollectorAbort(
+                f"No client found for client_id='{client_id_override}'. Double-check "
+                "this GUID against the client table's own client_id column."
+            )
+        return row[0]
+
     with pg_conn.cursor() as cur:
         cur.execute("SET search_path TO ad_intel, public;")
-        cur.execute("SELECT client_id FROM client WHERE domain_fqdn = %s;", (domain_fqdn,))
+        cur.execute("SELECT client_id FROM client WHERE lower(domain_fqdn) = lower(%s);", (domain_fqdn,))
         row = cur.fetchone()
     if row is None:
         raise CollectorAbort(
-            f"No client found for domain_fqdn='{domain_fqdn}'. This script "
-            "enriches an existing client record with cloud email data -- run "
-            "adprofiler.py against this domain's on-prem AD at least once "
-            "first, so there's a client row (and object_sid values) to "
-            "correlate Graph users against."
+            f"No client found for domain_fqdn='{domain_fqdn}' (case-insensitive "
+            "match attempted). This script enriches an existing client record "
+            "with cloud email data -- run adprofiler.py against this domain's "
+            "on-prem AD at least once first, so there's a client row (and "
+            "object_sid values) to correlate Graph users against. If "
+            "adprofiler.py has already been run, double-check this value "
+            "against the domain name shown at the top of its own output, or "
+            "use --client-id instead to bypass this lookup entirely."
         )
     return row[0]
 
@@ -736,19 +838,31 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="entra_graph_collector.py -- Microsoft Graph email collector, v" + VERSION,
     )
-    parser.add_argument("--tenant-id", required=True,
-                         help="Entra ID tenant ID (GUID) or verified domain name.")
-    parser.add_argument("--app-id", required=True,
-                         help="Entra App Registration's Application (client) ID.")
+    parser.add_argument("--tenant-id", default=None,
+                         help="Entra ID tenant ID (GUID) or verified domain name. "
+                              "Required unless --version is given.")
+    parser.add_argument("--app-id", default=None,
+                         help="Entra App Registration's Application (client) ID. "
+                              "Required unless --version is given.")
     parser.add_argument("--app-secret", default=None,
                          help="App Registration client secret. If omitted, you "
                               "will be prompted securely (recommended).")
-    parser.add_argument("--domain-fqdn", required=True,
+    parser.add_argument("--domain-fqdn", default=None,
                          help="The on-prem AD domain FQDN already collected by "
                               "adprofiler.py (e.g. forge.local) -- used to find "
-                              "the existing client record to enrich.")
+                              "the existing client record to enrich. Matched "
+                              "case-insensitively. Required unless --client-id "
+                              "is given instead.")
+    parser.add_argument("--client-id", default=None,
+                         help="Alternative to --domain-fqdn: the client_id GUID "
+                              "directly from the client table, bypassing the "
+                              "domain-name lookup entirely.")
     parser.add_argument("--version", action="store_true", help="Print version and exit.")
     args = parser.parse_args()
+    if not args.version and (not args.tenant_id or not args.app_id):
+        parser.error("the following arguments are required: --tenant-id, --app-id")
+    if not args.version and not args.domain_fqdn and not args.client_id:
+        parser.error("one of the following arguments is required: --domain-fqdn, --client-id")
     return args
 
 
@@ -778,8 +892,9 @@ def main():
         pg_conn = connect_postgres()
         log_success("Connected to PostgreSQL.")
 
-        client_id = resolve_client_id(pg_conn, args.domain_fqdn)
-        log_success(f"Resolved client record for {args.domain_fqdn}.")
+        client_id = resolve_client_id(pg_conn, domain_fqdn=args.domain_fqdn, client_id_override=args.client_id)
+        log_success(f"Resolved client record for "
+                    f"{'client_id=' + args.client_id if args.client_id else args.domain_fqdn}.")
 
         log_header("Collecting Users from Microsoft Graph")
         users = fetch_all_users(token)
