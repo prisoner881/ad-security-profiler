@@ -1047,7 +1047,7 @@ def parse_dns_zone_allow_update(raw_dns_property_values):
     return None
 
 
-
+def parse_security_descriptor(raw_sd_bytes):
     """[v0.3.0] Parses a raw nTSecurityDescriptor (or any attribute using
     the same binary format, e.g. msDS-AllowedToActOnBehalfOfOtherIdentity
     for RBCD -- Microsoft deliberately reuses the SD format there so the
