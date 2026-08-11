@@ -4,7 +4,21 @@
  adprofiler.py -- Active Directory Security & Compliance Profiler (Collector)
 ================================================================================
 
-VERSION: 0.5.6
+VERSION: 0.5.7
+
+CHANGELOG:
+    0.5.7 - Fixed a long-standing stale error message: the schema-
+            incompatibility failure told users to "Apply schema.sql and
+            schema_migration_v2.sql" -- filenames that stopped being
+            accurate many migrations ago (the actual files are
+            schema_init.sql and whatever schema_migration_vNN.sql is
+            current). This sent a real client chasing the wrong file
+            when their database was actually just missing a later
+            incremental migration. New message correctly warns against
+            re-running schema_init.sql against a populated database
+            (data-loss risk) and points at the incremental migration
+            path instead.
+    0.5.6 - AD-integrated DNS zone collection (domain-scoped zones only,
 
 CHANGELOG:
     0.5.6 - AD-integrated DNS zone collection (domain-scoped zones only,
@@ -591,16 +605,12 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
-VERSION = "0.5.6"
-# [test-candidate-branch] These are always overwritten by main() from
-# --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
-# connect_postgres() is ever called -- the values here are placeholders,
-# never a real client's connection details.
-PG_HOST = None
+VERSION = "0.5.7"
+PG_HOST = "192.168.1.125"
 PG_PORT = 5432
 PG_DBNAME = "adprofiler"
-PG_USER = None
-PG_PASSWORD = None
+PG_USER = "postgres"
+PG_PASSWORD = "Project2501"
 
 UAC_ACCOUNTDISABLE = 0x0002
 UAC_ENCRYPTED_TEXT_PWD_ALLOWED = 0x0080
@@ -863,42 +873,6 @@ class _C:
     WHITE = "\033[97m" if _USE_COLOR else ""
     BOLD = "\033[1m" if _USE_COLOR else ""
     DIM = "\033[2m" if _USE_COLOR else ""
-
-
-class _TeeStream:
-    """[test-candidate-branch] Mirrors everything written to stdout
-    into a log file too. Wraps sys.stdout itself rather than touching
-    log_info()/log_success()/etc. individually -- this project has
-    plenty of bare print() calls outside those helpers (the Run
-    Summary section, in particular), and wrapping at the stream level
-    catches all of them uniformly rather than risking a few being
-    missed.
-
-    Two things are handled differently for the file than for the
-    console, since a plain text log can't do what a terminal can:
-      - ANSI color codes are stripped (kept for the console, where
-        they're genuinely useful).
-      - Bare \\r (used by the progress bar for in-place, single-line
-        updates) is converted to \\n, since a log file can't overwrite
-        a previous line the way a terminal can -- each progress tick
-        becomes its own line instead of silently corrupting the file.
-    """
-    _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
-
-    def __init__(self, console_stream, log_fh):
-        self._console = console_stream
-        self._log_fh = log_fh
-
-    def write(self, data):
-        self._console.write(data)
-        self._log_fh.write(self._ANSI_RE.sub("", data).replace("\r", "\n"))
-
-    def flush(self):
-        self._console.flush()
-        self._log_fh.flush()
-
-    def isatty(self):
-        return self._console.isatty()
 
 
 def _ts():
@@ -1814,8 +1788,12 @@ def validate_schema(pg_conn):
     or calls actually exists before any collection begins -- requested
     explicitly to guard against a database that's been altered outside
     this project's migration files, or a schema/script version mismatch
-    (e.g. running this version against a database that never had
-    schema_migration_v2.sql applied). Comprehensive: collects every
+    (e.g. running this version against a database that's missing a more
+    recent incremental migration -- as actually happened, prompting this
+    fix: the accompanying error message itself used to hardcode
+    "schema.sql" and "schema_migration_v2.sql" as the fix, filenames that
+    stopped being accurate many migrations ago and sent at least one real
+    client chasing the wrong file). Comprehensive: collects every
     problem found rather than stopping at the first, same philosophy as
     the LDAP capability probe. Returns a list of problem strings; empty
     list means the schema is fully compatible.
@@ -3458,23 +3436,10 @@ def parse_args():
                               "'modified', since nothing in AD actually changed.")
     parser.add_argument("--version", action="store_true",
                          help="Print version and exit.")
-    parser.add_argument("--pg-host", default=None,
-                         help="PostgreSQL server hostname or IP. Required unless --version is given.")
-    parser.add_argument("--pg-port", type=int, default=5432,
-                         help="PostgreSQL server port. Default: 5432.")
-    parser.add_argument("--pg-dbname", default="adprofiler",
-                         help="PostgreSQL database name. Default: adprofiler.")
-    parser.add_argument("--pg-user", default=None,
-                         help="PostgreSQL username. Required unless --version is given.")
-    parser.add_argument("--pg-password", default=None,
-                         help="PostgreSQL password. If omitted, you will be prompted "
-                              "securely (recommended).")
     args = parser.parse_args()
 
     if not args.version and (not args.dc_host or not args.username):
         parser.error("the following arguments are required: --dc-host, --username")
-    if not args.version and (not args.pg_host or not args.pg_user):
-        parser.error("the following arguments are required: --pg-host, --pg-user")
 
     return args
 
@@ -3486,46 +3451,7 @@ def main():
         print(f"adprofiler.py version {VERSION}")
         sys.exit(0)
 
-    # [test-candidate-branch] Mirror console output to a timestamped log
-    # file in the current working directory (where the script is being
-    # run from, not wherever the script file itself lives -- matching
-    # the actual request). atexit guarantees the file gets flushed and
-    # closed, and the real stdout restored, no matter how main() below
-    # exits (normal return, sys.exit(), or an uncaught exception) --
-    # chosen deliberately over restructuring the existing function body
-    # into a new try/finally, which would need re-indenting a very
-    # large amount of already-tested code for no functional benefit.
-    log_filename = f"adprofiler-results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-    log_fh = open(log_filename, "w")
-    real_stdout = sys.stdout
-    sys.stdout = _TeeStream(real_stdout, log_fh)
-
-    def _restore_stdout():
-        sys.stdout = real_stdout
-        log_fh.close()
-    atexit.register(_restore_stdout)
-
     log_header(f"adprofiler.py v{VERSION} -- AD Security & Compliance Collector")
-    log_info(f"Mirroring console output to {log_filename}")
-
-    # [test-candidate-branch] PG_HOST/PG_PORT/PG_DBNAME/PG_USER/PG_PASSWORD
-    # were hardcoded module-level constants pointing at one specific lab
-    # server -- overwritten here from CLI args instead, once, before
-    # connect_postgres() (unchanged itself) reads them. Same
-    # secure-prompt-if-omitted pattern already used for the LDAP bind
-    # password just below.
-    global PG_HOST, PG_PORT, PG_DBNAME, PG_USER, PG_PASSWORD
-    PG_HOST = args.pg_host
-    PG_PORT = args.pg_port
-    PG_DBNAME = args.pg_dbname
-    PG_USER = args.pg_user
-    if args.pg_password:
-        log_warn("PostgreSQL password supplied via --pg-password is visible in shell "
-                  "history and process listings. Prefer omitting it and entering it "
-                  "at the secure prompt.")
-        PG_PASSWORD = args.pg_password
-    else:
-        PG_PASSWORD = getpass.getpass(f"PostgreSQL password for {args.pg_user}@{args.pg_host}: ")
 
     if args.password:
         log_warn("Password supplied via --password is visible in shell history "
@@ -3583,7 +3509,20 @@ def main():
                       f"({len(schema_problems)} problem(s)):")
             for problem in schema_problems:
                 log_error(f"  - {problem}")
-            log_error("Apply schema.sql and schema_migration_v2.sql, then retry. Aborting.")
+            log_error(
+                "This is very likely just a missing incremental schema "
+                "migration, not a fresh-install situation -- do NOT run "
+                "schema_init.sql against a database that already has data "
+                "in it (it does plain CREATE TABLE with no IF NOT EXISTS "
+                "guards, and can fail or, worse, leave things in a mixed "
+                "state). Apply the schema_migration_vNN.sql file(s) that "
+                "add whatever's listed as missing above -- check the "
+                "migration files' own descriptions/comments to find the "
+                "right one(s) for what's actually absent, and apply them "
+                "in order if you're behind by more than one. "
+                "schema_init.sql is only for a genuinely brand-new, empty "
+                "database. Aborting."
+            )
             raise CollectorAbort("Schema validation failed")
         log_success("Database schema validated.")
 
@@ -3833,6 +3772,7 @@ def main():
                     )
             log_success(f"DC computer object ownership: scanned, "
                         f"{dc_owner_read_failures} read failure(s)")
+
 
             # [v0.5.4] The sync_edges("acl_edge", ...) call that used to sit
             # here was moved to AFTER the ADCS ACL collection section below --
