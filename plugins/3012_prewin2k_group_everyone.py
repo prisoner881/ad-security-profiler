@@ -1,7 +1,12 @@
 """
 Plugin 3012: Pre-Windows 2000 Compatible Access Group Contains Everyone or Anonymous Logon
 
-Directly cited from DISA STIG SV-9044r3 and confirmed against Microsoft's
+Directly cited against DISA Active Directory Domain STIG V-243486
+(CAT II, confirmed against the current V3R7 text directly -- the
+legacy SV-9044r3 identifier this plugin originally cited is the same
+finding under DISA's pre-2016 numbering scheme, still shown in the
+STIG's own "Vuln IDs" list alongside V-243486, but V-243486 is the
+identifier actually in current use) and confirmed against Microsoft's
 own protocol specification (MS-ADTS). The Pre-Windows 2000 Compatible
 Access group (RID 554, a legacy NT4-compatibility group) grants broad
 READ access to most attributes of most domain objects. If Everyone
@@ -18,8 +23,8 @@ PLUGIN = {
     "plugin_id": 3012,
     "category": "Groups",
     "name": "Pre-Windows 2000 Compatible Access Group Contains Everyone or Anonymous Logon",
-    "version": "1.2",
-    "revision_date": "2026-07-15",
+    "version": "1.3",
+    "revision_date": "2026-08-12",
     "remediation": (
         "Remove Everyone and/or Anonymous Logon from the Pre-Windows "
         "2000 Compatible Access group (Builtin container in ADUC, or "
@@ -39,7 +44,8 @@ PLUGIN = {
          "url": "https://www.stigviewer.com/stigs/active_directory_domain/2024-09-13/finding/V-243486"},
     ],
     "description": (
-        "Directly cited from DISA STIG SV-9044r3: \"Ensure the "
+        "Directly cited against DISA Active Directory Domain STIG "
+        "V-243486: \"Ensure the "
         "'Anonymous Logon' and 'Everyone' groups are not members of "
         "the 'Pre-Windows 2000 Compatible Access group'... By default, "
         "these groups are not included in current Windows versions.\" "
@@ -58,17 +64,16 @@ PLUGIN = {
         "STIG's own baseline -- flagging it would mean this check fires "
         "in nearly every real domain regardless of hardening effort."
     ),
-    "base_severity": "high",
+    "base_severity": "medium",
     "query": """
         SELECT
             'fail' AS status,
             fsp.object_guid,
-            'CAT_I' AS stig_severity,
-            'DISA STIG SV-9044r3: Anonymous Logon and Everyone must not be members of '
-                'the Pre-Windows 2000 Compatible Access group' AS stig_reference,
+            'CAT_II' AS stig_severity,
+            'DISA Active Directory Domain STIG V-243486' AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
-            'high' AS fd_severity,
+            'medium' AS fd_severity,
             fsp.well_known_name || ' is a member of the Pre-Windows 2000 Compatible '
                 'Access group' AS summary,
             jsonb_build_object('well_known_name', fsp.well_known_name, 'well_known_sid', fspdo.object_sid) AS detail

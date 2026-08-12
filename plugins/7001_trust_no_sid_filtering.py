@@ -48,10 +48,12 @@ PLUGIN = {
         "that same trust boundary."
     ),
     "control_id": "TRUST-101",
-    "framework_tags": [],
+    "framework_tags": ["DISA-STIG"],
     "references": [
         {"title": "dirkjanm.io: Active Directory forest trusts -- How does SID filtering work?",
          "url": "https://dirkjanm.io/active-directory-forest-trusts-part-one-how-does-sid-filtering-work/"},
+        {"title": "DISA Active Directory Domain STIG V-243484: Security identifiers (SIDs) must be configured to use only authentication data of directly trusted external or forest trust",
+         "url": "https://cyber.trackr.live/stig/Active_Directory_Domain/3/7#V-243484"},
     ],
     "description": (
         "SID filtering (trustAttributes bit TRUST_ATTRIBUTE_QUARANTINED_"
@@ -74,8 +76,8 @@ PLUGIN = {
         SELECT
             'fail' AS status,
             t.object_guid,
-            NULL AS stig_severity,
-            NULL AS stig_reference,
+            'CAT_II' AS stig_severity,
+            'DISA Active Directory Domain STIG V-243484' AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
             'high' AS fd_severity,
