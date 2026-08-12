@@ -39,10 +39,12 @@ PLUGIN = {
         "here, no action is needed for that specific account."
     ),
     "control_id": "USR-140",
-    "framework_tags": [],
+    "framework_tags": ["DISA-STIG"],
     "references": [
         {"title": "Microsoft: Protected Users Security Group",
          "url": "https://learn.microsoft.com/en-us/windows-server/security/credentials-protection-and-management/protected-users-security-group"},
+        {"title": "DISA Active Directory Domain STIG V-243477: User accounts with domain level administrative privileges must be members of the Protected Users group",
+         "url": "https://cyber.trackr.live/stig/Active_Directory_Domain/3/7#V-243477"},
         {"title": "PingCastle: Privileged Accounts rules -- P-ProtectedUsers",
          "url": "https://pingcastle.com/PingCastleFiles/ad_hc_rules_list.html"},
     ],
@@ -97,8 +99,8 @@ PLUGIN = {
         SELECT
             'warn' AS status,
             u.object_guid,
-            NULL AS stig_severity,
-            NULL AS stig_reference,
+            'CAT_II' AS stig_severity,
+            'DISA Active Directory Domain STIG V-243477' AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
             'medium' AS fd_severity,

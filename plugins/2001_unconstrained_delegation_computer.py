@@ -28,10 +28,12 @@ PLUGIN = {
         "meantime."
     ),
     "control_id": "DELEG-003",
-    "framework_tags": [],
+    "framework_tags": ["DISA-STIG"],
     "references": [
         {"title": "MITRE ATT&CK T1558: Steal or Forge Kerberos Tickets",
          "url": "https://attack.mitre.org/techniques/T1558/"},
+        {"title": "DISA Active Directory Domain STIG V-243478: Domain-joined systems (excluding domain controllers) must not be configured for unconstrained delegation",
+         "url": "https://cyber.trackr.live/stig/Active_Directory_Domain/3/7#V-243478"},
     ],
     "description": (
         "Unconstrained delegation on a domain controller is normal and "
@@ -54,8 +56,8 @@ PLUGIN = {
         SELECT
             'fail' AS status,
             c.object_guid,
-            NULL AS stig_severity,
-            NULL AS stig_reference,
+            'CAT_II' AS stig_severity,
+            'DISA Active Directory Domain STIG V-243478' AS stig_reference,
             'critical' AS tool_severity,
             'PingCastle: unconstrained delegation rule -- "Kerberos unconstrained '
                 'delegation allows a service to reuse a user''s Ticket Granting '

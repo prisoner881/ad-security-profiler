@@ -35,10 +35,12 @@ PLUGIN = {
         "versions against plugin 2003's findings first."
     ),
     "control_id": "POLICY-008",
-    "framework_tags": [],
+    "framework_tags": ["DISA-STIG"],
     "references": [
         {"title": "Microsoft: Active Directory Domain Services functional levels",
          "url": "https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/active-directory-functional-levels"},
+        {"title": "DISA Active Directory Domain STIG V-243480: The domain functional level must be at a Windows Server version still supported by Microsoft",
+         "url": "https://cyber.trackr.live/stig/Active_Directory_Domain/3/7#V-243480"},
     ],
     "description": (
         "Direct analog to computer-account plugin 2003, applied to the "
@@ -66,8 +68,8 @@ PLUGIN = {
         SELECT
             'fail' AS status,
             d.object_guid,
-            NULL AS stig_severity,
-            NULL AS stig_reference,
+            'CAT_II' AS stig_severity,
+            'DISA Active Directory Domain STIG V-243480' AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
             CASE

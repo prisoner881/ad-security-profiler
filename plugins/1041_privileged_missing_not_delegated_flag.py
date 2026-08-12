@@ -37,12 +37,12 @@ PLUGIN = {
         "delegation targeting."
     ),
     "control_id": "USR-141",
-    "framework_tags": [],
+    "framework_tags": ["DISA-STIG"],
     "references": [
         {"title": "PingCastle: Privileged Accounts rules -- P-Delegated",
          "url": "https://pingcastle.com/PingCastleFiles/ad_hc_rules_list.html"},
-        {"title": "DISA STIG V-36435: Delegation of privileged accounts must be prohibited",
-         "url": "https://www.stigviewer.com/stig/active_directory_domain/2017-12-15/finding/V-36435"},
+        {"title": "DISA Active Directory Domain STIG V-243470: Delegation of privileged accounts must be prohibited",
+         "url": "https://cyber.trackr.live/stig/Active_Directory_Domain/3/7#V-243470"},
     ],
     "description": (
         "A privileged account (same broadened definition used "
@@ -88,8 +88,8 @@ PLUGIN = {
         SELECT
             'warn' AS status,
             u.object_guid,
-            NULL AS stig_severity,
-            NULL AS stig_reference,
+            'CAT_I' AS stig_severity,
+            'DISA Active Directory Domain STIG V-243470' AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
             'medium' AS fd_severity,

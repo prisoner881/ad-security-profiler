@@ -28,10 +28,12 @@ PLUGIN = {
         "versus a per-machine GPO scoping gap."
     ),
     "control_id": "CRED-101",
-    "framework_tags": [],
+    "framework_tags": ["DISA-STIG"],
     "references": [
         {"title": "Microsoft: Windows LAPS overview",
          "url": "https://learn.microsoft.com/en-us/windows-server/identity/laps/laps-overview"},
+        {"title": "DISA Active Directory Domain STIG V-243471: Local administrator accounts on domain systems must not share the same password",
+         "url": "https://cyber.trackr.live/stig/Active_Directory_Domain/3/7#V-243471"},
     ],
     "description": (
         "Neither ms-Mcs-AdmPwdExpirationTime (legacy LAPS) nor "
@@ -56,8 +58,8 @@ PLUGIN = {
         SELECT
             'warn' AS status,
             c.object_guid,
-            NULL AS stig_severity,
-            NULL AS stig_reference,
+            'CAT_II' AS stig_severity,
+            'DISA Active Directory Domain STIG V-243471' AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
             'medium' AS fd_severity,
