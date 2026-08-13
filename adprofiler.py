@@ -4,421 +4,50 @@
  adprofiler.py -- Active Directory Security & Compliance Profiler (Collector)
 ================================================================================
 
-VERSION: 0.5.6
+VERSION: 0.5.9
 
-CHANGELOG:
-    0.5.6 - AD-integrated DNS zone collection (domain-scoped zones only,
-            DomainDnsZones partition). Parses dNSProperty per [MS-DNSP]
-            2.3.2.1 to extract DSPROPERTY_ZONE_ALLOW_UPDATE. Supports
-            plugin 4025 (nonsecure dynamic updates).
-    0.5.5 - Domain controller computer-object ownership scanning (targeted
-            owner-only SD read, same low-cost profile as domain root/
-            AdminSDHolder -- not full ACE scanning). Supports plugin 4023.
-    0.5.4 - ADCS ACL collection: certificate template objects, CA
-            (pKIEnrollmentService) objects, each CA's own computer
-            object (cross-referenced via dNSHostName), and the Public
-            Key Services / Certificate Templates / Enrollment Services
-            containers, plus NTAuthCertificates (already collected as
-            an object, now also ACL-scanned). Enables ESC4 (template
-            ACL misconfiguration), ESC5 (PKI infrastructure object ACL
-            misconfiguration), and ESC7 (CA object ACL misconfiguration)
-            detection -- confirmed LDAP-native for all three before
-            building anything; ESC6/ESC16 were investigated and ruled
-            out as requiring the CA server's own registry/RPC interface,
-            outside this project's LDAP-only model. Required moving the
-            acl_edge sync_edges() call from immediately after the OU ACL
-            loop to after this new ADCS section -- see the comment left
-            in both spots for why a second, separate sync call would
-            have been a real bug (already proven once this session),
-            not a style choice.
-    0.5.3 - NTAuthCertificates collection (ad_ntauth_store). New
-            dependency: cryptography, for X.509/DER parsing -- this
-            project's first need for it, unlike security descriptor
-            parsing (impacket) which already existed for ACL
-            collection. Every certificate in the forest-wide
-            NTAuthCertificates object (trusted for smart card/
-            certificate-based domain logon) is parsed and cross-
-            referenced against known Enrollment Service CAs by plugin
-            6005, surfacing orphaned or unauthorized entries. Requires
-            schema_migration_v24.sql.
-    0.5.2 - Added admin_count to computer collection (previously users
-            and groups only). Extends plugins 3021 (missing
-            AdminSDHolder marker) and 5007 (privileged object owned by
-            an unprivileged account) to cover computers -- both had
-            explicitly documented this as a known gap since they were
-            first written. Requires schema_migration_v23.sql.
-    0.5.1 - gMSA password-reader tracking. No new object collection --
-            gMSAs are a schema subclass of computer (confirmed against
-            Microsoft's own [MS-ADSC] spec), already returned by the
-            existing computer collection pass. Added
-            msDS-GroupMSAMembership to COMPUTER_ATTRS (a full security
-            descriptor, same format as RBCD's own delegation attribute,
-            reused here for a different purpose: who can retrieve the
-            gMSA's computed password), with the same base64-encoding
-            special case in build_attributes_full() that RBCD's
-            attribute already needed, since normalize_value()'s generic
-            bytes fallback wasn't trusted for this syntax type without
-            direct verification against a real DC. Parsed into a new
-            dedicated table, gmsa_password_reader_edge -- deliberately
-            not reused into acl_edge or delegation_edge; see
-            resolve_gmsa_password_readers()'s own docstring for why.
-            Requires schema_migration_v22.sql.
-    0.5.0 - Organizational Units: full typed-table collection (ad_ou),
-            matching every other object class rather than a one-off.
-            gPLink (on both OUs and the domain object) resolved into a
-            new gpo_link_edge many-to-many table -- closes the
-            "orphaned GPO" and "which GPOs actually apply where" gaps
-            this project previously had zero visibility into. ACL
-            collection extended from domain root + AdminSDHolder only
-            to also cover every collected OU -- OU delegation
-            (GenericAll/WriteDacl/etc. over everything within it) is
-            one of the more common real-world privilege-escalation
-            paths, and this project had no visibility into it before.
-            Requires schema_migration_v21.sql.
-    0.4.2 - Fixed client.domain_fqdn being populated with args.dc_host
-            (the specific domain controller hostname typed at
-            --dc-host, e.g. 'df-dc-01.forge.local') instead of the
-            actual AD domain FQDN ('forge.local') -- close enough to
-            look right, wrong enough to break any lookup by the real
-            domain name. Found via entra_graph_collector.py's
-            --domain-fqdn, which needs the real domain name to find
-            the right client row. New base_dn_to_fqdn() derives the
-            correct value from base_dn's own DC= components instead,
-            which every run already resolves correctly regardless of
-            what hostname was passed at the command line. Existing
-            production client rows are NOT automatically corrected --
-            see the accompanying one-time UPDATE statement.
-    0.4.1 - Added --full-rescan: forces every object to get a fresh
-            version + typed-columns write this run, even when its raw
-            AD attributes are unchanged. Closes a real gap found on the
-            first live run against forge.local after v0.4.0's mail/
-            proxy_addresses/when_created columns shipped -- every
-            existing object's when_created (and, separately, well-
-            known-SID resolution for foreign security principals) came
-            back NULL/unresolved, because the change-detection path
-            that recomputes typed columns only runs when an object's
-            raw attributes actually differ from what's already stored.
-            None of forge.local's 146 objects had genuinely changed
-            since baseline, so none of them ever got the new columns
-            backfilled -- not a data-quality bug, but a gap in how
-            newly-added derived data reaches already-baselined objects.
-            Recorded honestly as change_kind='rescanned' (new enum
-            value), not 'modified', since nothing in AD actually
-            changed. Requires schema_migration_v19.sql.
-    0.4.0 - Added mail/proxyAddresses collection for users, and
-            whenCreated promoted to a first-class when_created column
-            for users, computers, and groups (previously fetched and
-            stored only inside attributes_full's raw JSONB, never
-            surfaced as a queryable column). Driven by three new
-            "inventory"-type plugins in adaudit.py v0.7.0 (a parallel
-            plugin type for snapshot listings, not findings) that
-            needed both. Requires schema_migration_v18.sql.
-    0.3.2 - Closed a real gap found during a follow-up ACL plugin-
-            generation pass: parse_security_descriptor() has computed
-            each scanned object's owner SID since v0.3.0, but nothing
-            ever persisted it -- silently discarded every run.
-            Ownership is a real, distinct security-relevant fact
-            (BloodHound's "Owns" edge: an owner implicitly holds
-            WRITE_DAC-equivalent rights regardless of what the DACL
-            itself says). Added directory_object.owner_sid (generic,
-            not scoped to one object type, matching object_sid's own
-            precedent) and threaded it through for both objects this
-            project currently scans ACLs for (domain root,
-            AdminSDHolder). Requires schema_migration_v17.sql.
-    0.3.1 - Added Enterprise Domain Controllers (S-1-5-9) to
-            WELL_KNOWN_SIDS, found via the first real run of ACL
-            collection against forge.local: this well-known SID
-            correctly gets collected as a foreignSecurityPrincipal
-            object (that part always worked), but had no display name
-            mapped, so plugin 5001 showed it as a raw SID string
-            instead of a readable name. No new collection needed --
-            purely a display fix; will self-correct on the next
-            collection run via the same change-detection mechanism
-            already used for every other typed-column update.
-    0.2.6 - Fixed a real, confirmed display bug found against a real run:
-            the per-category log line inside collect_object_class
-            ("<label>: N object(s) processed (X new, Y changed this
-            pass)") was printing the shared, run-WIDE cumulative
-            stats.created/stats.modified counters directly, not a count
-            scoped to that category. Invisible in a typical no-op delta
-            run (0 either way), but became obviously wrong once any
-            earlier category had genuine changes: every subsequent
-            category's line kept echoing that same stale cumulative
-            number, including categories with zero actual objects (e.g.
-            a "trusts" line reporting "2 changed" while also reporting
-            "0 trusts object(s) processed"). The shared counters
-            themselves were never wrong -- the final Run Summary's true
-            whole-run totals were always correct -- only this one
-            per-category line was reading the wrong value. Fixed by
-            snapshotting the counters at function entry and reporting
-            the delta. No schema change, no plugin change.
-    0.2.5 - Systematic gap-analysis pass against BloodHound/PingCastle's
-            actual finding catalogs. Two new collection additions found
-            necessary: (1) foreignSecurityPrincipal objects were never
-            collected at all -- well-known SIDs (Everyone, Anonymous
-            Logon, Authenticated Users) added to a group's membership
-            are represented as real AD objects under
-            CN=ForeignSecurityPrincipals, not literal accounts. This
-            directly explains the "N unresolved (not a collected
-            object)" line present in every single collection run
-            throughout this entire project. New minimal typed table
-            ad_foreign_security_principal, added to KNOWN_TYPED_TABLES
-            so it participates in the existing deletion-detection
-            machinery automatically. (2) dSHeuristics 7th character
-            (anonymous LDAP access, confirmed against MS-ADTS and DISA
-            STIG V-243503) folded into the existing Directory Service
-            object query already used for tombstone lifetime -- no new
-            LDAP round-trip. Requires schema_migration_v16.sql (includes
-            an enum addition that must commit in its own transaction
-            before anything reads the new value).
-    0.2.4 - Closed three more gaps found during a follow-up ad_domain
-            pass. laps_schema_present: whether LAPS is present anywhere
-            in the forest at all -- already computed and logged on every
-            run ("LAPS schema detected: ..."), but discarded rather than
-            stored. pwd_no_clear_change and pwd_allows_admin_lockout:
-            pwdProperties bits 0x4/0x8 -- pwdProperties has been
-            collected since the base schema, but only bits 0x1 and 0x10
-            were ever extracted from it. Requires
-            schema_migration_v15.sql.
-    0.2.3 - Fixed a real, confirmed bug in tombstone lifetime collection,
-            found while investigating a real "could not read
-            msDS-DeletedObjectLifetime" warning. Verified directly
-            against Microsoft's own protocol spec (MS-ADTS 1887de08):
-            msDS-DeletedObjectLifetime being unset is the COMMON case,
-            not an edge case, and the spec-correct fallback in that case
-            is the older tombstoneLifetime attribute on the same object
-            -- which the old code never even requested. The old
-            hardcoded last-resort default (180 days, used when nothing
-            could be read at all) was ALSO wrong -- per the same spec,
-            the correct last-resort default is 60 days. Now requests
-            both attributes in one search and applies the correct
-            two-tier precedence, with the correct final default. Also
-            added tombstone_lifetime_is_default, distinguishing a
-            CONFIRMED explicitly-configured value from an ASSUMED
-            default -- a real trust distinction for anything downstream
-            (e.g. adaudit.py plugin 4011) that evaluates this value.
-            Requires schema_migration_v14.sql.
-    0.2.2 - Added machine_account_quota (ms-DS-MachineAccountQuota --
-            never collected at all; controls how many computers an
-            ordinary user can join to the domain, defaults to 10 when
-            unset) and pwd_reversible_encryption_domain_wide (pwdProperties
-            bit 0x10, DOMAIN_PASSWORD_STORE_CLEARTEXT -- pwdProperties was
-            already collected but only bit 0x1 was ever extracted) to
-            ad_domain. Requires schema_migration_v13.sql.
-    0.2.1 - Added description, notes, and sid_history to ad_group -- the
-            same class of gap already closed on ad_user and ad_computer.
-            Deliberately did NOT add pwdLastSet or msDS-KeyCredentialLink:
-            groups are not authenticatable security principals, so
-            neither concept applies to them. Requires
-            schema_migration_v12.sql.
-    0.2.0 - Full audit of deletion/remediation handling across every data
-            point, prompted by a direct request to check whether the
-            v0.1.8/v0.1.9 computer-account bug had analogs elsewhere.
-            Findings: (1) ad_user was already correctly covered by the
-            same generic fix as ad_computer -- confirmed by inspection,
-            not just assumption. (2) Edge tables (group membership, SPNs,
-            delegation) are architecturally immune to this entire class
-            of bug -- sync_edges() compares a complete fresh LDAP read
-            against currently-open edges every single run and closes
-            anything not reconfirmed, with no dependency on isolated
-            deletion detection at all. (3) A real, different gap WAS
-            found: ad_fgpp and ad_enrollment_service objects are both
-            classified as the generic object_class='other' (shared with
-            OUs, containers, and DNS records), so the object_class-keyed
-            lookup used by both the v0.1.8 fix and the v0.1.9 repair
-            function could never have closed either of their typed
-            tables on deletion, regardless of collector version. Fixed
-            by replacing the object_class-keyed lookup entirely with
-            close_typed_row_if_open(), which checks every table in
-            KNOWN_TYPED_TABLES directly rather than trying to infer the
-            single right one -- sidesteps the ambiguity rather than
-            working around it, and needs no per-class mapping
-            maintenance for any future typed table either. Verified
-            against a staged FGPP-deletion scenario matching the exact
-            gap (object_class='other', typed row still open) -- correctly
-            repaired, where the previous object_class-keyed version could
-            not have caught it. Re-verified the existing computer-
-            deletion scenario and idempotency still hold after the
-            redesign. OBJECT_CLASS_TO_TYPED_TABLE removed, superseded.
-    0.1.9 - Fixed a real, confirmed follow-on to the v0.1.8 deletion bug.
-            v0.1.8 only closes a typed table row at the moment a
-            deletion is first detected -- it has no way to revisit an
-            object already marked directory_object.is_deleted=TRUE by an
-            EARLIER run (in particular, any run using the pre-v0.1.8
-            collector) whose typed row was never closed. Once that
-            happens, the object becomes permanently invisible to
-            collect_deleted_objects()'s own USN-watermark filter: the
-            deletion isn't "new" relative to any future run, since an
-            earlier run already consumed and advanced past it in the
-            watermark. Confirmed against a real case: two computer
-            accounts, deleted via ADUC and caught by an earlier
-            pre-v0.1.8 run, remained permanently visible to every
-            adaudit.py plugin even after upgrading to v0.1.8, because
-            nothing in v0.1.8 could ever revisit them again. Added
-            repair_orphaned_deleted_typed_rows(), a self-healing
-            reconciliation step that runs on EVERY invocation regardless
-            of run_type (not gated to delta runs, since it checks
-            already-persisted state rather than doing a fresh LDAP
-            query): any directory_object row with is_deleted=TRUE whose
-            typed table still shows valid_to IS NULL gets repaired,
-            regardless of when or by which collector version the
-            deletion was originally detected. Verified directly against
-            a staged stuck-orphan scenario (repairs correctly, and is
-            idempotent -- a second run finds nothing left to fix) and
-            confirmed harmless against the existing fresh-deletion
-            scenario in test_harness.py (0 repairs needed there, as
-            expected, since that deletion is caught within the same run
-            that has the v0.1.8 fix). Also fixed a UUID/text type
-            mismatch caught during this same testing: psycopg2 needs an
-            explicit ::uuid[] cast for a Python list of GUIDs passed to
-            = ANY(%s), or Postgres defaults to interpreting it as text[]
-            and the comparison fails outright.
-    0.1.8 - Fixed a real, confirmed bug: collect_deleted_objects() marked
-            directory_object.is_deleted correctly but never closed the
-            corresponding TYPED table row (ad_user/ad_computer/etc). Since
-            every adaudit.py plugin queries the typed table directly with
-            WHERE valid_to IS NULL, a deleted object's typed row stayed
-            open forever regardless of the actual AD deletion, and every
-            plugin kept flagging it indefinitely. Confirmed against a real
-            case: two computer accounts deleted via ADUC continued
-            appearing in every finding across a subsequent adaudit.py run
-            with no indication anything had changed. Now closes the
-            matching typed table row in the same pass. Verified end-to-end
-            via a new deletion scenario added to test_harness.py, not just
-            code inspection.
-    0.1.7 - Closed three more gaps found during a systematic final pass
-            over ad_computer: is_enabled was never computed for computer
-            accounts at all (present since day one for ad_user), so no
-            computer plugin has ever distinguished a disabled machine
-            account from an active one. Also added primary_group_id and
-            sid_history to ad_computer -- both apply to computer objects
-            the same way they do to user accounts. Requires
-            schema_migration_v11.sql.
-    0.1.6 - Added pwd_last_set, description, notes, and key_credential_count
-            to ad_computer -- the same class of gap closed on ad_user
-            (password age, description-field password hunting, Shadow
-            Credentials) applies equally to computer accounts and was
-            never collected for them. Requires schema_migration_v10.sql.
-    0.1.5 - Added description/notes (AD's description/info attributes --
-            well-documented location for accidentally-left password
-            material) and key_credential_count (presence/count of
-            msDS-KeyCredentialLink -- Shadow Credentials / Windows Hello
-            for Business key material; count only, not per-entry parsing)
-            to ad_user, identified during a plugin-coverage gap review.
-            Requires schema_migration_v6.sql.
-    0.1.4 - Fixed max_pwd_age/min_pwd_age/lockout_duration always NULL on
-            ad_domain despite a real, non-default policy: same class of
-            bug as the earlier pwdLastSet fix, confirmed against ldap3's
-            own source -- minPwdAge/maxPwdAge/lockoutDuration/
-            lockOutObservationWindow are mapped to ldap3's
-            format_ad_timedelta formatter, which converts the raw value
-            into a Python timedelta object that normalize_value() had no
-            case for, silently stringifying it into something
-            ad_interval_to_seconds() couldn't parse. Fixed via the same
-            raw_attributes bypass pattern already used elsewhere. Also
-            added explicit handling for AD's INT64_MIN "never expires"
-            sentinel on maxPwdAge (confirmed in ldap3's own source),
-            which would otherwise have parsed as a ~29,000-year age
-            instead of "no maximum".
-    0.1.3 - Fixed max/min password age, lockout duration/observation
-            window, and password history count never being collected for
-            the domain-wide DEFAULT password policy (ad_domain), despite
-            the equivalent fields existing for FGPP -- surfaced when
-            asked a basic query question ("what's the max password age")
-            that had no answer for a domain without FGPP configured
-            (the common case, including this project's own test domain).
-    0.1.2 - Fixed ESC1-pattern false positives on built-in CA-infrastructure
-            templates (SubCA, CrossCA, CA, OfflineRouter -- confirmed
-            against real DC data). These structurally match the ESC1
-            pattern by default in every ADCS install (confirmed against
-            the SpecterOps "Certified Pre-Owned" whitepaper), but are
-            commonly never published on any CA, meaning nobody can
-            actually request from them regardless of flags. Added
-            collection of Enterprise CA (pKIEnrollmentService) objects
-            and their certificateTemplates list (new ad_enrollment_service
-            + cert_template_enabled_edge tables, schema_migration_v3.sql)
-            to add the missing is_enabled signal, the same precondition
-            Certipy's own -enabled flag checks -- filter on that before
-            treating enrollee_supplies_subject/client_authentication_capable
-            as a real finding.
-    0.1.1 - Fixed "invalid attribute type ms-Mcs-AdmPwdExpirationTime"
-            against a real DC: requesting an attribute name AD's schema
-            doesn't define at all fails the WHOLE search, not just that
-            field -- confirmed against a forest that never had legacy
-            LAPS schema-extended. The two LAPS attributes are no longer
-            in the static computer attribute list; now detected at
-            runtime via a Schema NC lookup and only requested if the
-            forest's schema actually defines them.
-    0.1.0 - Closed the "easy" audit-capability gaps identified in the
-            capability gap analysis: domain/forest trusts, GPO inventory
-            (existence/name/version, not linkage or SYSVOL settings
-            content), Fine-Grained Password Policies (new ad_fgpp +
-            fgpp_applies_to_edge tables), LAPS deployment status
-            (expiration timestamp ONLY, both legacy and modern Windows
-            LAPS -- never the password value), AD Certificate Services
-            template inventory (properties only, not enrollment ACLs --
-            new ad_cert_template table), and effective/nested group
-            membership closure (a new SQL view over existing data, not a
-            new collection). ACLs and RBCD remain deliberately out of
-            scope (same binary security-descriptor parsing constraint).
-            Added validate_schema(), run before any collection begins:
-            checks every table/column/function this script depends on
-            actually exists, with an itemized report on failure, to catch
-            a database that's out of sync with what this version expects
-            before it causes confusing mid-run errors. Requires
-            schema_migration_v2.sql applied on top of the original schema.
-    0.0.10 - Fixed member_count_direct always NULL: the code that was
-             supposed to fill it in after resolving group membership was
-             never actually written, despite a comment claiming it was.
-             Now set to the real AD-reported direct member count for
-             every group, every run.
-    0.0.9 - Fixed is_domain_controller always FALSE: now computed from
-            the SERVER_TRUST_ACCOUNT UAC bit (0x2000), the standard AD
-            signal for a DC, confirmed against real data. Fixed several
-            TEXT fields (user_principal_name, operating_system_version,
-            dns_hostname, etc.) storing the literal string "{}" instead
-            of NULL: ldap3 represents an absent single-valued attribute
-            as an empty list, and psycopg2 silently serializes an empty
-            Python list into a TEXT column as "{}" rather than erroring
-            or storing NULL. Fixed centrally in normalize_value().
-    0.0.8 - Upgraded the v0.0.7 timestamp fix after checking prior art
-            (BloodHound.py hit the identical bug in production --
-            fox-it/BloodHound.py#24). Now pulls pwdLastSet/
-            lastLogonTimestamp/lockoutTime from raw_attributes (bypassing
-            ldap3's auto-formatting entirely) instead of defensively
-            handling whatever shape the formatted value came back as.
-    0.0.7 - Fixed pwd_last_set/last_logon_timestamp/lockout_time always
-            NULL: ldap3 pre-converts these AD attributes into datetime
-            objects (via schema-aware OID matching, since the collector
-            connects with get_info=ALL), but filetime_to_datetime() only
-            handled a raw FILETIME integer, so parsing always failed
-            silently. Now handles the datetime/ISO-string shape ldap3
-            actually produces, with the raw-integer path kept as fallback.
-    0.0.6 - Fixed "no partition of relation ... found for row": valid_from
-            was backdated to AD's own whenChanged timestamp, which for a
-            baseline run can be arbitrarily old and fall outside the
-            maintained partition window. Now uses a single collection
-            timestamp shared by every row in the run; whenChanged remains
-            fully available inside attributes_full.
-    0.0.5 - Fixed msDS-ReplAttributeMetaData parsing: was only reading the
-            first of its multiple values, and a trailing NUL byte in DC
-            responses (seen on Windows Server 2025) broke both XML
-            parsing and JSONB storage. NUL bytes are now stripped from
-            all string values generically, not just this attribute.
-    0.0.4 - Fixed capability probe's security_descriptor_read check: it
-            queried nTSecurityDescriptor without the LDAP_SERVER_SD_FLAGS_OID
-            control, causing AD to withhold it entirely (implicitly
-            requires SACL access a read-only account shouldn't have).
-            Now requests Owner+Group+DACL only (SDFlags 0x7), same as
-            SharpHound/BloodHound. Was a probe bug, not a permissions gap.
-    0.0.3 - Fixed two NOT NULL violations in write_typed_row() (client_id
-            and version_id were never included in the INSERT -- would
-            fail on the first object of any real run) and a sys.exit()
-            vs. exception-handling bug that showed "Result: SUCCESS" on
-            failed runs. Verified end-to-end against a mock DC + real DB.
-    0.0.2 - Fixed ad_domain.functional_level always NULL, a schema CHECK
-            violation on constrained-delegation edges, and progress bars
-            always showing 100%.
+CHANGELOG (full detail in changelog.txt):
+    0.5.9 - Fixed missing IDENTITY on unresolved_delegation_target_edge.edge_id (real production crash).
+    0.5.8 - Added schema version tracking (schema_migration_history table + version comparison).
+    0.5.7 - Fixed stale schema-error message that pointed to wrong/outdated filenames.
+    0.5.6 - AD-integrated DNS zone collection (dynamic-update posture, DomainDnsZones partition).
+    0.5.5 - Domain controller computer-object ownership scanning.
+    0.5.4 - ADCS ACL collection (templates, CAs, PKI containers) -- enables ESC4/ESC5/ESC7 detection.
+    0.5.3 - NTAuthCertificates collection (ad_ntauth_store).
+    0.5.2 - Added admin_count to computer collection.
+    0.5.1 - gMSA password-reader tracking.
+    0.5.0 - Organizational Units: full typed-table collection, ACL scanning, GPO link resolution.
+    0.4.2 - Fixed client.domain_fqdn being populated from the wrong source value.
+    0.4.1 - Added --full-rescan flag.
+    0.4.0 - Added mail/proxyAddresses collection for users.
+    0.3.2 - Closed a real ACL-related gap found during follow-up plugin work.
+    0.3.1 - Added Enterprise Domain Controllers (S-1-5-9) to expected-holder exclusion sets.
+    0.2.6 - Fixed a real display bug found against production output.
+    0.2.5 - Systematic gap-analysis pass against BloodHound/PingCastle's collection coverage.
+    0.2.4 - Closed three more gaps found during a follow-up ad_domain review.
+    0.2.3 - Fixed a real bug in tombstone lifetime collection.
+    0.2.2 - Added machine_account_quota (ms-DS-MachineAccountQuota) collection.
+    0.2.1 - Added description, notes, and sid_history to ad_group.
+    0.2.0 - Full audit of deletion/remediation handling across every data type.
+    0.1.9 - Fixed a real follow-on to the v0.1.8 deletion bug.
+    0.1.8 - Fixed collect_deleted_objects() marking objects deleted incorrectly.
+    0.1.7 - Closed three more gaps found during a systematic final pass.
+    0.1.6 - Added pwd_last_set, description, notes, key_credential_count to users.
+    0.1.5 - Added description/notes collection.
+    0.1.4 - Fixed max_pwd_age/min_pwd_age/lockout_duration always NULL.
+    0.1.3 - Fixed max/min password age, lockout duration/observation window parsing.
+    0.1.2 - Fixed ESC1-pattern false positives on built-in CA-infrastructure templates.
+    0.1.1 - Fixed "invalid attribute type ms-Mcs-AdmPwdExpirationTime" crash.
+    0.1.0 - Closed the "easy" audit-capability gaps from the initial gap analysis.
+    0.0.10 - Fixed member_count_direct always NULL.
+    0.0.9 - Fixed is_domain_controller always FALSE.
+    0.0.8 - Upgraded the v0.0.7 timestamp fix after checking prior art.
+    0.0.7 - Fixed pwd_last_set/last_logon_timestamp/lockout_time always NULL.
+    0.0.6 - Fixed "no partition of relation ... found for row" error.
+    0.0.5 - Fixed msDS-ReplAttributeMetaData parsing.
+    0.0.4 - Fixed capability probe's security_descriptor_read check.
+    0.0.3 - Fixed two NOT NULL violations in write_typed_row(), plus a false-SUCCESS bug.
+    0.0.2 - Fixed ad_domain.functional_level always NULL, plus two other bugs.
     0.0.1 - Initial version.
 
 PURPOSE:
@@ -591,7 +220,7 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
-VERSION = "0.5.6"
+VERSION = "0.5.9"
 PG_HOST = "192.168.1.125"
 PG_PORT = 5432
 PG_DBNAME = "adprofiler"
@@ -1767,6 +1396,46 @@ REQUIRED_SCHEMA_COLUMNS = {
 }
 REQUIRED_SCHEMA_FUNCTIONS = {"upsert_directory_object", "set_current_version"}
 
+# [v0.5.8] Bump alongside VERSION whenever a release needs new schema.
+# Compared against schema_migration_history's own MAX(version_number) at
+# startup -- a single integer comparison, precise and durable, unlike
+# the prose error message this replaces (which hardcoded specific
+# filenames that went stale and misdirected a real client -- see
+# CHANGELOG). Kept alongside validate_schema()'s existing structural
+# check below, not instead of it: the version number handles the common
+# case (a database that's simply behind on migrations) with precision;
+# the structural check remains the backstop for a schema altered
+# outside the approved migration files, where the version number could
+# claim to be current while the actual structure doesn't match it.
+EXPECTED_SCHEMA_VERSION = 32
+
+
+def check_schema_version(pg_conn):
+    """Returns (status, detail) where status is one of:
+    'match' -- database version equals EXPECTED_SCHEMA_VERSION.
+    'behind' -- database version is lower; detail is the database's
+        current version (int).
+    'ahead' -- database version is higher than this script expects;
+        detail is the database's current version (int).
+    'untracked' -- schema_migration_history doesn't exist at all,
+        meaning this database predates version tracking (pre-v31);
+        detail is None."""
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "SELECT to_regclass('ad_intel.schema_migration_history') IS NOT NULL;"
+        )
+        table_exists = cur.fetchone()[0]
+        if not table_exists:
+            return "untracked", None
+        cur.execute("SELECT max(version_number) FROM ad_intel.schema_migration_history;")
+        current_version = cur.fetchone()[0]
+    if current_version == EXPECTED_SCHEMA_VERSION:
+        return "match", current_version
+    elif current_version < EXPECTED_SCHEMA_VERSION:
+        return "behind", current_version
+    else:
+        return "ahead", current_version
+
 
 def validate_schema(pg_conn):
     """
@@ -1774,8 +1443,12 @@ def validate_schema(pg_conn):
     or calls actually exists before any collection begins -- requested
     explicitly to guard against a database that's been altered outside
     this project's migration files, or a schema/script version mismatch
-    (e.g. running this version against a database that never had
-    schema_migration_v2.sql applied). Comprehensive: collects every
+    (e.g. running this version against a database that's missing a more
+    recent incremental migration -- as actually happened, prompting this
+    fix: the accompanying error message itself used to hardcode
+    "schema.sql" and "schema_migration_v2.sql" as the fix, filenames that
+    stopped being accurate many migrations ago and sent at least one real
+    client chasing the wrong file). Comprehensive: collects every
     problem found rather than stopping at the first, same philosophy as
     the LDAP capability probe. Returns a list of problem strings; empty
     list means the schema is fully compatible.
@@ -3485,15 +3158,73 @@ def main():
 
         pg_conn = connect_postgres()
 
-        schema_problems = validate_schema(pg_conn)
-        if schema_problems:
-            log_error(f"Database schema is not compatible with this version "
-                      f"({len(schema_problems)} problem(s)):")
+        version_status, version_detail = check_schema_version(pg_conn)
+
+        if version_status == "behind":
+            log_error(
+                f"Database schema is behind: currently at version "
+                f"{version_detail}, this script expects version "
+                f"{EXPECTED_SCHEMA_VERSION}. Apply "
+                f"schema_migration_v{version_detail + 1}.sql through "
+                f"schema_migration_v{EXPECTED_SCHEMA_VERSION}.sql, in "
+                f"order, against your EXISTING database (not "
+                f"schema_init.sql, which is for a brand-new, empty "
+                f"database only). Aborting."
+            )
+            raise CollectorAbort("Schema validation failed")
+        elif version_status == "ahead":
+            log_error(
+                f"Database schema is newer than this script expects: "
+                f"database is at version {version_detail}, this script "
+                f"only knows about version {EXPECTED_SCHEMA_VERSION}. "
+                f"Upgrade adprofiler.py to a version that matches your "
+                f"database's schema. Aborting."
+            )
+            raise CollectorAbort("Schema validation failed")
+        elif version_status == "untracked":
+            schema_problems = validate_schema(pg_conn)
+            log_error(
+                "Database predates schema version tracking (added in "
+                "schema_migration_v31.sql) -- this database is on some "
+                "version older than that, likely by more than one "
+                "migration. Structural check found "
+                f"{len(schema_problems)} problem(s):"
+            )
             for problem in schema_problems:
                 log_error(f"  - {problem}")
-            log_error("Apply schema.sql and schema_migration_v2.sql, then retry. Aborting.")
+            log_error(
+                "Apply schema_migration_vNN.sql files in order, starting "
+                "from wherever this database currently is, through at "
+                "least v31, against your EXISTING database (not "
+                "schema_init.sql, which is for a brand-new, empty "
+                "database only). Aborting."
+            )
             raise CollectorAbort("Schema validation failed")
-        log_success("Database schema validated.")
+
+        # version_status == "match" from here on -- the version number
+        # alone says this database should be current, but that's only
+        # ever as reliable as the migration files actually having been
+        # applied faithfully. The structural check is the backstop for
+        # a schema altered outside the approved migration files.
+        schema_problems = validate_schema(pg_conn)
+        if schema_problems:
+            log_error(
+                f"Database reports schema version {EXPECTED_SCHEMA_VERSION} "
+                f"(matching what this script expects), but a structural "
+                f"check still found {len(schema_problems)} problem(s) -- "
+                f"this indicates the schema was altered outside the "
+                f"approved migration files, not that a migration is "
+                f"simply missing:"
+            )
+            for problem in schema_problems:
+                log_error(f"  - {problem}")
+            log_error(
+                "Investigate what changed rather than re-running a "
+                "migration file (the version number says they already "
+                "ran). Aborting."
+            )
+            raise CollectorAbort("Schema validation failed")
+        log_success(f"Database schema validated (version {EXPECTED_SCHEMA_VERSION}).")
 
         client_id = upsert_client(pg_conn, base_dn_to_fqdn(base_dn), domain_sid, tombstone_lifetime)
 
