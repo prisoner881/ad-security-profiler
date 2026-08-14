@@ -4,7 +4,7 @@
  adprofiler.py -- Active Directory Security & Compliance Profiler (Collector)
 ================================================================================
 
-VERSION: 0.5.9
+VERSION: 0.5.10
 
 PURPOSE:
     Connects to an on-premise Active Directory Domain Controller via LDAP,
@@ -176,7 +176,7 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
-VERSION = "0.5.9"
+VERSION = "0.5.10"
 # [client-test-branch] These are always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
 # connect_postgres() is ever called -- the values here are placeholders,
@@ -1392,12 +1392,30 @@ REQUIRED_SCHEMA_COLUMNS = {
 }
 REQUIRED_SCHEMA_FUNCTIONS = {"upsert_directory_object", "set_current_version"}
 
+# [v0.5.10] Column EXISTENCE (REQUIRED_SCHEMA_COLUMNS above) isn't the
+# same guarantee as column CORRECTNESS -- a real client hit exactly
+# this gap: schema_migration_v32.sql's ALTER TABLE ... ADD GENERATED
+# ALWAYS AS IDENTITY statement can fail while the same file's later
+# INSERT INTO schema_migration_history still succeeds (psql continues
+# past a failed statement by default, unless ON_ERROR_STOP is set) --
+# leaving a database that reports "schema version 32, structurally
+# valid" while edge_id is still a plain, non-generating NOT NULL
+# column, reproducing the exact NOT NULL violation v32 was meant to
+# fix. Every (table, column) pair here is checked against
+# information_schema.columns.is_identity specifically, not just
+# whether the column exists -- start with just the one column a real
+# failure was traced to, extend as more migrations add IDENTITY
+# columns worth double-checking this way.
+REQUIRED_IDENTITY_COLUMNS = {
+    ("unresolved_delegation_target_edge", "edge_id"),
+}
+
 # [v0.5.8] Bump alongside VERSION whenever a release needs new schema.
 # Compared against schema_migration_history's own MAX(version_number) at
 # startup -- a single integer comparison, precise and durable, unlike
 # the prose error message this replaces (which hardcoded specific
 # filenames that went stale and misdirected a real client -- see
-# changelog.txt). Kept alongside validate_schema()'s existing structural
+# CHANGELOG). Kept alongside validate_schema()'s existing structural
 # check below, not instead of it: the version number handles the common
 # case (a database that's simply behind on migrations) with precision;
 # the structural check remains the backstop for a schema altered
@@ -1448,6 +1466,17 @@ def validate_schema(pg_conn):
     problem found rather than stopping at the first, same philosophy as
     the LDAP capability probe. Returns a list of problem strings; empty
     list means the schema is fully compatible.
+
+    [v0.5.10] Also verifies REQUIRED_IDENTITY_COLUMNS specifically --
+    existence alone (the check above) isn't the same guarantee as
+    correctness. A real client's ALTER TABLE ... ADD GENERATED ALWAYS
+    AS IDENTITY statement (inside schema_migration_v32.sql) failed
+    silently while that same file's later INSERT INTO
+    schema_migration_history still succeeded, leaving a database that
+    both check_schema_version() AND the plain existence check here
+    would have called fully valid, while the underlying NOT NULL
+    violation it was meant to fix was still very much present. See
+    REQUIRED_IDENTITY_COLUMNS's own comment for the full story.
     """
     problems = []
 
@@ -1465,6 +1494,12 @@ def validate_schema(pg_conn):
         )
         actual_functions = {row[0] for row in cur.fetchall()}
 
+        cur.execute(
+            "SELECT table_name, column_name FROM information_schema.columns "
+            "WHERE table_schema = 'ad_intel' AND is_identity = 'YES';"
+        )
+        actual_identity_columns = {(row[0], row[1]) for row in cur.fetchall()}
+
     for table, required_cols in REQUIRED_SCHEMA_COLUMNS.items():
         if table not in actual_columns:
             problems.append(f"table '{table}' does not exist")
@@ -1477,6 +1512,16 @@ def validate_schema(pg_conn):
 
     for fn in sorted(REQUIRED_SCHEMA_FUNCTIONS - actual_functions):
         problems.append(f"required function '{fn}' does not exist")
+
+    for table, column in sorted(REQUIRED_IDENTITY_COLUMNS):
+        if table not in actual_columns or column not in actual_columns.get(table, set()):
+            continue  # already reported above as a missing column entirely
+        if (table, column) not in actual_identity_columns:
+            problems.append(
+                f"column '{table}.{column}' exists but is not identity-generated "
+                f"(the migration that adds this likely partially failed -- check "
+                f"whether its ALTER TABLE statement actually succeeded)"
+            )
 
     return problems
 
@@ -3116,11 +3161,9 @@ def main():
         sys.exit(0)
 
     # [client-test-branch] Mirror console output to a timestamped log
-    # file in the current working directory (where the script is being
-    # run from, not wherever the script file itself lives). atexit
-    # guarantees the file gets flushed and closed, and the real stdout
-    # restored, no matter how main() below exits (normal return,
-    # sys.exit(), or an uncaught exception).
+    # file in the current working directory. atexit guarantees the
+    # file gets flushed and closed, and the real stdout restored, no
+    # matter how main() below exits.
     log_filename = f"adprofiler-results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
     log_fh = open(log_filename, "w")
     real_stdout = sys.stdout
@@ -3135,11 +3178,8 @@ def main():
     log_info(f"Mirroring console output to {log_filename}")
 
     # [client-test-branch] PG_HOST/PG_PORT/PG_DBNAME/PG_USER/PG_PASSWORD
-    # were hardcoded module-level constants pointing at one specific lab
-    # server -- overwritten here from CLI args instead, once, before
-    # connect_postgres() (unchanged itself) reads them. Same
-    # secure-prompt-if-omitted pattern already used for the LDAP bind
-    # password just below.
+    # overwritten here from CLI args before connect_postgres() reads
+    # them.
     global PG_HOST, PG_PORT, PG_DBNAME, PG_USER, PG_PASSWORD
     PG_HOST = args.pg_host
     PG_PORT = args.pg_port
@@ -3430,7 +3470,7 @@ def main():
             # more common real-world privilege-escalation paths this
             # project had no visibility into before. Still NOT extended
             # to per-user/computer/group ACLs, GPO ACLs, or cert
-            # template ACLs -- see changelog.txt.
+            # template ACLs -- see CHANGELOG.
             #
             # Every object's ACEs are merged into ONE combined dict and
             # synced in a SINGLE sync_edges call at the end -- not one

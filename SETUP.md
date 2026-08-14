@@ -103,7 +103,15 @@ PostgreSQL password unless it's already set via `PGPASSWORD` or a
   tenant ID, application (client) ID, and client secret, with the
   Graph API permissions already granted and admin-consented
   (`User.Read.All`, `RoleManagement.Read.Directory`, `Policy.Read.All`,
-  `Application.Read.All`, `Directory.Read.All`).
+  `Application.Read.All`, `Directory.Read.All`). **These must be
+  granted as "Application permissions," not "Delegated permissions"**
+  -- Entra's API permissions blade lists both as separate sections,
+  and a permission with the same name can exist in both, but only the
+  Application-type grant works for this script's unattended
+  (client_credentials) authentication, which has no signed-in user.
+  Granting the Delegated version by mistake still shows a green
+  "Granted" checkmark in the portal, but produces a 403 error here --
+  a real client hit exactly this before catching it.
 
 None of these need to be typed on the command line if you'd rather
 not -- every password/secret prompts securely (hidden input) if you
@@ -150,9 +158,33 @@ python3 entra_graph_collector.py \
 ```
 
 You'll be prompted for the App Registration client secret and the
-PostgreSQL password if omitted. `--domain-fqdn` must match the domain
-`adprofiler.py` already collected in Step 1 -- this is how the script
-finds the right record to attach the Entra ID data to.
+PostgreSQL password if omitted.
+
+`--tenant-id` and `--domain-fqdn` are unrelated to each other --
+easy to mix up, so worth being explicit: `--tenant-id` identifies your
+Entra ID tenant for authentication (a GUID, or any domain Entra
+considers verified for that tenant, which is very often *not* the
+same string as your internal AD domain). `--domain-fqdn` is
+purely a local lookup key, matched case-insensitively against
+whatever `adprofiler.py` already collected in Step 1 -- it must match
+that domain, not anything about Entra ID.
+
+If `--domain-fqdn` keeps producing "No client found" and you're
+confident `adprofiler.py` was already run successfully against this
+domain, skip the domain-name lookup entirely: run
+`SELECT client_id, domain_fqdn FROM client;` against the database once
+to see the exact stored value, then either pass that exact
+`domain_fqdn` string, or pass the `client_id` GUID directly instead:
+
+```
+python3 entra_graph_collector.py \
+  --tenant-id <tenant-id> \
+  --app-id <app-id> \
+  --client-id <client_id GUID from the client table> \
+  --pg-host <your-postgres-host> \
+  --pg-user <your-postgres-user> \
+  --pg-dbname <your-database-name>
+```
 
 This creates its own timestamped log:
 `entra-graph-collector-results_<timestamp>.log`.
@@ -202,3 +234,13 @@ troubleshooting if anything looked wrong during collection.
 - **`adprofiler.py` fails to bind to the domain controller**: confirm
   the bind account's password is correct, and try without `--ssl`
   first if LDAPS isn't confirmed to be configured on that DC.
+- **`adprofiler.py` reports "Database schema is behind" (or "ahead,"
+  or "predates schema version tracking")**: this means the database's
+  schema doesn't match what this version of the script expects --
+  normal after updating `adprofiler.py` without also updating the
+  database. The message itself tells you exactly which
+  `schema_migration_vNN.sql` file(s) to apply, by number, against your
+  *existing* database. Never re-run `schema_init.sql` against a
+  database that already has data in it -- that file is for a
+  brand-new, empty database only, and can fail or leave things in a
+  mixed state against one that isn't.
