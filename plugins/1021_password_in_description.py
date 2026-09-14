@@ -37,8 +37,8 @@ PLUGIN = {
     "plugin_id": 1021,
     "category": "User Accounts",
     "name": "Account Description/Notes Field May Contain Password Material",
-    "version": "1.5",
-    "revision_date": "2026-08-05",
+    "version": "1.6",
+    "revision_date": "2026-09-02",
     "remediation": (
     'Remove the sensitive text from the field immediately, but do not treat '
     'that as sufficient remediation on its own -- the exposure already '
@@ -49,7 +49,7 @@ PLUGIN = {
     'exposure.'
 ),
     "control_id": "CRED-009",
-    "framework_tags": [],
+    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1552.001"],
     "references": [],
     "description": (
         "The description and info (\"Notes\" in ADUC) attributes are "

@@ -12,8 +12,8 @@ PLUGIN = {
     "plugin_id": 1015,
     "category": "User Accounts",
     "name": "Privileged Account Not a Member of Protected Users",
-    "version": "1.4",
-    "revision_date": "2026-07-15",
+    "version": "1.5",
+    "revision_date": "2026-09-02",
     "remediation": (
     'Add the account to the Protected Users group -- but test in a '
     'non-production/staging context first. Protected Users membership disables '
@@ -25,7 +25,7 @@ PLUGIN = {
     'adding every privileged account at once.'
 ),
     "control_id": "PRIV-106",
-    "framework_tags": [],
+    "framework_tags": ["CISA-AA26-237A"],
     "references": [
         {"title": "Microsoft: Protected Users Security Group in Windows Server",
          "url": "https://learn.microsoft.com/en-us/windows-server/security/credentials-protection-and-management/protected-users-security-group"},

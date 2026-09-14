@@ -4,51 +4,7 @@
  adprofiler.py -- Active Directory Security & Compliance Profiler (Collector)
 ================================================================================
 
-VERSION: 0.5.9
-
-CHANGELOG (full detail in changelog.txt):
-    0.5.9 - Fixed missing IDENTITY on unresolved_delegation_target_edge.edge_id (real production crash).
-    0.5.8 - Added schema version tracking (schema_migration_history table + version comparison).
-    0.5.7 - Fixed stale schema-error message that pointed to wrong/outdated filenames.
-    0.5.6 - AD-integrated DNS zone collection (dynamic-update posture, DomainDnsZones partition).
-    0.5.5 - Domain controller computer-object ownership scanning.
-    0.5.4 - ADCS ACL collection (templates, CAs, PKI containers) -- enables ESC4/ESC5/ESC7 detection.
-    0.5.3 - NTAuthCertificates collection (ad_ntauth_store).
-    0.5.2 - Added admin_count to computer collection.
-    0.5.1 - gMSA password-reader tracking.
-    0.5.0 - Organizational Units: full typed-table collection, ACL scanning, GPO link resolution.
-    0.4.2 - Fixed client.domain_fqdn being populated from the wrong source value.
-    0.4.1 - Added --full-rescan flag.
-    0.4.0 - Added mail/proxyAddresses collection for users.
-    0.3.2 - Closed a real ACL-related gap found during follow-up plugin work.
-    0.3.1 - Added Enterprise Domain Controllers (S-1-5-9) to expected-holder exclusion sets.
-    0.2.6 - Fixed a real display bug found against production output.
-    0.2.5 - Systematic gap-analysis pass against BloodHound/PingCastle's collection coverage.
-    0.2.4 - Closed three more gaps found during a follow-up ad_domain review.
-    0.2.3 - Fixed a real bug in tombstone lifetime collection.
-    0.2.2 - Added machine_account_quota (ms-DS-MachineAccountQuota) collection.
-    0.2.1 - Added description, notes, and sid_history to ad_group.
-    0.2.0 - Full audit of deletion/remediation handling across every data type.
-    0.1.9 - Fixed a real follow-on to the v0.1.8 deletion bug.
-    0.1.8 - Fixed collect_deleted_objects() marking objects deleted incorrectly.
-    0.1.7 - Closed three more gaps found during a systematic final pass.
-    0.1.6 - Added pwd_last_set, description, notes, key_credential_count to users.
-    0.1.5 - Added description/notes collection.
-    0.1.4 - Fixed max_pwd_age/min_pwd_age/lockout_duration always NULL.
-    0.1.3 - Fixed max/min password age, lockout duration/observation window parsing.
-    0.1.2 - Fixed ESC1-pattern false positives on built-in CA-infrastructure templates.
-    0.1.1 - Fixed "invalid attribute type ms-Mcs-AdmPwdExpirationTime" crash.
-    0.1.0 - Closed the "easy" audit-capability gaps from the initial gap analysis.
-    0.0.10 - Fixed member_count_direct always NULL.
-    0.0.9 - Fixed is_domain_controller always FALSE.
-    0.0.8 - Upgraded the v0.0.7 timestamp fix after checking prior art.
-    0.0.7 - Fixed pwd_last_set/last_logon_timestamp/lockout_time always NULL.
-    0.0.6 - Fixed "no partition of relation ... found for row" error.
-    0.0.5 - Fixed msDS-ReplAttributeMetaData parsing.
-    0.0.4 - Fixed capability probe's security_descriptor_read check.
-    0.0.3 - Fixed two NOT NULL violations in write_typed_row(), plus a false-SUCCESS bug.
-    0.0.2 - Fixed ad_domain.functional_level always NULL, plus two other bugs.
-    0.0.1 - Initial version.
+VERSION: 0.5.10
 
 PURPOSE:
     Connects to an on-premise Active Directory Domain Controller via LDAP,
@@ -220,7 +176,10 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
-VERSION = "0.5.9"
+VERSION = "0.5.10"
+# [lab-branch] Lab defaults. main() falls back to these when the
+# corresponding --pg-* flag is omitted, so a bare run works with no
+# arguments and any flag still overrides. Do not copy to client-test.
 PG_HOST = "192.168.1.125"
 PG_PORT = 5432
 PG_DBNAME = "adprofiler"
@@ -488,6 +447,42 @@ class _C:
     WHITE = "\033[97m" if _USE_COLOR else ""
     BOLD = "\033[1m" if _USE_COLOR else ""
     DIM = "\033[2m" if _USE_COLOR else ""
+
+
+class _TeeStream:
+    """[client-test-branch] Mirrors everything written to stdout into a
+    log file too. Wraps sys.stdout itself rather than touching
+    log_info()/log_success()/etc. individually -- this project has
+    plenty of bare print() calls outside those helpers (the Run
+    Summary section, in particular), and wrapping at the stream level
+    catches all of them uniformly rather than risking a few being
+    missed.
+
+    Two things are handled differently for the file than for the
+    console, since a plain text log can't do what a terminal can:
+      - ANSI color codes are stripped (kept for the console, where
+        they're genuinely useful).
+      - Bare \\r (used by the progress bar for in-place, single-line
+        updates) is converted to \\n, since a log file can't overwrite
+        a previous line the way a terminal can -- each progress tick
+        becomes its own line instead of silently corrupting the file.
+    """
+    _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
+
+    def __init__(self, console_stream, log_fh):
+        self._console = console_stream
+        self._log_fh = log_fh
+
+    def write(self, data):
+        self._console.write(data)
+        self._log_fh.write(self._ANSI_RE.sub("", data).replace("\r", "\n"))
+
+    def flush(self):
+        self._console.flush()
+        self._log_fh.flush()
+
+    def isatty(self):
+        return self._console.isatty()
 
 
 def _ts():
@@ -1396,6 +1391,24 @@ REQUIRED_SCHEMA_COLUMNS = {
 }
 REQUIRED_SCHEMA_FUNCTIONS = {"upsert_directory_object", "set_current_version"}
 
+# [v0.5.10] Column EXISTENCE (REQUIRED_SCHEMA_COLUMNS above) isn't the
+# same guarantee as column CORRECTNESS -- a real client hit exactly
+# this gap: schema_migration_v32.sql's ALTER TABLE ... ADD GENERATED
+# ALWAYS AS IDENTITY statement can fail while the same file's later
+# INSERT INTO schema_migration_history still succeeds (psql continues
+# past a failed statement by default, unless ON_ERROR_STOP is set) --
+# leaving a database that reports "schema version 32, structurally
+# valid" while edge_id is still a plain, non-generating NOT NULL
+# column, reproducing the exact NOT NULL violation v32 was meant to
+# fix. Every (table, column) pair here is checked against
+# information_schema.columns.is_identity specifically, not just
+# whether the column exists -- start with just the one column a real
+# failure was traced to, extend as more migrations add IDENTITY
+# columns worth double-checking this way.
+REQUIRED_IDENTITY_COLUMNS = {
+    ("unresolved_delegation_target_edge", "edge_id"),
+}
+
 # [v0.5.8] Bump alongside VERSION whenever a release needs new schema.
 # Compared against schema_migration_history's own MAX(version_number) at
 # startup -- a single integer comparison, precise and durable, unlike
@@ -1452,6 +1465,17 @@ def validate_schema(pg_conn):
     problem found rather than stopping at the first, same philosophy as
     the LDAP capability probe. Returns a list of problem strings; empty
     list means the schema is fully compatible.
+
+    [v0.5.10] Also verifies REQUIRED_IDENTITY_COLUMNS specifically --
+    existence alone (the check above) isn't the same guarantee as
+    correctness. A real client's ALTER TABLE ... ADD GENERATED ALWAYS
+    AS IDENTITY statement (inside schema_migration_v32.sql) failed
+    silently while that same file's later INSERT INTO
+    schema_migration_history still succeeded, leaving a database that
+    both check_schema_version() AND the plain existence check here
+    would have called fully valid, while the underlying NOT NULL
+    violation it was meant to fix was still very much present. See
+    REQUIRED_IDENTITY_COLUMNS's own comment for the full story.
     """
     problems = []
 
@@ -1469,6 +1493,12 @@ def validate_schema(pg_conn):
         )
         actual_functions = {row[0] for row in cur.fetchall()}
 
+        cur.execute(
+            "SELECT table_name, column_name FROM information_schema.columns "
+            "WHERE table_schema = 'ad_intel' AND is_identity = 'YES';"
+        )
+        actual_identity_columns = {(row[0], row[1]) for row in cur.fetchall()}
+
     for table, required_cols in REQUIRED_SCHEMA_COLUMNS.items():
         if table not in actual_columns:
             problems.append(f"table '{table}' does not exist")
@@ -1481,6 +1511,16 @@ def validate_schema(pg_conn):
 
     for fn in sorted(REQUIRED_SCHEMA_FUNCTIONS - actual_functions):
         problems.append(f"required function '{fn}' does not exist")
+
+    for table, column in sorted(REQUIRED_IDENTITY_COLUMNS):
+        if table not in actual_columns or column not in actual_columns.get(table, set()):
+            continue  # already reported above as a missing column entirely
+        if (table, column) not in actual_identity_columns:
+            problems.append(
+                f"column '{table}.{column}' exists but is not identity-generated "
+                f"(the migration that adds this likely partially failed -- check "
+                f"whether its ALTER TABLE statement actually succeeded)"
+            )
 
     return problems
 
@@ -3091,10 +3131,23 @@ def parse_args():
                               "'modified', since nothing in AD actually changed.")
     parser.add_argument("--version", action="store_true",
                          help="Print version and exit.")
+    parser.add_argument("--pg-host", default=None,
+                         help="PostgreSQL server hostname or IP. Required unless --version is given.")
+    parser.add_argument("--pg-port", type=int, default=None,
+                         help="PostgreSQL server port. Default: 5432.")
+    parser.add_argument("--pg-dbname", default="adprofiler",
+                         help="PostgreSQL database name. Default: adprofiler.")
+    parser.add_argument("--pg-user", default=None,
+                         help="PostgreSQL username. Required unless --version is given.")
+    parser.add_argument("--pg-password", default=None,
+                         help="PostgreSQL password. If omitted, you will be prompted "
+                              "securely (recommended).")
     args = parser.parse_args()
 
     if not args.version and (not args.dc_host or not args.username):
         parser.error("the following arguments are required: --dc-host, --username")
+    if not args.version and (not args.pg_host or not args.pg_user):
+        parser.error("the following arguments are required: --pg-host, --pg-user")
 
     return args
 
@@ -3106,7 +3159,40 @@ def main():
         print(f"adprofiler.py version {VERSION}")
         sys.exit(0)
 
+    # [client-test-branch] Mirror console output to a timestamped log
+    # file in the current working directory. atexit guarantees the
+    # file gets flushed and closed, and the real stdout restored, no
+    # matter how main() below exits.
+    log_filename = f"adprofiler-results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    log_fh = open(log_filename, "w")
+    real_stdout = sys.stdout
+    sys.stdout = _TeeStream(real_stdout, log_fh)
+
+    def _restore_stdout():
+        sys.stdout = real_stdout
+        log_fh.close()
+    atexit.register(_restore_stdout)
+
     log_header(f"adprofiler.py v{VERSION} -- AD Security & Compliance Collector")
+    log_info(f"Mirroring console output to {log_filename}")
+
+    # [client-test-branch] PG_HOST/PG_PORT/PG_DBNAME/PG_USER/PG_PASSWORD
+    # overwritten here from CLI args before connect_postgres() reads
+    # them.
+    global PG_HOST, PG_PORT, PG_DBNAME, PG_USER, PG_PASSWORD
+    PG_HOST = args.pg_host if args.pg_host else PG_HOST
+    PG_PORT = args.pg_port if args.pg_port else PG_PORT
+    PG_DBNAME = args.pg_dbname if args.pg_dbname else PG_DBNAME
+    PG_USER = args.pg_user if args.pg_user else PG_USER
+    if args.pg_password:
+        log_warn("PostgreSQL password supplied via --pg-password is visible in "
+                  "shell history and process listings. Prefer omitting it and "
+                  "entering it at the secure prompt.")
+        PG_PASSWORD = args.pg_password
+    elif not PG_PASSWORD:
+        # [lab-branch] Only prompt when neither a flag nor the lab
+        # default supplied a password.
+        PG_PASSWORD = getpass.getpass(f"PostgreSQL password for {args.pg_user}@{args.pg_host}: ")
 
     if args.password:
         log_warn("Password supplied via --password is visible in shell history "

@@ -14,8 +14,8 @@ PLUGIN = {
     "plugin_id": 2027,
     "category": "Computer Accounts",
     "name": "RBCD Trustee Computer Is Itself Unsupported or Dormant",
-    "version": "1.2",
-    "revision_date": "2026-07-17",
+    "version": "1.3",
+    "revision_date": "2026-09-02",
     "remediation": (
         "Prioritize over an ordinary RBCD finding (plugin 2022) -- this "
         "specific trustee is an easier-than-average target due to its "
@@ -24,7 +24,7 @@ PLUGIN = {
         "relationship itself is still needed and remove it if not."
     ),
     "control_id": "CHAIN-205",
-    "framework_tags": ["MITRE-ATTCK-T1134"],
+    "framework_tags": ["MITRE-ATTCK-T1134", "CISA-AA26-237A", "MITRE-ATTCK-T1098"],
     "references": [
         {"title": "MITRE ATT&CK T1134: Access Token Manipulation",
          "url": "https://attack.mitre.org/techniques/T1134/"},

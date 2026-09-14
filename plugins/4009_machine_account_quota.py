@@ -19,8 +19,8 @@ PLUGIN = {
     "plugin_id": 4009,
     "category": "Domain",
     "name": "Machine Account Quota Allows Unprivileged Users to Join Computers to the Domain",
-    "version": "1.1",
-    "revision_date": "2026-07-15",
+    "version": "1.2",
+    "revision_date": "2026-09-02",
     "remediation": (
         "Set ms-DS-MachineAccountQuota to 0 "
         "(`Set-ADDomain -Identity <domain> -Replace "
@@ -35,7 +35,7 @@ PLUGIN = {
         "group instead of relying on the domain-wide quota."
     ),
     "control_id": "POLICY-009",
-    "framework_tags": [],
+    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1136.002"],
     "references": [
         {"title": "Microsoft: ms-DS-MachineAccountQuota attribute",
          "url": "https://learn.microsoft.com/en-us/windows/win32/adschema/a-ms-ds-machineaccountquota"},

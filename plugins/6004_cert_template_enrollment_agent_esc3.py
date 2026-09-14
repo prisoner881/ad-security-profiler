@@ -22,8 +22,8 @@ PLUGIN = {
     "plugin_id": 6004,
     "category": "Certificate Services",
     "name": "Certificate Template Grants the Certificate Request Agent EKU (ESC3)",
-    "version": "1.0",
-    "revision_date": "2026-07-18",
+    "version": "1.1",
+    "revision_date": "2026-09-02",
     "remediation": (
         "Confirm who can enroll against this template (its own "
         "security tab, or `certutil -v -template <name>`) -- if this "
@@ -38,7 +38,7 @@ PLUGIN = {
         "breaks the chain."
     ),
     "control_id": "ADCS-104",
-    "framework_tags": [],
+    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1649"],
     "references": [
         {"title": "SpecterOps Certify Documentation: ESC3 -- Misconfigured Certificate Request Agent",
          "url": "https://docs.specterops.io/ghostpack-docs/Certify.wik-mdx/esc3-misconfigured-certificate-request-agent"},

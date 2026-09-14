@@ -1,0 +1,49 @@
+# adprofiler.py / adaudit.py dependencies
+#
+# Pinned to major.minor, not exact patch versions -- lets pip pick up
+# bugfix releases automatically on install/upgrade without needing this
+# file touched every time, while still preventing an unexpected major
+# version jump (e.g. ldap3 4.x) from silently changing behavior.
+
+ldap3~=2.9
+psycopg2-binary~=2.9
+
+# requests: HTTPS/REST calls to Microsoft Graph and the Entra ID token
+# endpoint, used only by entra_graph_collector.py -- adprofiler.py and
+# adaudit.py have no HTTP dependency at all, deliberately (see
+# entra_graph_collector.py's own module docstring for why it's a
+# separate script rather than a mode on adprofiler.py).
+requests~=2.33
+
+# impacket: security descriptor (ACL) parsing for adprofiler.py's ACL
+# collection (acl_edge, RBCD via delegation_edge). Same library
+# BloodHound.py and Certipy use for this exact task -- binary
+# nTSecurityDescriptor parsing is fiddly and easy to get subtly wrong;
+# this is the established, battle-tested implementation rather than a
+# from-scratch one. Also ships msada_guids.py, a comprehensive
+# GUID-to-name reference table (80 extended rights, 1769 schema
+# objects) sourced directly from MS-ADA1/2/3, reused here instead of
+# hand-maintaining a smaller one.
+impacket~=0.13
+
+# cryptography: X.509/DER certificate parsing for NTAuthCertificates
+# collection (ad_ntauth_store) -- adprofiler.py's first genuine X.509
+# parsing need. Unlike security descriptor parsing (impacket, above),
+# no reason to hand-roll ASN.1/DER walking here: this is the standard,
+# well-maintained library for the job, and X.509 is a general format
+# with no Microsoft-specific quirks the way nTSecurityDescriptor has.
+cryptography~=49.0
+
+# openpyxl: Excel workbook output for adaudit.py's findings report
+# (test-candidate-branch only -- the client-facing spreadsheet reviewed
+# alongside the console output, one tab per finding category plus
+# inventory tabs). Not needed by adprofiler.py or entra_graph_collector.py.
+openpyxl~=3.1
+
+# Note: psycopg2-binary (not psycopg2) deliberately -- bundles its own
+# libpq, so it doesn't need PostgreSQL client dev headers/build tooling
+# on the host. The binary package's own docs recommend the source
+# package (plain `psycopg2`) for production use instead, since bundling
+# libpq can occasionally conflict with another libpq already on the
+# system -- worth revisiting if that ever becomes a real conflict here,
+# but a clean, simple install matters more than that edge case right now.

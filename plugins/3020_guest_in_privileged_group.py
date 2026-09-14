@@ -17,8 +17,8 @@ PLUGIN = {
     "plugin_id": 3020,
     "category": "Groups",
     "name": "Guest Account Is a Member of a Privileged Group",
-    "version": "1.1",
-    "revision_date": "2026-08-04",
+    "version": "1.2",
+    "revision_date": "2026-09-02",
     "remediation": (
         "Remove the Guest account from the privileged group(s) listed "
         "in this finding's evidence immediately -- there is no "
@@ -29,7 +29,7 @@ PLUGIN = {
         "configuration under any normal circumstance."
     ),
     "control_id": "PRIV-308",
-    "framework_tags": [],
+    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1078.002"],
     "references": [],
     "description": (
         "The built-in Guest account (RID 501) is designed to be the "

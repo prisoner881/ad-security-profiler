@@ -25,8 +25,8 @@ PLUGIN = {
     "plugin_id": 5007,
     "category": "ACLs",
     "name": "Privileged Object Owned by an Unprivileged Account",
-    "version": "1.1",
-    "revision_date": "2026-07-19",
+    "version": "1.2",
+    "revision_date": "2026-09-02",
     "remediation": (
         "Reassign ownership of the affected object to Domain Admins "
         "(via the Advanced Security Settings dialog in Active "
@@ -38,7 +38,7 @@ PLUGIN = {
         "residue or a genuine, exploitable misconfiguration."
     ),
     "control_id": "ACL-007",
-    "framework_tags": [],
+    "framework_tags": ["CISA-AA26-237A"],
     "references": [],
     "description": (
         "Broader than plugin 5006 (domain root/AdminSDHolder ownership "

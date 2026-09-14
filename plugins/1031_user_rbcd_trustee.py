@@ -16,8 +16,8 @@ PLUGIN = {
     "plugin_id": 1031,
     "category": "User Accounts",
     "name": "User Account (Not a Computer) Configured as an RBCD Trustee",
-    "version": "1.2",
-    "revision_date": "2026-07-17",
+    "version": "1.3",
+    "revision_date": "2026-09-02",
     "remediation": (
         "Confirm this is a deliberate, understood configuration -- RBCD "
         "trustees are conventionally computer or service accounts, not "
@@ -29,7 +29,7 @@ PLUGIN = {
         "account."
     ),
     "control_id": "DELEG-102",
-    "framework_tags": ["MITRE-ATTCK-T1134"],
+    "framework_tags": ["MITRE-ATTCK-T1134", "CISA-AA26-237A", "MITRE-ATTCK-T1098"],
     "references": [
         {"title": "MITRE ATT&CK T1134: Access Token Manipulation",
          "url": "https://attack.mitre.org/techniques/T1134/"},

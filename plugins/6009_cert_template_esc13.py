@@ -28,8 +28,8 @@ PLUGIN = {
     "plugin_id": 6009,
     "category": "Certificate Services",
     "name": "Certificate Template Issuance Policy Links to a Group (ESC13)",
-    "version": "1.0",
-    "revision_date": "2026-07-31",
+    "version": "1.1",
+    "revision_date": "2026-09-02",
     "remediation": (
         "Confirm this OID-to-group link is an intentional, understood "
         "part of an Authentication Mechanism Assurance (AMA) design, "
@@ -44,7 +44,7 @@ PLUGIN = {
         "-Properties msDS-OIDToGroupLink`."
     ),
     "control_id": "PKI-1301",
-    "framework_tags": [],
+    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1649"],
     "references": [
         {"title": "Certipy Wiki: Privilege Escalation -- ESC13",
          "url": "https://github.com/ly4k/Certipy/wiki/06-%E2%80%90-Privilege-Escalation"},

@@ -14,8 +14,8 @@ PLUGIN = {
     "plugin_id": 3004,
     "category": "Groups",
     "name": "Privileged Group Has an Unusually Large Number of Members",
-    "version": "1.3",
-    "revision_date": "2026-07-15",
+    "version": "1.4",
+    "revision_date": "2026-09-02",
     "remediation": (
         "Review the full membership list and confirm each member "
         "genuinely needs this level of access on an ongoing, standing "
@@ -29,7 +29,7 @@ PLUGIN = {
         "this group actually grants."
     ),
     "control_id": "PRIV-303",
-    "framework_tags": [],
+    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1078.002"],
     "references": [
         {"title": "DISA STIG V-243467: Domain Admins group membership must be restricted",
          "url": "https://www.stigviewer.com/stigs/active_directory_domain/2024-02-26/finding/V-243467"},
