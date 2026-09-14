@@ -18,8 +18,8 @@ PLUGIN = {
     "plugin_id": 3018,
     "category": "Groups",
     "name": "Print Operators Group Has Members",
-    "version": "1.0",
-    "revision_date": "2026-07-18",
+    "version": "1.1",
+    "revision_date": "2026-09-02",
     "remediation": (
         "Review every member listed in this finding's evidence and "
         "confirm each one genuinely needs domain-wide print "
@@ -31,7 +31,7 @@ PLUGIN = {
         "scrutiny applied to Domain Admins."
     ),
     "control_id": "PRIV-306",
-    "framework_tags": [],
+    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1078.002"],
     "references": [],
     "description": (
         "Print Operators is a built-in group that, historically, could "

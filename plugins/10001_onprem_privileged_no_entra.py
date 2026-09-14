@@ -27,8 +27,8 @@ PLUGIN = {
     "plugin_id": 10001,
     "category": "Hybrid Identity",
     "name": "On-Prem Privileged Account Has No Corresponding Entra Identity",
-    "version": "1.0",
-    "revision_date": "2026-07-19",
+    "version": "1.1",
+    "revision_date": "2026-09-02",
     "remediation": (
         "Confirm whether this is deliberate. If this account is an "
         "intentionally air-gapped Tier-0/break-glass account kept out "
@@ -42,7 +42,7 @@ PLUGIN = {
         "this account for a real reason, not by accident."
     ),
     "control_id": "HYBRID-001",
-    "framework_tags": [],
+    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1078.004"],
     "references": [],
     "description": (
         "An AdminSDHolder-protected on-prem account (admin_count=1) "

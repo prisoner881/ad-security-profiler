@@ -17,8 +17,8 @@ PLUGIN = {
     "plugin_id": 5003,
     "category": "ACLs",
     "name": "Dangerous Rights on the Domain Root Held by an Unexpected Principal",
-    "version": "1.2",
-    "revision_date": "2026-07-17",
+    "version": "1.3",
+    "revision_date": "2026-09-02",
     "remediation": (
         "Remove the grant unless it's a deliberate, understood exception "
         "(`dsacls \"DC=...\" /R <trustee>`, or via ADSI Edit's Security "
@@ -29,7 +29,7 @@ PLUGIN = {
         "rewriting the domain root's own ACL."
     ),
     "control_id": "ACL-003",
-    "framework_tags": [],
+    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1003.006"],
     "references": [
         {"title": "BloodHound (SpecterOps): GenericAll edge",
          "url": "https://bloodhound.specterops.io/resources/edges/generic-all"},

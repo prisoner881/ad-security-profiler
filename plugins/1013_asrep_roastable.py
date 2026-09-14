@@ -13,8 +13,8 @@ PLUGIN = {
     "plugin_id": 1013,
     "category": "User Accounts",
     "name": "AS-REP Roastable Account (Kerberos Pre-Authentication Disabled)",
-    "version": "1.5",
-    "revision_date": "2026-07-15",
+    "version": "1.6",
+    "revision_date": "2026-09-02",
     "remediation": (
     'Remove the DONT_REQ_PREAUTH flag to re-enable Kerberos pre-authentication. '
     'There is essentially no legitimate reason to leave this disabled on a '
@@ -25,7 +25,7 @@ PLUGIN = {
     'investigate, not the default assumption.'
 ),
     "control_id": "CRED-007",
-    "framework_tags": [],
+    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1558.004"],
     "references": [
         {"title": "MITRE ATT&CK T1558.004: Steal or Forge Kerberos Tickets -- AS-REP Roasting",
          "url": "https://attack.mitre.org/techniques/T1558/004/"},

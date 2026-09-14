@@ -43,8 +43,8 @@ PLUGIN = {
     "plugin_id": 6007,
     "category": "Certificate Services",
     "name": "PKI Infrastructure Object ACL Misconfiguration Matches ESC5",
-    "version": "1.1",
-    "revision_date": "2026-08-04",
+    "version": "1.2",
+    "revision_date": "2026-09-02",
     "remediation": (
         "Confirm whether this grant is a deliberate PKI administration "
         "delegation or leftover/overly broad. These objects live in "
@@ -60,7 +60,7 @@ PLUGIN = {
         "gives a path to compromising the CA server directly."
     ),
     "control_id": "PKI-501",
-    "framework_tags": [],
+    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1649"],
     "references": [
         {"title": "SpecterOps: Certified Pre-Owned -- Abusing Active Directory Certificate Services",
          "url": "https://posts.specterops.io/certified-pre-owned-d95910965cd2"},

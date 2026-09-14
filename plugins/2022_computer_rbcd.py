@@ -20,8 +20,8 @@ PLUGIN = {
     "plugin_id": 2022,
     "category": "Computer Accounts",
     "name": "Computer Account Has Resource-Based Constrained Delegation Configured",
-    "version": "1.3",
-    "revision_date": "2026-07-15",
+    "version": "1.4",
+    "revision_date": "2026-09-02",
     "remediation": (
         "Confirm each trustee is a deliberate, understood delegation "
         "relationship, not leftover from a decommissioned service or an "
@@ -34,7 +34,7 @@ PLUGIN = {
         "to clear entirely, or reset it to a specific, reviewed list."
     ),
     "control_id": "DELEG-101",
-    "framework_tags": ["MITRE-ATTCK-T1134"],
+    "framework_tags": ["MITRE-ATTCK-T1134", "CISA-AA26-237A", "MITRE-ATTCK-T1098"],
     "references": [
         {"title": "MITRE ATT&CK T1134: Access Token Manipulation",
          "url": "https://attack.mitre.org/techniques/T1134/"},

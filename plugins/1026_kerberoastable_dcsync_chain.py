@@ -18,8 +18,8 @@ PLUGIN = {
     "plugin_id": 1026,
     "category": "User Accounts",
     "name": "Kerberoastable User Account Directly Holds DCSync Rights",
-    "version": "1.2",
-    "revision_date": "2026-07-17",
+    "version": "1.3",
+    "revision_date": "2026-09-02",
     "remediation": (
         "Treat as an active, complete attack path, not a theoretical "
         "risk: anyone who can request a service ticket for this "
@@ -34,7 +34,8 @@ PLUGIN = {
         "5001's remediation)."
     ),
     "control_id": "CHAIN-101",
-    "framework_tags": ["MITRE-ATTCK-T1558.003", "MITRE-ATTCK-T1003.006"],
+    "framework_tags": ["MITRE-ATTCK-T1558.003", "MITRE-ATTCK-T1003.006",
+                       "CISA-AA26-237A"],
     "references": [
         {"title": "MITRE ATT&CK T1558.003: Steal or Forge Kerberos Tickets -- Kerberoasting",
          "url": "https://attack.mitre.org/techniques/T1558/003/"},
