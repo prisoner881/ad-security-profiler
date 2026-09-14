@@ -14,8 +14,8 @@ PLUGIN = {
     "plugin_id": 5006,
     "category": "ACLs",
     "name": "Domain Root or AdminSDHolder Owned by an Unexpected Principal",
-    "version": "1.2",
-    "revision_date": "2026-07-17",
+    "version": "1.3",
+    "revision_date": "2026-09-02",
     "remediation": (
         "Take ownership back to a recognized default holder "
         "(`takeown`-equivalent via ADSI Edit's Security tab, Advanced, "
@@ -28,7 +28,7 @@ PLUGIN = {
         "current ACL."
     ),
     "control_id": "ACL-006",
-    "framework_tags": [],
+    "framework_tags": ["CISA-AA26-237A"],
     "references": [
         {"title": "BloodHound (SpecterOps): WriteOwner edge",
          "url": "https://bloodhound.specterops.io/resources/edges/write-owner"},

@@ -11,8 +11,8 @@ PLUGIN = {
     "plugin_id": 1006,
     "category": "User Accounts",
     "name": "krbtgt Account Password Has Not Been Rotated Recently",
-    "version": "1.3",
-    "revision_date": "2026-07-15",
+    "version": "1.4",
+    "revision_date": "2026-09-02",
     "remediation": (
     'Reset the krbtgt password twice, waiting at least 10 hours between resets '
     "(confirmed directly against Microsoft's own AD Forest Recovery guidance; "
@@ -27,7 +27,7 @@ PLUGIN = {
     'before the second reset.'
 ),
     "control_id": "CRED-004",
-    "framework_tags": [],
+    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1558.001"],
     "references": [
         {"title": "MITRE ATT&CK T1558.001: Steal or Forge Kerberos Tickets -- Golden Ticket",
          "url": "https://attack.mitre.org/techniques/T1558/001/"},

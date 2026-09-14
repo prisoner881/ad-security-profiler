@@ -18,8 +18,8 @@ PLUGIN = {
     "plugin_id": 3008,
     "category": "Groups",
     "name": "Non-Standard Group Nested Inside a Privileged Group",
-    "version": "1.5",
-    "revision_date": "2026-08-04",
+    "version": "1.6",
+    "revision_date": "2026-09-02",
     "remediation": (
         "Confirm this nesting was a deliberate, documented administrative "
         "decision. Anyone added to the nested group inherits the outer "
@@ -31,7 +31,7 @@ PLUGIN = {
         "indirect privilege in place unexplained."
     ),
     "control_id": "PRIV-305",
-    "framework_tags": [],
+    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1078.002"],
     "references": [],
     "description": (
         "Windows' own default configuration nests certain well-known "

@@ -19,8 +19,8 @@ PLUGIN = {
     "plugin_id": 6003,
     "category": "Certificate Services",
     "name": "Certificate Template Omits the Security Identifier Extension (ESC9)",
-    "version": "1.0",
-    "revision_date": "2026-07-18",
+    "version": "1.1",
+    "revision_date": "2026-09-02",
     "remediation": (
         "Remove the CT_FLAG_NO_SECURITY_EXTENSION flag from this "
         "template's msPKI-Enrollment-Flag unless there is a specific, "
@@ -35,7 +35,7 @@ PLUGIN = {
         "on the weaker mapping first."
     ),
     "control_id": "ADCS-103",
-    "framework_tags": [],
+    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1649"],
     "references": [
         {"title": "Certipy Wiki: Privilege Escalation -- ESC9 (No Security Extension)",
          "url": "https://github.com/ly4k/Certipy/wiki/06-%E2%80%90-Privilege-Escalation"},

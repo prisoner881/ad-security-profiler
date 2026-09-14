@@ -30,8 +30,8 @@ PLUGIN = {
     "plugin_id": 6010,
     "category": "Certificate Services",
     "name": "Certificate Template Vulnerable to ESC15 (\"EKUwu\" EKU Injection)",
-    "version": "1.0",
-    "revision_date": "2026-07-31",
+    "version": "1.1",
+    "revision_date": "2026-09-02",
     "remediation": (
         "First, confirm the November 2024 patch for CVE-2024-49019 is "
         "installed on every Certificate Authority server -- this "
@@ -43,7 +43,7 @@ PLUGIN = {
         "template from this CA once the duplicate is in use."
     ),
     "control_id": "PKI-1501",
-    "framework_tags": [],
+    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1649"],
     "references": [
         {"title": "SpecterOps/Certify Wiki: ESC15 -- EKUwu (Application Policy Injection)",
          "url": "https://docs.specterops.io/ghostpack-docs/Certify.wik-mdx/esc15-ekuwu-application-policy-injection"},

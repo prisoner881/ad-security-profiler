@@ -24,8 +24,8 @@ PLUGIN = {
     "plugin_id": 1041,
     "category": "User Accounts",
     "name": "Privileged Account Missing the \"Cannot Be Delegated\" Protection Flag",
-    "version": "1.0",
-    "revision_date": "2026-08-05",
+    "version": "1.1",
+    "revision_date": "2026-09-02",
     "remediation": (
         "Set the flag: check \"This account is sensitive and cannot be "
         "delegated\" on the account's Account tab (or add 1048576 to "
@@ -37,7 +37,7 @@ PLUGIN = {
         "delegation targeting."
     ),
     "control_id": "USR-141",
-    "framework_tags": ["DISA-STIG"],
+    "framework_tags": ["DISA-STIG", "CISA-AA26-237A"],
     "references": [
         {"title": "PingCastle: Privileged Accounts rules -- P-Delegated",
          "url": "https://pingcastle.com/PingCastleFiles/ad_hc_rules_list.html"},

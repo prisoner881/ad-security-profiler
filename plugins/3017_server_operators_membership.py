@@ -18,8 +18,8 @@ PLUGIN = {
     "plugin_id": 3017,
     "category": "Groups",
     "name": "Server Operators Group Has Members",
-    "version": "1.0",
-    "revision_date": "2026-07-18",
+    "version": "1.1",
+    "revision_date": "2026-09-02",
     "remediation": (
         "Review every member listed in this finding's evidence. Server "
         "Operators on a domain controller carries risk comparable to "
@@ -29,7 +29,7 @@ PLUGIN = {
         "rather than adding accounts to this built-in group."
     ),
     "control_id": "PRIV-315",
-    "framework_tags": [],
+    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1078.002"],
     "references": [
         {"title": "HackTricks: Privileged Groups and Token Privileges",
          "url": "https://book.hacktricks.xyz/windows-hardening/active-directory-methodology/privileged-groups-and-token-privileges"},

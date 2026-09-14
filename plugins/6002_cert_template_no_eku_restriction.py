@@ -21,8 +21,8 @@ PLUGIN = {
     "plugin_id": 6002,
     "category": "Certificate Services",
     "name": "Certificate Template Has No Extended Key Usage Restriction",
-    "version": "1.0",
-    "revision_date": "2026-07-18",
+    "version": "1.1",
+    "revision_date": "2026-09-02",
     "remediation": (
         "Restrict the template's Extended Key Usage to only the "
         "specific purpose(s) it's actually intended for (Certificate "
@@ -34,7 +34,7 @@ PLUGIN = {
         "what makes this pattern exploitable, not the EKU setting alone."
     ),
     "control_id": "ADCS-102",
-    "framework_tags": [],
+    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1649"],
     "references": [
         {"title": "SpecterOps: Certified Pre-Owned -- Abusing Active Directory Certificate Services",
          "url": "https://posts.specterops.io/certified-pre-owned-d95910965cd2"},

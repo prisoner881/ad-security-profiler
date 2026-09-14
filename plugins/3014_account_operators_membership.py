@@ -20,8 +20,8 @@ PLUGIN = {
     "plugin_id": 3014,
     "category": "Groups",
     "name": "Account Operators Group Has Members",
-    "version": "1.0",
-    "revision_date": "2026-07-18",
+    "version": "1.1",
+    "revision_date": "2026-09-02",
     "remediation": (
         "Review every member listed in this finding's evidence and "
         "confirm each one genuinely needs domain-wide account "
@@ -36,7 +36,7 @@ PLUGIN = {
         "chained domain-compromise paths."
     ),
     "control_id": "PRIV-311",
-    "framework_tags": [],
+    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1078.002"],
     "references": [
         {"title": "SpecterOps: Untrustworthy Trust Builders -- Account Operators Replicating Trust Attack (AORTA)",
          "url": "https://specterops.io/blog/2025/06/25/untrustworthy-trust-builders-account-operators-replicating-trust-attack-aorta/"},

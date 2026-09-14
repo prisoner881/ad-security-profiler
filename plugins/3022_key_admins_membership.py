@@ -27,8 +27,8 @@ PLUGIN = {
     "plugin_id": 3022,
     "category": "Groups",
     "name": "Key Admins or Enterprise Key Admins Group Has Members",
-    "version": "1.0",
-    "revision_date": "2026-07-19",
+    "version": "1.1",
+    "revision_date": "2026-09-02",
     "remediation": (
         "Review every member listed in this finding's evidence. The "
         "only common legitimate reason for standing membership is a "
@@ -42,7 +42,7 @@ PLUGIN = {
         "standing right on that specific account first."
     ),
     "control_id": "PRIV-313",
-    "framework_tags": [],
+    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1078.002"],
     "references": [
         {"title": "MITRE ATT&CK T1556: Modify Authentication Process",
          "url": "https://attack.mitre.org/techniques/T1556/"},
