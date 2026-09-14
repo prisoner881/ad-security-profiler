@@ -31,7 +31,7 @@ established throughout this project for group membership, delegation
 targets, and RBCD trustees.
 
 [v1.1] Fixed two real false positives found against production data
-(forge.local): Enterprise Domain Controllers (S-1-5-9) and Enterprise
+(lab.example): Enterprise Domain Controllers (S-1-5-9) and Enterprise
 Read-only Domain Controllers (RID 498) are both confirmed, by
 Microsoft's own documentation, to be DEFAULT holders of replication
 rights -- not misconfigurations. Deliberately did NOT exclude the
@@ -48,8 +48,8 @@ PLUGIN = {
     "plugin_id": 5001,
     "category": "ACLs",
     "name": "DCSync Replication Rights Held by an Unexpected Principal",
-    "version": "1.3",
-    "revision_date": "2026-07-15",
+    "version": "1.4",
+    "revision_date": "2026-09-02",
     "remediation": (
         "Confirm this grant was deliberate and is still needed. "
         "Service accounts frequently accumulate replication rights for "
@@ -64,7 +64,7 @@ PLUGIN = {
         "access broader than required."
     ),
     "control_id": "ACL-001",
-    "framework_tags": ["MITRE-ATTCK-T1003.006"],
+    "framework_tags": ["MITRE-ATTCK-T1003.006", "CISA-AA26-237A"],
     "references": [
         {"title": "MITRE ATT&CK T1003.006: OS Credential Dumping -- DCSync",
          "url": "https://attack.mitre.org/techniques/T1003/006/"},

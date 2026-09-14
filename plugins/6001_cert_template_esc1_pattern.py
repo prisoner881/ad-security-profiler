@@ -38,8 +38,8 @@ PLUGIN = {
     "plugin_id": 6001,
     "category": "Certificate Services",
     "name": "Certificate Template Matches ESC1 Attack Pattern",
-    "version": "1.1",
-    "revision_date": "2026-07-18",
+    "version": "1.2",
+    "revision_date": "2026-09-02",
     "remediation": (
         "Confirm who can actually enroll against this template (its own "
         "security tab in the Certificate Templates console, or "
@@ -68,7 +68,7 @@ PLUGIN = {
         "enrollment alone does not fully close this specific template."
     ),
     "control_id": "ADCS-101",
-    "framework_tags": [],
+    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1649"],
     "references": [
         {"title": "SpecterOps: Certified Pre-Owned -- Abusing Active Directory Certificate Services",
          "url": "https://posts.specterops.io/certified-pre-owned-d95910965cd2"},

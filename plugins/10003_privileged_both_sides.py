@@ -25,8 +25,8 @@ PLUGIN = {
     "plugin_id": 10003,
     "category": "Hybrid Identity",
     "name": "Account Holds Both Domain Admin and Global Administrator Privileges",
-    "version": "1.0",
-    "revision_date": "2026-07-19",
+    "version": "1.1",
+    "revision_date": "2026-09-02",
     "remediation": (
         "Confirm this dual privilege is genuinely necessary rather than "
         "incidental (e.g. an account that was made Global Administrator "
@@ -42,7 +42,7 @@ PLUGIN = {
         "elevated urgency given the combined blast radius."
     ),
     "control_id": "HYBRID-003",
-    "framework_tags": [],
+    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1078.004"],
     "references": [],
     "description": (
         "An account holding both on-prem Domain Admin-equivalent "

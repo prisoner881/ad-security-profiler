@@ -16,8 +16,8 @@ PLUGIN = {
     "plugin_id": 1035,
     "category": "User Accounts",
     "name": "Constrained Delegation Configured to krbtgt",
-    "version": "1.0",
-    "revision_date": "2026-07-18",
+    "version": "1.1",
+    "revision_date": "2026-09-02",
     "remediation": (
         "Treat this as a likely active-compromise indicator, not a "
         "routine misconfiguration -- there is no legitimate reason for "
@@ -32,7 +32,7 @@ PLUGIN = {
         "already exploited."
     ),
     "control_id": "ANOM-102",
-    "framework_tags": [],
+    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1098"],
     "references": [],
     "description": (
         "msDS-AllowedToDelegateTo (constrained delegation) lets an "

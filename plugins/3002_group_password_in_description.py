@@ -24,8 +24,8 @@ PLUGIN = {
     "plugin_id": 3002,
     "category": "Groups",
     "name": "Group Description/Notes Field May Contain Password Material",
-    "version": "1.2",
-    "revision_date": "2026-07-15",
+    "version": "1.3",
+    "revision_date": "2026-09-02",
     "remediation": (
         "Remove the sensitive text from the field immediately, and treat "
         "the exposed credential as compromised -- rotate it, and check "
@@ -36,7 +36,7 @@ PLUGIN = {
         "account or shared mailbox password."
     ),
     "control_id": "CRED-201",
-    "framework_tags": [],
+    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1552.001"],
     "references": [],
     "description": (
         "The description and info (\"Notes\" in ADUC) attributes are "

@@ -14,8 +14,8 @@ PLUGIN = {
     "plugin_id": 1009,
     "category": "User Accounts",
     "name": "Kerberoastable User Account (SPN Registered)",
-    "version": "1.3",
-    "revision_date": "2026-07-15",
+    "version": "1.4",
+    "revision_date": "2026-09-02",
     "remediation": (
     'Where possible, eliminate the need for this account to be a standalone '
     'service account with an SPN at all by migrating to a Group Managed Service '
@@ -27,7 +27,7 @@ PLUGIN = {
     'realistically crackable even if captured.'
 ),
     "control_id": "CRED-005",
-    "framework_tags": ["MITRE-ATTCK-T1558.003"],
+    "framework_tags": ["MITRE-ATTCK-T1558.003", "CISA-AA26-237A"],
     "references": [
         {"title": "MITRE ATT&CK T1558.003: Kerberoasting",
          "url": "https://attack.mitre.org/techniques/T1558/003/"},

@@ -18,8 +18,8 @@ PLUGIN = {
     "plugin_id": 3019,
     "category": "Groups",
     "name": "Cert Publishers Group Has Unexpected Members",
-    "version": "1.0",
-    "revision_date": "2026-07-18",
+    "version": "1.1",
+    "revision_date": "2026-09-02",
     "remediation": (
         "Review every member listed in this finding's evidence. If a "
         "member is a computer account that IS actually running an "
@@ -31,7 +31,7 @@ PLUGIN = {
         "account to be here."
     ),
     "control_id": "PRIV-307",
-    "framework_tags": [],
+    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1078.002"],
     "references": [],
     "description": (
         "The built-in Cert Publishers group exists so CA computer "

@@ -30,8 +30,8 @@ PLUGIN = {
     "plugin_id": 6008,
     "category": "Certificate Services",
     "name": "Certificate Authority Object ACL Misconfiguration Matches ESC7",
-    "version": "1.1",
-    "revision_date": "2026-08-04",
+    "version": "1.2",
+    "revision_date": "2026-09-02",
     "remediation": (
         "Confirm whether this grant is a deliberate PKI administration "
         "delegation or leftover/overly broad. Review via the CA's own "
@@ -45,7 +45,7 @@ PLUGIN = {
         "otherwise require manager sign-off."
     ),
     "control_id": "PKI-701",
-    "framework_tags": [],
+    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1649"],
     "references": [
         {"title": "BloodHound (SpecterOps): ManageCA edge",
          "url": "https://bloodhound.specterops.io/resources/edges/manage-ca"},

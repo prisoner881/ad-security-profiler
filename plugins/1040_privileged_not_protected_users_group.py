@@ -23,8 +23,8 @@ PLUGIN = {
     "plugin_id": 1040,
     "category": "User Accounts",
     "name": "Privileged Account Not a Member of the Protected Users Group",
-    "version": "1.0",
-    "revision_date": "2026-08-05",
+    "version": "1.1",
+    "revision_date": "2026-09-02",
     "remediation": (
         "Add this account to the built-in Protected Users group, "
         "provided the domain functional level is at least Windows "
@@ -39,7 +39,7 @@ PLUGIN = {
         "here, no action is needed for that specific account."
     ),
     "control_id": "USR-140",
-    "framework_tags": ["DISA-STIG"],
+    "framework_tags": ["DISA-STIG", "CISA-AA26-237A"],
     "references": [
         {"title": "Microsoft: Protected Users Security Group",
          "url": "https://learn.microsoft.com/en-us/windows-server/security/credentials-protection-and-management/protected-users-security-group"},

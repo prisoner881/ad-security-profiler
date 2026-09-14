@@ -12,8 +12,8 @@ PLUGIN = {
     "plugin_id": 2002,
     "category": "Computer Accounts",
     "name": "Computer Account Has Constrained Delegation With Protocol Transition",
-    "version": "1.2",
-    "revision_date": "2026-07-15",
+    "version": "1.3",
+    "revision_date": "2026-09-02",
     "remediation": (
         "Review whether this computer genuinely needs S4U2Self (protocol "
         "transition) capability at all. If so, pair it with resource-based "
@@ -24,7 +24,7 @@ PLUGIN = {
         "machine's actual function requires."
     ),
     "control_id": "DELEG-004",
-    "framework_tags": [],
+    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1550.003"],
     "references": [],
     "description": (
         "TRUSTED_TO_AUTH_FOR_DELEGATION (UAC bit 0x1000000) enables "

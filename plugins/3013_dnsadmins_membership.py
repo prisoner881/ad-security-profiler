@@ -24,8 +24,8 @@ PLUGIN = {
     "plugin_id": 3013,
     "category": "Groups",
     "name": "DnsAdmins Group Has Members",
-    "version": "1.0",
-    "revision_date": "2026-07-18",
+    "version": "1.1",
+    "revision_date": "2026-09-02",
     "remediation": (
         "Review every member listed in this finding's evidence and "
         "confirm each one genuinely needs DNS administration rights. "
@@ -43,7 +43,7 @@ PLUGIN = {
         "the group is a separate path to the same outcome."
     ),
     "control_id": "PRIV-310",
-    "framework_tags": [],
+    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1078.002"],
     "references": [
         {"title": "Tenable: DnsAdmins Exploitation",
          "url": "https://www.tenable.com/indicators/ioa/I-DnsAdmins"},

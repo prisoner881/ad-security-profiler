@@ -13,8 +13,8 @@ PLUGIN = {
     "plugin_id": 1020,
     "category": "User Accounts",
     "name": "User Account Has Constrained Delegation With Protocol Transition",
-    "version": "1.3",
-    "revision_date": "2026-07-15",
+    "version": "1.4",
+    "revision_date": "2026-09-02",
     "remediation": (
     'Review whether this account genuinely needs S4U2Self (protocol transition) '
     'capability at all. If so, pair it with resource-based constrained '
@@ -25,7 +25,7 @@ PLUGIN = {
     'requires.'
 ),
     "control_id": "DELEG-002",
-    "framework_tags": [],
+    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1550.003"],
     "references": [],
     "description": (
         "TRUSTED_TO_AUTH_FOR_DELEGATION (UAC bit 0x1000000) enables "

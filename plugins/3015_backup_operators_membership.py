@@ -26,8 +26,8 @@ PLUGIN = {
     "plugin_id": 3015,
     "category": "Groups",
     "name": "Backup Operators Group Has Members",
-    "version": "1.0",
-    "revision_date": "2026-07-18",
+    "version": "1.1",
+    "revision_date": "2026-09-02",
     "remediation": (
         "Review every member listed in this finding's evidence. Backup "
         "Operators is effectively equivalent to Domain Admin from a "
@@ -43,7 +43,7 @@ PLUGIN = {
         "the same rigor applied to Domain Admins."
     ),
     "control_id": "PRIV-312",
-    "framework_tags": [],
+    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1078.002"],
     "references": [
         {"title": "Hacking Articles: Windows Privilege Escalation -- SeBackupPrivilege",
          "url": "https://www.hackingarticles.in/windows-privilege-escalation-sebackupprivilege/"},
