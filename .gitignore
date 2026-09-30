@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+adaudit-findings_*.xlsx
+adprofiler-*.log
