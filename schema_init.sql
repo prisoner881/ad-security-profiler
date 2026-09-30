@@ -576,12 +576,14 @@ CREATE TABLE ad_intel.ad_domain (
     pwd_no_clear_change boolean,
     pwd_allows_admin_lockout boolean,
     dsheuristics_anonymous_access boolean,
+    dsheuristics_uniqueness smallint,
     block_inheritance boolean DEFAULT false NOT NULL,
     CONSTRAINT ad_domain_check CHECK (((valid_to IS NULL) OR (valid_to > valid_from))),
     CONSTRAINT ad_domain_lockout_duration_seconds_check CHECK (((lockout_duration_seconds IS NULL) OR (lockout_duration_seconds >= 0))),
     CONSTRAINT ad_domain_lockout_observation_window_seconds_check CHECK (((lockout_observation_window_seconds IS NULL) OR (lockout_observation_window_seconds >= 0))),
     CONSTRAINT ad_domain_max_pwd_age_seconds_check CHECK (((max_pwd_age_seconds IS NULL) OR (max_pwd_age_seconds >= 0))),
-    CONSTRAINT ad_domain_min_pwd_age_seconds_check CHECK (((min_pwd_age_seconds IS NULL) OR (min_pwd_age_seconds >= 0)))
+    CONSTRAINT ad_domain_min_pwd_age_seconds_check CHECK (((min_pwd_age_seconds IS NULL) OR (min_pwd_age_seconds >= 0))),
+    CONSTRAINT ad_domain_dsheuristics_uniqueness_check CHECK (((dsheuristics_uniqueness IS NULL) OR ((dsheuristics_uniqueness >= 0) AND (dsheuristics_uniqueness <= 7))))
 )
 PARTITION BY RANGE (valid_from);
 
@@ -640,6 +642,13 @@ COMMENT ON COLUMN ad_intel.ad_domain.pwd_allows_admin_lockout IS 'pwdProperties 
 --
 
 COMMENT ON COLUMN ad_intel.ad_domain.dsheuristics_anonymous_access IS 'dSHeuristics 7th character = "2" on the forest-wide Directory Service object. When TRUE, anonymous (unauthenticated) LDAP operations are permitted against this forest -- confirmed against MS-ADTS and DISA STIG V-243503. Default (attribute unset) is FALSE.';
+
+
+--
+-- Name: COLUMN ad_domain.dsheuristics_uniqueness; Type: COMMENT; Schema: ad_intel; Owner: -
+--
+
+COMMENT ON COLUMN ad_intel.ad_domain.dsheuristics_uniqueness IS 'dSHeuristics 21st character on the forest-wide Directory Service object, parsed as an integer bitmask: bit 0 disables UPN uniqueness verification, bit 1 disables SPN uniqueness verification, bit 2 disables SPN alias uniqueness verification (CVE-2021-42282 / KB5008382). 0 = all enforced (default). NULL = not determined, which is NOT the same as enforced. Supports plugin 4030.';
 
 
 --
@@ -3486,7 +3495,7 @@ CREATE TABLE schema_migration_history (
 -- pretense of having stepped through intermediate versions that were
 -- never actually separately applied to this database.
 INSERT INTO schema_migration_history (version_number, description) VALUES
-    (32, 'Fresh install via schema_init.sql, consolidated through v32');
+    (33, 'Fresh install via schema_init.sql, consolidated through v33');
 
 -- ============================================================================
 -- PARTITIONED TABLE REGISTRY + INITIAL PARTITION CREATION
