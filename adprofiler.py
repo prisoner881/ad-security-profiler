@@ -176,7 +176,7 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
-VERSION = "0.5.10"
+VERSION = "0.5.11"
 # [client-test-branch] These are always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
 # connect_postgres() is ever called -- the values here are placeholders,
@@ -1133,6 +1133,11 @@ def get_domain_sid_and_tombstone_lifetime(conn, base_dn, config_nc):
     tombstone_lifetime = None
     tombstone_lifetime_is_default = True
     dsheuristics_anonymous_access = False
+    # [v0.5.11] None means 'not determined' (e.g. the Directory Service
+    # object could not be read). That is deliberately distinct from 0,
+    # which means the uniqueness checks are enforced. Plugin 4030 must
+    # not report an unreadable value as if it were a safe one.
+    dsheuristics_uniqueness = None
     if config_nc:
         ds_dn = f"CN=Directory Service,CN=Windows NT,CN=Services,{config_nc}"
         try:
@@ -1158,10 +1163,30 @@ def get_domain_sid_and_tombstone_lifetime(conn, base_dn, config_nc):
                 # LDAP access forest-wide, confirmed against MS-ADTS and DISA
                 # STIG V-243503. Same Directory Service object already being
                 # queried here -- no new LDAP round-trip needed.
+                # [v0.5.11] The Directory Service object was readable, so
+                # the uniqueness state is now known. Absent or short
+                # dSHeuristics means the default: all checks enforced.
+                dsheuristics_uniqueness = 0
                 if dsh_val:
                     dsh_str = dsh_val[0] if isinstance(dsh_val, list) else dsh_val
                     if len(dsh_str) >= 7 and dsh_str[6] == "2":
                         dsheuristics_anonymous_access = True
+                    # [v0.5.11] Character 21 is a three-bit mask disabling
+                    # UPN (1), SPN (2) and SPN alias (4) uniqueness
+                    # verification -- CVE-2021-42282 / KB5008382. These
+                    # are the guardrails that KerberLoss (CVE-2026-25177)
+                    # and ResetNightmare (CVE-2026-27912) work around;
+                    # where they are off, no Unicode trick is needed.
+                    # Supports plugin 4030.
+                    if len(dsh_str) >= 21 and dsh_str[20].isdigit():
+                        parsed = int(dsh_str[20])
+                        if 0 <= parsed <= 7:
+                            dsheuristics_uniqueness = parsed
+                        else:
+                            log_warn(f"dSHeuristics character 21 has unexpected "
+                                     f"value {parsed!r}; treating uniqueness state "
+                                     f"as undetermined rather than guessing.")
+                            dsheuristics_uniqueness = None
         except LDAPException as exc:
             log_warn(f"Could not read tombstone lifetime: {exc}")
     if tombstone_lifetime is None:
@@ -1172,7 +1197,8 @@ def get_domain_sid_and_tombstone_lifetime(conn, base_dn, config_nc):
                  "value, not a confirmed one.")
         tombstone_lifetime = 60
 
-    return domain_sid, tombstone_lifetime, tombstone_lifetime_is_default, dsheuristics_anonymous_access
+    return (domain_sid, tombstone_lifetime, tombstone_lifetime_is_default,
+            dsheuristics_anonymous_access, dsheuristics_uniqueness)
 
 
 def ldap_attribute_exists(conn, config_nc, attribute_ldap_name):
@@ -1332,7 +1358,8 @@ REQUIRED_SCHEMA_COLUMNS = {
                   "pwd_history_count", "machine_account_quota",
                   "pwd_reversible_encryption_domain_wide",
                   "laps_schema_present", "pwd_no_clear_change", "pwd_allows_admin_lockout",
-                  "dsheuristics_anonymous_access", "block_inheritance",
+                  "dsheuristics_anonymous_access", "dsheuristics_uniqueness",
+                  "block_inheritance",
                   "well_known_objects", "dfsr_migration_flags"},
     "ad_ou": {"object_guid", "client_id", "version_id", "valid_from", "valid_to",
               "ou_name", "description", "block_inheritance", "when_created"},
@@ -1421,7 +1448,7 @@ REQUIRED_IDENTITY_COLUMNS = {
 # the structural check remains the backstop for a schema altered
 # outside the approved migration files, where the version number could
 # claim to be current while the actual structure doesn't match it.
-EXPECTED_SCHEMA_VERSION = 32
+EXPECTED_SCHEMA_VERSION = 33
 
 
 def check_schema_version(pg_conn):
@@ -2244,7 +2271,8 @@ def ou_typed_columns(full):
 
 
 def domain_typed_columns(full, functional_level, tombstone_lifetime_days, tombstone_lifetime_is_default,
-                          laps_schema_present, dsheuristics_anonymous_access, dfsr_migration_flags):
+                          laps_schema_present, dsheuristics_anonymous_access,
+                          dfsr_migration_flags, dsheuristics_uniqueness=None):
     """[v0.1.3 fix] minPwdAge/maxPwdAge/lockoutDuration/lockOutObservationWindow
     were never collected for the domain-wide DEFAULT password policy, even
     though the equivalent fields were built for Fine-Grained Password
@@ -2277,6 +2305,7 @@ def domain_typed_columns(full, functional_level, tombstone_lifetime_days, tombst
         "pwd_allows_admin_lockout": bool(pwd_props & 0x8),
         "laps_schema_present": laps_schema_present,
         "dsheuristics_anonymous_access": dsheuristics_anonymous_access,
+        "dsheuristics_uniqueness": dsheuristics_uniqueness,
         "lockout_threshold": _as_int(full.get("lockoutThreshold")),
         "min_pwd_age_seconds": ad_interval_to_seconds(full.get("minPwdAge")),
         "max_pwd_age_seconds": ad_interval_to_seconds(full.get("maxPwdAge")),
@@ -3227,7 +3256,9 @@ def main():
         log_info(f"Search base: {base_dn}")
         log_info(f"Current DC highestCommittedUSN: {rootdse['highest_committed_usn']}")
 
-        domain_sid, tombstone_lifetime, tombstone_lifetime_is_default, dsheuristics_anonymous_access = get_domain_sid_and_tombstone_lifetime(
+        (domain_sid, tombstone_lifetime, tombstone_lifetime_is_default,
+         dsheuristics_anonymous_access,
+         dsheuristics_uniqueness) = get_domain_sid_and_tombstone_lifetime(
             ldap_conn, base_dn, rootdse["config_nc"]
         )
 
@@ -3437,6 +3468,7 @@ def main():
                     full, rootdse.get("domain_functionality"), tombstone_lifetime,
                     tombstone_lifetime_is_default, laps_legacy_present or laps_modern_present,
                     dsheuristics_anonymous_access, dfsr_migration_flags,
+                    dsheuristics_uniqueness,
                 ),
                 dn_to_guid, stats, run_timestamp,
             )
