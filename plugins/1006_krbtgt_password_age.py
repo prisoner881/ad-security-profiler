@@ -5,14 +5,22 @@ The krbtgt account's password (really its NT hash) is what signs every
 Kerberos ticket in the domain. An old, unrotated krbtgt password widens
 the historical validity window for Golden Ticket forgery if the hash is
 ever compromised (e.g. via DCSync) at any point during that span.
+
+[v1.5] The summary now states the password-last-set time as a date (UTC,
+to the day) rather than a day count computed from now(). The count
+differed on every run, so an unchanged finding was recorded as 'changed'
+on every audit; the date only moves when the underlying attribute does.
+Severity and inclusion thresholds are unchanged. The day count is still
+reported in detail (password_age_days), which is not part of the
+finding's identity because object_guid is always set for this plugin.
 """
 
 PLUGIN = {
     "plugin_id": 1006,
     "category": "User Accounts",
     "name": "krbtgt Account Password Has Not Been Rotated Recently",
-    "version": "1.4",
-    "revision_date": "2026-09-02",
+    "version": "1.5",
+    "revision_date": "2026-10-03",
     "remediation": (
     'Reset the krbtgt password twice, waiting at least 10 hours between resets '
     "(confirmed directly against Microsoft's own AD Forest Recovery guidance; "
@@ -59,8 +67,8 @@ PLUGIN = {
             NULL AS tool_severity,
             NULL AS tool_reference,
             'medium' AS fd_severity,
-            'krbtgt account password has not been changed in '
-                || EXTRACT(DAY FROM now() - u.pwd_last_set)::int || ' days' AS summary,
+            'krbtgt account password has not been changed since '
+                || to_char(u.pwd_last_set AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS summary,
             jsonb_build_object(
                 'sam_account_name', u.sam_account_name,
                 'pwd_last_set', u.pwd_last_set,

@@ -27,14 +27,23 @@ whether it is disabled but still holding replication rights. What is
 not checkable from LDAP is the security posture of the Entra Connect
 server itself -- and that host is where the credential actually leaks
 from, so the remediation addresses it explicitly.
+
+[v1.1] The MSOL_ and AAD_ name patterns now escape the underscore, which LIKE
+otherwise treats as a single-character wildcard (so 'AAD_%' also matched
+names such as 'AADX...'), matching plugin 10010. The summary now states the
+date the password was last set (YYYY-MM-DD, UTC) rather than an age in days
+computed from now(). The summary is part of adaudit.py's change
+comparison, so the day count made an unchanged finding re-version as
+"changed" on every analysis run. The evidence detail still carries
+password_age_days.
 """
 
 PLUGIN = {
     "plugin_id": 10009,
     "category": "Hybrid Identity",
     "name": "Entra Connect Directory Synchronization Account Exposure",
-    "version": "1.0",
-    "revision_date": "2026-09-02",
+    "version": "1.1",
+    "revision_date": "2026-10-03",
     "remediation": (
         "Treat this account as Tier 0 and the Entra Connect server as "
         "a Tier 0 asset, on par with a domain controller -- it holds a "
@@ -98,8 +107,10 @@ PLUGIN = {
             WHERE u.valid_to IS NULL
               AND u.client_id = %(client_id)s
               AND (
-                    u.sam_account_name LIKE 'MSOL_%%'
-                 OR u.sam_account_name LIKE 'AAD_%%'
+                    -- [v1.1] Underscore escaped: unescaped, LIKE treats it as
+                    -- a single-character wildcard (matching e.g. 'AADX...').
+                    u.sam_account_name LIKE 'MSOL\\_%%'
+                 OR u.sam_account_name LIKE 'AAD\\_%%'
                  OR u.sam_account_name LIKE 'ADSyncMSA%%'
                  OR u.description ILIKE '%%Azure AD Connect%%'
                  OR u.description ILIKE '%%Entra Connect%%'
@@ -141,8 +152,8 @@ PLUGIN = {
                            THEN 'is disabled but retains its replication rights'
                        WHEN sa.pwd_last_set IS NULL
                            THEN 'has no recorded password rotation date'
-                       ELSE 'has not had its password rotated in '
-                            || EXTRACT(DAY FROM now() - sa.pwd_last_set)::int || ' days'
+                       ELSE 'has not had its password rotated since '
+                            || to_char(sa.pwd_last_set AT TIME ZONE 'UTC', 'YYYY-MM-DD')
                    END AS summary,
             jsonb_build_object(
                 'sam_account_name', sa.sam_account_name,

@@ -9,6 +9,33 @@ the script's own docstring now keeps a one-line summary per entry, this
 file keeps the complete detail (root causes, what was verified, why a
 decision was made a particular way) for anyone who wants it.
 
+    0.5.12 - LDAP failures are no longer silently treated as empty
+            results. The connection used ldap3's default
+            raise_exceptions=False, under which a failed search returns
+            nothing rather than raising, and ldap3's paged_search
+            generator simply stops on a failed page -- so a DC answering
+            busy/unavailable/time-limit-exceeded partway through a
+            collection produced a truncated result set, the run
+            committed as 'succeeded', and sync_edges() closed every edge
+            (group memberships, SPNs, delegations, ACLs) for the objects
+            it never saw. The non-fatal `except LDAPException` wrappers
+            around optional steps never fired for the same reason, and
+            the capability probe's view_deleted_objects check always
+            passed. Every search now goes through ldap_search() /
+            ldap_paged_search(), which check the LDAP result code:
+            noSuchObject and referral mean "not present" (unchanged
+            behavior for optional containers); busy, unavailable and
+            timeLimitExceeded are retried with backoff (4 attempts);
+            operationsError and dropped/timed-out connections trigger a
+            rebind and retry (a paged search restarts from page one and
+            skips entries already processed, since AD's paging cookie
+            doesn't survive a new connection); anything else, or
+            exhausted retries, raises LDAPCollectionError, which aborts
+            the run, rolls back the transaction and marks sync_run
+            'failed' with the error. Behavior change to note: a bind
+            account that is actively refused (rather than shown an empty
+            result) on CN=Deleted Objects now fails the capability probe,
+            as the probe always intended.
     0.5.9 - Fixed a real, confirmed schema bug found in production:
             unresolved_delegation_target_edge.edge_id was created as a
             plain "bigint NOT NULL" with no auto-generation mechanism

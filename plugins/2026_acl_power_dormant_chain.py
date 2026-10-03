@@ -7,14 +7,20 @@ logged on in 90+ days (or has never logged on). Nobody appears to be
 actively watching this machine, yet it retains standing, high-value
 domain access -- exactly the kind of forgotten asset that gets
 overlooked in routine monitoring while remaining fully exploitable.
+
+[v1.3] The summary now states the last logon time as a date (UTC, to the
+day) rather than a day count computed from now(). The count differed on
+every run, so an unchanged finding was recorded as 'changed' on every
+audit; the date only moves when the underlying attribute does. Severity
+and inclusion thresholds are unchanged.
 """
 
 PLUGIN = {
     "plugin_id": 2026,
     "category": "Computer Accounts",
     "name": "Computer Directly Holding DCSync or Dangerous ACL Rights Is Dormant",
-    "version": "1.2",
-    "revision_date": "2026-07-17",
+    "version": "1.3",
+    "revision_date": "2026-10-03",
     "remediation": (
         "Investigate immediately: either this machine is still in "
         "legitimate service but something is preventing normal logon "
@@ -81,7 +87,7 @@ PLUGIN = {
                 || ' directly holds DCSync or dangerous ACL rights on the domain root or '
                 'AdminSDHolder AND '
                 || (CASE WHEN c.last_logon_timestamp IS NULL THEN 'has never logged on'
-                         ELSE 'has not logged on in ' || EXTRACT(DAY FROM now() - c.last_logon_timestamp)::int || ' days' END)
+                         ELSE 'has not logged on since ' || to_char(c.last_logon_timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD') END)
                 AS summary,
             jsonb_build_object(
                 'sam_account_name', c.sam_account_name,

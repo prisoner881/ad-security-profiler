@@ -5,6 +5,20 @@ entra_graph_collector.py -- Microsoft Entra ID / Graph API Email Collector
 VERSION: 0.4.2
 
 CHANGELOG:
+    0.5.0 - Every Graph and token request now retries 429 (honouring
+            Retry-After), transient 5xx, and network errors/timeouts with
+            exponential backoff, and refreshes the access token once on
+            HTTP 401 (long runs can outlive the token). Exhausted retries
+            abort the run with a message naming the request and last
+            error. Fetching a directory role's members no longer logs a
+            warning and skips that role on failure -- skipping silently
+            erased the role's rows (Global Administrator included), since
+            the sync step replaces the whole table; it now retries and
+            then aborts, leaving the previous role data in place. Role
+            member lists now follow @odata.nextLink. An aborted run now
+            logs which tables were already refreshed this run and which
+            still hold data from an earlier run, since each step commits
+            on its own.
     0.4.2 - Every 403 error message now explicitly explains the Delegated-
             vs-Application permission-type distinction, not just consent
             status -- a real case showed Entra's admin-consent checkmark
@@ -94,9 +108,12 @@ SCOPE, HONESTLY
 import argparse
 import atexit
 import getpass
+import email.utils
 import json
+import random
 import re
 import sys
+import time
 from datetime import datetime, timezone
 
 import requests
@@ -113,7 +130,22 @@ PG_DBNAME = "adprofiler"
 PG_USER = None
 PG_PASSWORD = None
 
-VERSION = "0.4.2"
+VERSION = "0.5.0"
+
+# [v0.5.0] Retry policy shared by every Graph/token request (see
+# _send_with_retry()). 429 and transient 5xx responses, plus network
+# errors/timeouts, are retried with exponential backoff (2s, 4s, 8s, 16s,
+# 32s, plus up to 1s jitter), or for exactly as long as a Retry-After
+# header asks when Graph supplies one (capped, so a pathological value
+# can't hang the run). Worst case is roughly a minute of backoff per
+# request before the run aborts -- long enough to ride out ordinary
+# throttling, short enough that a genuinely down or saturated tenant
+# fails promptly with a clear message instead of appearing hung.
+GRAPH_MAX_ATTEMPTS = 6
+GRAPH_BACKOFF_BASE_SECONDS = 2
+GRAPH_BACKOFF_MAX_SECONDS = 60
+GRAPH_RETRY_AFTER_MAX_SECONDS = 300
+GRAPH_RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 
 GRAPH_TOKEN_URL_TMPL = "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
 GRAPH_USERS_URL = "https://graph.microsoft.com/v1.0/users"
@@ -255,13 +287,81 @@ class CollectorAbort(Exception):
 # Microsoft Graph
 # ============================================================================
 
+def _retry_delay(resp, attempt):
+    """Seconds to wait before the next attempt: the server's own
+    Retry-After when it sent one (delta-seconds or HTTP-date form, both
+    allowed by RFC 9110), otherwise exponential backoff with jitter."""
+    retry_after = resp.headers.get("Retry-After") if resp is not None else None
+    if retry_after:
+        try:
+            seconds = float(retry_after)
+        except ValueError:
+            try:
+                when = email.utils.parsedate_to_datetime(retry_after)
+                seconds = (when - datetime.now(timezone.utc)).total_seconds()
+            except (TypeError, ValueError):
+                seconds = None
+        if seconds is not None:
+            return min(max(seconds, 1.0), GRAPH_RETRY_AFTER_MAX_SECONDS)
+    backoff = GRAPH_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1))
+    return min(backoff, GRAPH_BACKOFF_MAX_SECONDS) + random.uniform(0, 1)
+
+
+def _send_with_retry(send, what, on_unauthorized=None):
+    """Calls send() (which returns a requests.Response) until it gets a
+    response that isn't worth retrying, and returns that response for
+    the caller to interpret. Retries network errors/timeouts and
+    GRAPH_RETRYABLE_STATUSES up to GRAPH_MAX_ATTEMPTS times in total.
+    On the first HTTP 401, calls on_unauthorized() (token refresh) and
+    retries once without counting it as an attempt. Raises
+    CollectorAbort once retries are exhausted -- never returns a
+    partial or failed result as if it were data."""
+    attempt = 0
+    refreshed = False
+    while True:
+        attempt += 1
+        resp = None
+        try:
+            resp = send()
+        except requests.exceptions.RequestException as exc:
+            problem = f"network error: {exc}"
+        else:
+            if resp.status_code == 401 and on_unauthorized is not None and not refreshed:
+                log_warn(f"  {what} returned HTTP 401 -- access token likely "
+                          f"expired mid-run; requesting a new one and retrying.")
+                on_unauthorized()
+                refreshed = True
+                attempt -= 1
+                continue
+            if resp.status_code not in GRAPH_RETRYABLE_STATUSES:
+                return resp
+            problem = f"HTTP {resp.status_code}"
+
+        if attempt >= GRAPH_MAX_ATTEMPTS:
+            throttle_hint = (
+                " Microsoft is throttling this tenant/application -- re-run later, "
+                "or space collection runs further apart if this recurs."
+                if resp is not None and resp.status_code == 429 else
+                " Re-run once Microsoft Graph / network connectivity is healthy."
+            )
+            raise CollectorAbort(
+                f"{what}: still failing after {GRAPH_MAX_ATTEMPTS} attempts "
+                f"(last error: {problem}). Aborting rather than recording incomplete "
+                f"data.{throttle_hint}"
+            )
+        delay = _retry_delay(resp, attempt)
+        log_warn(f"  {what} failed ({problem}); retrying in {delay:.0f}s "
+                  f"(attempt {attempt + 1} of {GRAPH_MAX_ATTEMPTS})...")
+        time.sleep(delay)
+
+
 def get_graph_token(tenant_id, app_id, app_secret):
     """OAuth2 client-credentials (app-only) flow. No signed-in user, no
     interactive consent at runtime -- consent was already granted once,
     ahead of time, when a tenant admin approved the application
     permission in the Entra admin center."""
-    try:
-        resp = requests.post(
+    resp = _send_with_retry(
+        lambda: requests.post(
             GRAPH_TOKEN_URL_TMPL.format(tenant_id=tenant_id),
             data={
                 "client_id": app_id,
@@ -270,12 +370,15 @@ def get_graph_token(tenant_id, app_id, app_secret):
                 "grant_type": "client_credentials",
             },
             timeout=30,
-        )
-    except requests.exceptions.RequestException as exc:
-        raise CollectorAbort(f"Could not reach Microsoft's token endpoint: {exc}")
+        ),
+        "Token request to Microsoft's token endpoint",
+    )
 
     if resp.status_code != 200:
-        detail = resp.json().get("error_description", resp.text) if resp.content else resp.reason
+        try:
+            detail = resp.json().get("error_description", resp.text)
+        except ValueError:
+            detail = resp.text or resp.reason
         raise CollectorAbort(
             f"Token request failed (HTTP {resp.status_code}): {detail}\n"
             "Common causes: wrong tenant ID, wrong app ID/secret, secret "
@@ -288,29 +391,53 @@ def get_graph_token(tenant_id, app_id, app_secret):
     return resp.json()["access_token"]
 
 
-def fetch_all_users(token):
+class GraphClient:
+    """Holds the app credentials and current access token so a token
+    that expires partway through a long collection (tokens last roughly
+    60-90 minutes) can be replaced transparently, and routes every GET
+    through _send_with_retry()."""
+
+    def __init__(self, tenant_id, app_id, app_secret):
+        self._tenant_id = tenant_id
+        self._app_id = app_id
+        self._app_secret = app_secret
+        self._token = get_graph_token(tenant_id, app_id, app_secret)
+
+    def _refresh_token(self):
+        self._token = get_graph_token(self._tenant_id, self._app_id, self._app_secret)
+
+    def get(self, url, what, forbidden_message=None):
+        """GETs url and returns the parsed JSON body. Raises
+        CollectorAbort on 403 (with forbidden_message when given -- the
+        permission-specific explanation), on any other non-200, or once
+        retries are exhausted."""
+        resp = _send_with_retry(
+            lambda: requests.get(url, headers={"Authorization": f"Bearer {self._token}"}, timeout=60),
+            f"Graph request for {what}",
+            on_unauthorized=self._refresh_token,
+        )
+        if resp.status_code == 403 and forbidden_message:
+            raise CollectorAbort(forbidden_message)
+        if resp.status_code != 200:
+            raise CollectorAbort(f"Graph request for {what} failed (HTTP {resp.status_code}): {resp.text}")
+        try:
+            return resp.json()
+        except ValueError:
+            raise CollectorAbort(f"Graph request for {what} returned HTTP 200 with a non-JSON body.")
+
+
+def fetch_all_users(graph):
     """Paginated via @odata.nextLink -- Graph enforces its own page-size
     ceiling regardless of $top, so this always follows nextLink rather
     than assume one request is enough."""
     users = []
     url = f"{GRAPH_USERS_URL}?$select={GRAPH_USER_SELECT}&$top={GRAPH_PAGE_SIZE}"
-    headers = {"Authorization": f"Bearer {token}"}
     page = 0
     while url:
         page += 1
-        try:
-            resp = requests.get(url, headers=headers, timeout=60)
-        except requests.exceptions.RequestException as exc:
-            raise CollectorAbort(f"Could not reach Microsoft Graph: {exc}")
-
-        if resp.status_code == 429:
-            retry_after = resp.headers.get("Retry-After", "an unspecified time")
-            raise CollectorAbort(
-                f"Graph throttled this request (HTTP 429); Retry-After: {retry_after}. "
-                "Re-run later, or reduce collection frequency if this recurs."
-            )
-        if resp.status_code == 403:
-            raise CollectorAbort(
+        body = graph.get(
+            url, f"users (page {page})",
+            forbidden_message=(
                 "Graph returned HTTP 403 (Forbidden). The application permission "
                 "(User.Read.All) is likely either not admin-consented, or -- just "
                 "as commonly -- consented under the wrong permission TYPE. Entra "
@@ -322,11 +449,8 @@ def fetch_all_users(token):
                 "Registration's API permissions blade, confirm User.Read.All is "
                 "listed under 'Application permissions' specifically (not "
                 "'Delegated permissions'), showing 'Granted for <tenant>'."
-            )
-        if resp.status_code != 200:
-            raise CollectorAbort(f"Graph request failed (HTTP {resp.status_code}): {resp.text}")
-
-        body = resp.json()
+            ),
+        )
         page_users = body.get("value", [])
         users.extend(page_users)
         log_info(f"  page {page}: {len(page_users)} user(s) ({len(users)} total so far)")
@@ -335,12 +459,12 @@ def fetch_all_users(token):
     return users
 
 
-def fetch_directory_roles_with_members(token):
+def fetch_directory_roles_with_members(graph):
     """Two-step fetch: list every activated role, then one members call
-    per role -- /directoryRoles/{id}/members has no pagination of its
-    own (confirmed against Microsoft's own documentation: returns up to
-    1,000 objects, no $top-based paging), so no nextLink-following
-    needed there, unlike fetch_all_users above.
+    per role. /directoryRoles/{id}/members doesn't support $top, but
+    @odata.nextLink is still followed if Graph returns one ([v0.5.0];
+    previously assumed never to happen) -- following it costs nothing
+    when absent and avoids silently truncating a large role.
 
     A role member can be a user, a group, or a service principal
     (Graph distinguishes these via @odata.type on each returned
@@ -350,13 +474,9 @@ def fetch_directory_roles_with_members(token):
     fact from a human account holding it, not something to silently
     drop.
     """
-    headers = {"Authorization": f"Bearer {token}"}
-    try:
-        resp = requests.get(GRAPH_DIRECTORY_ROLES_URL, headers=headers, timeout=60)
-    except requests.exceptions.RequestException as exc:
-        raise CollectorAbort(f"Could not reach Microsoft Graph: {exc}")
-    if resp.status_code == 403:
-        raise CollectorAbort(
+    body = graph.get(
+        GRAPH_DIRECTORY_ROLES_URL, "directory roles",
+        forbidden_message=(
             "Graph returned HTTP 403 (Forbidden) fetching directory roles. The "
             "application permission (RoleManagement.Read.Directory) is likely "
             "either not admin-consented, or -- just as commonly -- consented "
@@ -369,25 +489,27 @@ def fetch_directory_roles_with_members(token):
             "blade, confirm RoleManagement.Read.Directory is listed under "
             "'Application permissions' specifically (not 'Delegated "
             "permissions'), showing 'Granted for <tenant>'."
-        )
-    if resp.status_code != 200:
-        raise CollectorAbort(f"Graph request failed (HTTP {resp.status_code}): {resp.text}")
-    roles = resp.json().get("value", [])
+        ),
+    )
+    roles = body.get("value", [])
     log_info(f"  {len(roles)} activated directory role(s) found")
 
     role_members = []
     member_select = "id,displayName,userPrincipalName,onPremisesSecurityIdentifier,accountEnabled"
     for role in roles:
-        members_url = f"{GRAPH_DIRECTORY_ROLES_URL}/{role['id']}/members?$select={member_select}"
-        try:
-            resp = requests.get(members_url, headers=headers, timeout=60)
-        except requests.exceptions.RequestException as exc:
-            raise CollectorAbort(f"Could not reach Microsoft Graph: {exc}")
-        if resp.status_code != 200:
-            log_warn(f"  Could not fetch members of role '{role.get('displayName')}' "
-                      f"(HTTP {resp.status_code}) -- skipping this role, continuing with others.")
-            continue
-        members = resp.json().get("value", [])
+        # [v0.5.0] A failure here used to log a warning and skip the role.
+        # sync_directory_role_members() replaces the whole table, so a
+        # skipped role (one throttled call on Global Administrator, say)
+        # silently erased that role's rows and every Entra plugin then
+        # reported it clean. Now retried by graph.get(), and an exhausted
+        # retry aborts the run before anything is written, leaving the
+        # previous run's role data in place.
+        url = f"{GRAPH_DIRECTORY_ROLES_URL}/{role['id']}/members?$select={member_select}"
+        members = []
+        while url:
+            body = graph.get(url, f"members of directory role '{role.get('displayName')}'")
+            members.extend(body.get("value", []))
+            url = body.get("@odata.nextLink")
         log_info(f"  role '{role.get('displayName')}': {len(members)} member(s)")
         for member in members:
             role_members.append({"role": role, "member": member})
@@ -395,16 +517,12 @@ def fetch_directory_roles_with_members(token):
     return role_members
 
 
-def fetch_security_defaults(token):
+def fetch_security_defaults(graph):
     """A single object, no pagination -- confirmed against Microsoft's
     own documentation, {"isEnabled": bool, "displayName": ..., "id": ...}."""
-    headers = {"Authorization": f"Bearer {token}"}
-    try:
-        resp = requests.get(GRAPH_SECURITY_DEFAULTS_URL, headers=headers, timeout=60)
-    except requests.exceptions.RequestException as exc:
-        raise CollectorAbort(f"Could not reach Microsoft Graph: {exc}")
-    if resp.status_code == 403:
-        raise CollectorAbort(
+    body = graph.get(
+        GRAPH_SECURITY_DEFAULTS_URL, "Security Defaults status",
+        forbidden_message=(
             "Graph returned HTTP 403 (Forbidden) fetching Security Defaults "
             "status. The application permission (Policy.Read.All) is likely "
             "either not admin-consented, or -- just as commonly -- consented "
@@ -419,23 +537,18 @@ def fetch_security_defaults(token):
             "Policy.Read.All is listed under 'Application permissions' "
             "specifically (not 'Delegated permissions'), showing 'Granted for "
             "<tenant>'."
-        )
-    if resp.status_code != 200:
-        raise CollectorAbort(f"Graph request failed (HTTP {resp.status_code}): {resp.text}")
-    return resp.json().get("isEnabled")
+        ),
+    )
+    return body.get("isEnabled")
 
 
-def fetch_conditional_access_policies(token):
+def fetch_conditional_access_policies(graph):
     """No documented pagination on this endpoint -- tenants don't
     typically have more than a few dozen CA policies, well under any
     page-size ceiling Graph would otherwise enforce."""
-    headers = {"Authorization": f"Bearer {token}"}
-    try:
-        resp = requests.get(GRAPH_CA_POLICIES_URL, headers=headers, timeout=60)
-    except requests.exceptions.RequestException as exc:
-        raise CollectorAbort(f"Could not reach Microsoft Graph: {exc}")
-    if resp.status_code == 403:
-        raise CollectorAbort(
+    body = graph.get(
+        GRAPH_CA_POLICIES_URL, "Conditional Access policies",
+        forbidden_message=(
             "Graph returned HTTP 403 (Forbidden) fetching Conditional Access "
             "policies. The application permission (Policy.Read.All) is likely "
             "either not admin-consented, or -- just as commonly -- consented "
@@ -450,13 +563,12 @@ def fetch_conditional_access_policies(token):
             "Policy.Read.All is listed under 'Application permissions' "
             "specifically (not 'Delegated permissions'), showing 'Granted for "
             "<tenant>'."
-        )
-    if resp.status_code != 200:
-        raise CollectorAbort(f"Graph request failed (HTTP {resp.status_code}): {resp.text}")
-    return resp.json().get("value", [])
+        ),
+    )
+    return body.get("value", [])
 
 
-def fetch_applications(token):
+def fetch_applications(graph):
     """Paginated the same way fetch_all_users is -- follows @odata.nextLink
     rather than assume one page covers every registration.
 
@@ -468,16 +580,12 @@ def fetch_applications(token):
     apps = []
     select = "id,appId,displayName,passwordCredentials,keyCredentials"
     url = f"{GRAPH_APPLICATIONS_URL}?$select={select}&$top=999"
-    headers = {"Authorization": f"Bearer {token}"}
     page = 0
     while url:
         page += 1
-        try:
-            resp = requests.get(url, headers=headers, timeout=60)
-        except requests.exceptions.RequestException as exc:
-            raise CollectorAbort(f"Could not reach Microsoft Graph: {exc}")
-        if resp.status_code == 403:
-            raise CollectorAbort(
+        body = graph.get(
+            url, f"applications (page {page})",
+            forbidden_message=(
                 "Graph returned HTTP 403 (Forbidden) fetching applications. The "
                 "application permission (Application.Read.All) is likely "
                 "either not admin-consented, or -- just as commonly -- "
@@ -491,10 +599,8 @@ def fetch_applications(token):
                 "Application.Read.All is listed under 'Application "
                 "permissions' specifically (not 'Delegated permissions'), "
                 "showing 'Granted for <tenant>'."
-            )
-        if resp.status_code != 200:
-            raise CollectorAbort(f"Graph request failed (HTTP {resp.status_code}): {resp.text}")
-        body = resp.json()
+            ),
+        )
         page_apps = body.get("value", [])
         apps.extend(page_apps)
         log_info(f"  page {page}: {len(page_apps)} application(s) ({len(apps)} total so far)")
@@ -502,7 +608,7 @@ def fetch_applications(token):
     return apps
 
 
-def fetch_dangerous_permission_grants(token):
+def fetch_dangerous_permission_grants(graph):
     """Two Graph calls, not N+1 across every application: (1) fetch
     Microsoft Graph's own service principal, selecting just its id and
     appRoles -- the appRoles collection is Microsoft Graph's complete
@@ -520,14 +626,10 @@ def fetch_dangerous_permission_grants(token):
     (and doesn't store) the full, usually much longer list of routine
     permission grants like User.Read.All itself.
     """
-    headers = {"Authorization": f"Bearer {token}"}
     sp_url = f"{GRAPH_SERVICE_PRINCIPALS_URL}?$filter=appId eq '{GRAPH_MSGRAPH_SP_APPID}'&$select=id,appRoles"
-    try:
-        resp = requests.get(sp_url, headers=headers, timeout=60)
-    except requests.exceptions.RequestException as exc:
-        raise CollectorAbort(f"Could not reach Microsoft Graph: {exc}")
-    if resp.status_code == 403:
-        raise CollectorAbort(
+    body = graph.get(
+        sp_url, "the Microsoft Graph service principal",
+        forbidden_message=(
             "Graph returned HTTP 403 (Forbidden) fetching the Microsoft Graph "
             "service principal. The application permission (Directory.Read.All) "
             "is likely either not admin-consented, or -- just as commonly -- "
@@ -540,10 +642,9 @@ def fetch_dangerous_permission_grants(token):
             "permissions blade, confirm Directory.Read.All is listed under "
             "'Application permissions' specifically (not 'Delegated "
             "permissions'), showing 'Granted for <tenant>'."
-        )
-    if resp.status_code != 200:
-        raise CollectorAbort(f"Graph request failed (HTTP {resp.status_code}): {resp.text}")
-    sp_results = resp.json().get("value", [])
+        ),
+    )
+    sp_results = body.get("value", [])
     if not sp_results:
         raise CollectorAbort(
             "Could not find Microsoft Graph's own service principal in this "
@@ -558,13 +659,7 @@ def fetch_dangerous_permission_grants(token):
     grants = []
     url = f"{GRAPH_SERVICE_PRINCIPALS_URL}/{graph_sp_id}/appRoleAssignedTo?$top=999"
     while url:
-        try:
-            resp = requests.get(url, headers=headers, timeout=60)
-        except requests.exceptions.RequestException as exc:
-            raise CollectorAbort(f"Could not reach Microsoft Graph: {exc}")
-        if resp.status_code != 200:
-            raise CollectorAbort(f"Graph request failed (HTTP {resp.status_code}): {resp.text}")
-        body = resp.json()
+        body = graph.get(url, "Microsoft Graph application permission grants")
         for assignment in body.get("value", []):
             permission_name = role_id_to_name.get(assignment.get("appRoleId"))
             if permission_name in DANGEROUS_GRAPH_PERMISSIONS:
@@ -929,6 +1024,38 @@ def parse_args():
     return args
 
 
+# [v0.5.0] Each step below commits on its own (whole-snapshot replace per
+# table), so a run that aborts partway leaves earlier steps' tables
+# refreshed and later ones still holding a previous run's data. Listed
+# here, in run order, so an abort can say exactly which is which.
+COLLECTION_STEPS = [
+    ("users", ["entra_user"]),
+    ("directory role membership", ["entra_directory_role_member"]),
+    ("security posture", ["entra_security_posture"]),
+    ("application registrations", ["entra_application"]),
+    ("dangerous Graph permission grants", ["entra_dangerous_permission_grant"]),
+]
+
+
+def log_partial_run(completed_steps):
+    """Called on any abort. If at least one step already committed, flags
+    the database as holding a mix of this run's and an earlier run's
+    Entra data -- adaudit.py has no way to tell the two apart, so its
+    Entra findings shouldn't be trusted until a full run succeeds."""
+    if not completed_steps:
+        log_warn("No Entra tables were modified by this run -- any Entra data already in "
+                  "the database is from an earlier run and was left unchanged.")
+        return
+    refreshed = [t for name, tables in COLLECTION_STEPS if name in completed_steps for t in tables]
+    stale = [t for name, tables in COLLECTION_STEPS if name not in completed_steps for t in tables]
+    log_error("PARTIAL RUN: this run aborted after some Entra tables were already "
+              "committed. The database now holds a MIX of fresh and older Entra data:")
+    log_error(f"    refreshed by this run:          {', '.join(refreshed)}")
+    log_error(f"    NOT refreshed (earlier data):   {', '.join(stale)}")
+    log_error("Entra findings from adaudit.py may be inconsistent until this collector "
+              "completes a full successful run -- fix the error above and re-run.")
+
+
 def main():
     args = parse_args()
     if args.version:
@@ -972,9 +1099,10 @@ def main():
         app_secret = getpass.getpass("Entra App Registration client secret: ")
 
     start_time = datetime.now(timezone.utc)
+    completed_steps = []
     try:
         log_info(f"Requesting a Graph token for tenant {args.tenant_id}...")
-        token = get_graph_token(args.tenant_id, args.app_id, app_secret)
+        graph = GraphClient(args.tenant_id, args.app_id, app_secret)
         log_success("Token acquired.")
 
         log_info("Connecting to PostgreSQL...")
@@ -986,14 +1114,16 @@ def main():
                     f"{'client_id=' + args.client_id if args.client_id else args.domain_fqdn}.")
 
         log_header("Collecting Users from Microsoft Graph")
-        users = fetch_all_users(token)
+        users = fetch_all_users(graph)
         log_success(f"Fetched {len(users)} user(s) from Graph.")
 
         total, matched = sync_entra_users(pg_conn, client_id, users)
+        completed_steps.append("users")
 
         log_header("Collecting Directory Role Membership from Microsoft Graph")
-        role_members = fetch_directory_roles_with_members(token)
+        role_members = fetch_directory_roles_with_members(graph)
         role_member_count = sync_directory_role_members(pg_conn, client_id, role_members)
+        completed_steps.append("directory role membership")
         global_admin_count = sum(
             1 for rm in role_members if rm["role"].get("roleTemplateId") == GLOBAL_ADMIN_ROLE_TEMPLATE_ID
         )
@@ -1001,20 +1131,23 @@ def main():
                     f"including {global_admin_count} Global Administrator member(s).")
 
         log_header("Collecting Security Posture (Security Defaults + Conditional Access)")
-        security_defaults_enabled = fetch_security_defaults(token)
-        ca_policies = fetch_conditional_access_policies(token)
+        security_defaults_enabled = fetch_security_defaults(graph)
+        ca_policies = fetch_conditional_access_policies(graph)
         ca_policy_count = sync_security_posture(pg_conn, client_id, security_defaults_enabled, ca_policies)
+        completed_steps.append("security posture")
         log_success(f"Security Defaults enabled: {security_defaults_enabled}. "
                     f"{ca_policy_count} Conditional Access polic{'y' if ca_policy_count == 1 else 'ies'} recorded.")
 
         log_header("Collecting Application Registrations from Microsoft Graph")
-        applications = fetch_applications(token)
+        applications = fetch_applications(graph)
         app_count = sync_applications(pg_conn, client_id, applications)
+        completed_steps.append("application registrations")
         log_success(f"Recorded {app_count} application registration(s).")
 
         log_header("Checking for Highly Privileged Microsoft Graph API Permission Grants")
-        dangerous_grants = fetch_dangerous_permission_grants(token)
+        dangerous_grants = fetch_dangerous_permission_grants(graph)
         grant_count = sync_dangerous_permission_grants(pg_conn, client_id, dangerous_grants)
+        completed_steps.append("dangerous Graph permission grants")
         log_success(f"{grant_count} highly privileged Graph permission grant(s) found "
                     f"(out of Microsoft's own documented 'use caution' set).")
 
@@ -1033,10 +1166,16 @@ def main():
 
     except CollectorAbort as exc:
         log_error(str(exc))
+        log_partial_run(completed_steps)
         sys.exit(1)
     except KeyboardInterrupt:
         log_warn("Aborting due to Ctrl-C...")
+        log_partial_run(completed_steps)
         sys.exit(130)
+    except Exception:
+        log_error("Unexpected error -- full traceback follows.")
+        log_partial_run(completed_steps)
+        raise
 
 
 if __name__ == "__main__":

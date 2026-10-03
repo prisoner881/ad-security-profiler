@@ -33,14 +33,28 @@ temporal history rather than from an event log. ad_user rows are
 versioned, so the immediately preceding version of the same object is
 the authoritative "previous state," and directory_object_version ties
 that version lineage to the run in which it changed.
+
+[v1.1] Now reports a re-enable once, in the run that observed it. v1.0
+compared the open ad_user row with whatever row preceded it, with no
+reference to collection runs -- ad_user has no run columns of its own -- so
+an account re-enabled weeks ago kept being reported on every run until some
+other attribute happened to change and open a newer version. The comparison
+is now anchored to the previous succeeded sync_run for the client (the
+highest succeeded run_id below this one): the account's state as of that run
+(the ad_user version whose directory_object_version row was open at that
+run, joined by version_id) must be disabled, and the current version must
+have been written by a run after it (directory_object_version
+.run_id_valid_from). An account that did not exist at the previous run has
+no prior state and is not reported, so newly created enabled accounts never
+appear here; that remains the job of the new-account plugins.
 """
 
 PLUGIN = {
     "plugin_id": 11002,
     "category": "Change Detection",
     "name": "Account Re-Enabled Since Previous Collection Run",
-    "version": "1.0",
-    "revision_date": "2026-09-02",
+    "version": "1.1",
+    "revision_date": "2026-10-03",
     "remediation": (
         "For each account, establish who re-enabled it and why, and "
         "confirm it against a ticket or documented request before "
@@ -84,17 +98,21 @@ PLUGIN = {
         "so this is reported as a warning for reconciliation against "
         "change records. Severity is raised when the account holds "
         "privilege, and raised further when the account had been "
-        "dormant. Suppressed on a client's first collection run."
+        "dormant. Each re-enable is reported once, by the first run after "
+        "the previous successful collection that observes it; accounts "
+        "created since that collection are not reported. Suppressed on a "
+        "client's first collection run."
     ),
     "base_severity": "medium",
     "query": """
         WITH prior_run AS (
-            SELECT EXISTS (
-                SELECT 1 FROM sync_run sr
-                WHERE sr.client_id = %(client_id)s
-                  AND sr.run_id < %(run_id)s
-                  AND sr.status = 'succeeded'
-            ) AS have_prior
+            -- [v1.1] The previous succeeded collection run is the baseline;
+            -- NULL on a client's first run, which suppresses all output.
+            SELECT max(sr.run_id) AS prev_run_id
+            FROM sync_run sr
+            WHERE sr.client_id = %(client_id)s
+              AND sr.run_id < %(run_id)s
+              AND sr.status = 'succeeded'
         ),
         privileged_roots AS (
             SELECT g.object_guid, g.sam_account_name
@@ -128,15 +146,39 @@ PLUGIN = {
                    u.service_principal_names, u.version_id,
                    prev.is_enabled AS previous_is_enabled,
                    prev.valid_from AS previous_state_observed_at,
+                   prev.run_id_valid_from AS previous_state_run_id,
+                   cv.run_id_valid_from AS change_observed_run_id,
+                   pr.prev_run_id AS baseline_run_id,
                    u.valid_from AS change_observed_at
             FROM ad_user u
+            CROSS JOIN prior_run pr
+            -- [v1.1] The current version must have been written since the
+            -- previous succeeded run. Without this, a re-enable stayed
+            -- "new" on every run until another attribute changed.
+            JOIN directory_object_version cv
+              ON cv.version_id = u.version_id
+             AND cv.object_guid = u.object_guid
+             AND cv.client_id = u.client_id
+             AND cv.valid_from = u.valid_from
+             AND cv.run_id_valid_from > pr.prev_run_id
+             AND cv.run_id_valid_from <= %(run_id)s
+            -- State as of the previous succeeded run: the version that was
+            -- open at that run. An object that did not exist then has no
+            -- such row, so new accounts created enabled are not reported.
             JOIN LATERAL (
-                SELECT p.is_enabled, p.valid_from
+                SELECT p.is_enabled, p.valid_from, pv.run_id_valid_from
                 FROM ad_user p
+                JOIN directory_object_version pv
+                  ON pv.version_id = p.version_id
+                 AND pv.object_guid = p.object_guid
+                 AND pv.client_id = p.client_id
+                 AND pv.valid_from = p.valid_from
                 WHERE p.object_guid = u.object_guid
                   AND p.client_id = u.client_id
-                  AND p.valid_to IS NOT NULL
                   AND p.valid_from < u.valid_from
+                  AND pv.run_id_valid_from <= pr.prev_run_id
+                  AND (pv.run_id_valid_to IS NULL
+                       OR pv.run_id_valid_to > pr.prev_run_id)
                 ORDER BY p.valid_from DESC
                 LIMIT 1
             ) prev ON TRUE
@@ -175,6 +217,8 @@ PLUGIN = {
                 'previous_is_enabled', t.previous_is_enabled,
                 'previous_state_observed_at', t.previous_state_observed_at,
                 'change_observed_at', t.change_observed_at,
+                'change_observed_run_id', t.change_observed_run_id,
+                'baseline_run_id', t.baseline_run_id,
                 'admin_count', t.admin_count,
                 'privileged_via_groups', pm.via_groups,
                 'service_principal_names', t.service_principal_names,
@@ -190,7 +234,5 @@ PLUGIN = {
         JOIN directory_object do2
             ON do2.object_guid = t.object_guid AND do2.client_id = t.client_id
         LEFT JOIN privileged_members pm ON pm.member_guid = t.object_guid
-        CROSS JOIN prior_run pr
-        WHERE pr.have_prior
     """,
 }

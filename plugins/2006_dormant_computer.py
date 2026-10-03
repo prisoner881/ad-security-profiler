@@ -6,14 +6,20 @@ decommissioned or otherwise abandoned machine whose account was never
 cleaned up -- unnecessary attack surface (a stale computer account's
 credentials are just as usable as an active one's) with nobody watching
 for anomalous use.
+
+[v1.3] The summary now states the last logon time as a date (UTC, to the
+day) rather than a day count computed from now(). The count differed on
+every run, so an unchanged finding was recorded as 'changed' on every
+audit; the date only moves when the underlying attribute does. Severity
+and inclusion thresholds are unchanged.
 """
 
 PLUGIN = {
     "plugin_id": 2006,
     "category": "Computer Accounts",
     "name": "Dormant Computer Account",
-    "version": "1.2",
-    "revision_date": "2026-07-15",
+    "version": "1.3",
+    "revision_date": "2026-10-03",
     "remediation": (
         "Confirm whether the machine still physically exists and is in "
         "active use. If decommissioned, disable and eventually remove the "
@@ -51,8 +57,8 @@ PLUGIN = {
                 || 'Computer Account ' || c.sam_account_name
                 || CASE
                      WHEN c.last_logon_timestamp IS NULL THEN ' has never logged on'
-                     ELSE ' has not logged on in '
-                          || EXTRACT(DAY FROM now() - c.last_logon_timestamp)::int || ' days'
+                     ELSE ' has not logged on since '
+                          || to_char(c.last_logon_timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD')
                    END AS summary,
             jsonb_build_object(
                 'sam_account_name', c.sam_account_name,

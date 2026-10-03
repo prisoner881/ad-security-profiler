@@ -8,14 +8,22 @@ computer account password is precisely what DCSync abuses, and a silver
 ticket forged from a stale DC password remains valid for as long as that
 password stays unrotated -- a categorically more severe consequence than
 an ordinary workstation's password going stale.
+
+[v1.3] The summary now states the password-last-set time as a date (UTC,
+to the day) rather than a day count computed from now(). The count
+differed on every run, so an unchanged finding was recorded as 'changed'
+on every audit; the date only moves when the underlying attribute does.
+Severity and inclusion thresholds are unchanged. The day count is still
+reported in detail (days_since_rotation), which is not part of the
+finding's identity because object_guid is always set for this plugin.
 """
 
 PLUGIN = {
     "plugin_id": 2020,
     "category": "Computer Accounts",
     "name": "Domain Controller Computer Account Password Has Not Rotated Recently",
-    "version": "1.2",
-    "revision_date": "2026-07-15",
+    "version": "1.3",
+    "revision_date": "2026-10-03",
     "remediation": (
         "Investigate why this DC's computer account password hasn't "
         "rotated on the normal ~30-day cycle -- check the registry "
@@ -57,8 +65,7 @@ PLUGIN = {
             NULL AS tool_reference,
             'high' AS fd_severity,
             'Domain Controller ' || c.sam_account_name || ' computer account password has '
-                'not rotated in ' || EXTRACT(DAY FROM now() - c.pwd_last_set)::int
-                || ' days' AS summary,
+                'not rotated since ' || to_char(c.pwd_last_set AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS summary,
             jsonb_build_object(
                 'sam_account_name', c.sam_account_name,
                 'pwd_last_set', c.pwd_last_set,

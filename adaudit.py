@@ -2,7 +2,7 @@
 """
 adaudit.py -- AD Security & Compliance Plugin Runner
 ======================================================
-VERSION: 0.7.0
+VERSION: 0.7.2
 
 Companion to adprofiler.py. Where adprofiler.py collects AD data,
 adaudit.py analyzes it: discovers every plugin file in plugins/, runs each
@@ -25,6 +25,14 @@ DESIGN:
       as: (status, object_guid, stig_severity, stig_reference,
       tool_severity, tool_reference, fd_severity, summary, detail).
       Zero rows returned = clean pass, nothing to report.
+    - [v0.7.2] A plugin file that fails to load (syntax error, bad or
+      missing PLUGIN dict, duplicate plugin_id) is reported in one
+      consolidated [ERROR] block, both right after discovery and again
+      at the end of the run; every other plugin still runs. Its open
+      findings are left open rather than closed as 'remediated' by the
+      stale-plugin safety net, which previously could not tell "file
+      removed" from "file broken" and so made a broken plugin's
+      findings look fixed (then reappear as 'new' once repaired).
     - [v0.7.0] A second, parallel plugin type: "inventory" plugins
       (PLUGIN["plugin_type"] = "inventory"; absence of this key means
       "finding", so every plugin written before this existed is
@@ -97,7 +105,7 @@ from datetime import datetime, timezone
 import psycopg2
 import psycopg2.extras
 
-VERSION = "0.7.1"
+VERSION = "0.7.2"
 
 # [test-candidate-branch] Always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
@@ -149,9 +157,26 @@ def discover_plugins(plugins_dir):
     file path for error reporting). A malformed plugin is skipped with a
     clear error rather than crashing discovery for every other plugin --
     same isolation philosophy as query-execution failures, just applied
-    one step earlier."""
+    one step earlier.
+
+    Returns (plugins, load_failures). load_failures is a list of
+    {"file", "plugin_id", "reason"} dicts, one per skipped file --
+    plugin_id is the PLUGIN dict's own value when it got far enough to
+    be read, otherwise the numeric filename prefix (every plugin file is
+    named <plugin_id>_<name>.py), otherwise None. main() uses it both to
+    report the failures and to keep the stale-plugin safety net from
+    closing a broken plugin's open findings as 'remediated'."""
     plugins = []
     seen_ids = {}
+    load_failures = []
+
+    def fail(path, reason, plugin=None):
+        log(f"  [ERROR] {path.name}: {reason} -- skipped")
+        pid = plugin.get("plugin_id") if isinstance(plugin, dict) else None
+        if not isinstance(pid, int):
+            m = re.match(r"(\d+)_", path.name)
+            pid = int(m.group(1)) if m else None
+        load_failures.append({"file": path.name, "plugin_id": pid, "reason": reason})
 
     if not plugins_dir.is_dir():
         raise RuntimeError(f"Plugins directory not found: {plugins_dir}")
@@ -164,45 +189,41 @@ def discover_plugins(plugins_dir):
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
         except Exception as exc:
-            log(f"  [ERROR] failed to load {path.name}: {exc}")
+            fail(path, f"failed to load: {exc}")
             continue
 
         plugin = getattr(module, "PLUGIN", None)
         if plugin is None:
-            log(f"  [ERROR] {path.name} has no PLUGIN dict -- skipped")
+            fail(path, "has no PLUGIN dict")
             continue
 
         # Absence of "plugin_type" means "finding" -- every plugin written
         # before this key existed is unaffected by its introduction.
         plugin_type = plugin.get("plugin_type", "finding")
         if plugin_type not in ("finding", "inventory"):
-            log(f"  [ERROR] {path.name}: plugin_type '{plugin_type}' is not "
-                f"'finding' or 'inventory' -- skipped")
+            fail(path, f"plugin_type '{plugin_type}' is not 'finding' or 'inventory'", plugin)
             continue
 
         required_keys = REQUIRED_INVENTORY_PLUGIN_KEYS if plugin_type == "inventory" else REQUIRED_PLUGIN_KEYS
         missing = required_keys - set(plugin.keys())
         if missing:
-            log(f"  [ERROR] {path.name}: PLUGIN dict missing required key(s): "
-                f"{', '.join(sorted(missing))} -- skipped")
+            fail(path, f"PLUGIN dict missing required key(s): {', '.join(sorted(missing))}", plugin)
             continue
 
         if plugin_type == "finding" and plugin["base_severity"] not in SEVERITY_VALUES:
-            log(f"  [ERROR] {path.name}: base_severity '{plugin['base_severity']}' "
-                f"is not one of {sorted(SEVERITY_VALUES)} -- skipped")
+            fail(path, f"base_severity '{plugin['base_severity']}' "
+                       f"is not one of {sorted(SEVERITY_VALUES)}", plugin)
             continue
 
         try:
             datetime.strptime(str(plugin["revision_date"]), "%Y-%m-%d")
         except ValueError:
-            log(f"  [ERROR] {path.name}: revision_date '{plugin['revision_date']}' "
-                f"is not in YYYY-MM-DD format -- skipped")
+            fail(path, f"revision_date '{plugin['revision_date']}' is not in YYYY-MM-DD format", plugin)
             continue
 
         pid = plugin["plugin_id"]
         if pid in seen_ids:
-            log(f"  [ERROR] {path.name}: plugin_id {pid} already used by "
-                f"{seen_ids[pid]} -- skipped")
+            fail(path, f"plugin_id {pid} already used by {seen_ids[pid]}", plugin)
             continue
         seen_ids[pid] = path.name
 
@@ -214,7 +235,22 @@ def discover_plugins(plugins_dir):
         plugin["_source_file"] = path.name
         plugins.append(plugin)
 
-    return sorted(plugins, key=lambda p: p["plugin_id"])
+    return sorted(plugins, key=lambda p: p["plugin_id"]), load_failures
+
+
+def log_load_failures(load_failures):
+    """Logs one consolidated [ERROR] block naming every plugin file that
+    failed to load. Called right after discovery and again at the end of
+    the run, so the failure isn't lost in scrollback above 180+ plugins'
+    worth of output."""
+    if not load_failures:
+        return
+    log(f"[ERROR] {len(load_failures)} plugin file(s) failed to load and were NOT run "
+        f"(the rest of the run continues; their previously-open findings are left open, "
+        f"not marked remediated):")
+    for failure in load_failures:
+        pid = failure["plugin_id"] if failure["plugin_id"] is not None else "unknown id"
+        log(f"    - {failure['file']} (plugin {pid}): {failure['reason']}")
 
 
 # ============================================================================
@@ -516,7 +552,8 @@ def sync_evidence(pg_cur, evidence_run_id, control_test_id, client_id, rows, plu
     return findings
 
 
-def close_stale_plugin_evidence(pg_cur, evidence_run_id, client_id, executed_control_test_ids, run_timestamp):
+def close_stale_plugin_evidence(pg_cur, evidence_run_id, client_id, executed_control_test_ids, run_timestamp,
+                                load_failed_plugin_ids=frozenset()):
     """
     Safety net for a plugin that stops running entirely (removed from
     plugins/, or its file becomes unloadable) -- without this, its
@@ -526,13 +563,25 @@ def close_stale_plugin_evidence(pg_cur, evidence_run_id, client_id, executed_con
     --category filtered run must NOT be treated as "these other plugins
     no longer exist," since that would incorrectly mass-remediate
     everything just because the user chose to run a subset this time.
+
+    A plugin whose file is still present but failed to load this run
+    (load_failed_plugin_ids) is NOT treated as removed: a syntax error or
+    bad PLUGIN dict says nothing about whether its findings were fixed,
+    and closing them as 'remediated' would silently drop real findings
+    from the report until the file was repaired (at which point they'd
+    all reappear as 'new'). Those findings are left open, untouched.
     """
     pg_cur.execute("""
-        SELECT DISTINCT control_test_id FROM control_evidence_fact
-        WHERE client_id = %(client_id)s AND valid_to IS NULL;
+        SELECT DISTINCT cef.control_test_id, ct.plugin_id
+        FROM control_evidence_fact cef
+        LEFT JOIN control_test ct ON ct.control_test_id = cef.control_test_id
+        WHERE cef.client_id = %(client_id)s AND cef.valid_to IS NULL;
     """, {"client_id": client_id})
-    open_test_ids = {row["control_test_id"] for row in pg_cur.fetchall()}
-    stale_test_ids = open_test_ids - executed_control_test_ids
+    stale_test_ids = {
+        row["control_test_id"] for row in pg_cur.fetchall()
+        if row["control_test_id"] not in executed_control_test_ids
+        and row["plugin_id"] not in load_failed_plugin_ids
+    }
     closed = 0
     for control_test_id in stale_test_ids:
         pg_cur.execute("""
@@ -891,8 +940,9 @@ def main():
     print("=" * 62)
 
     log(f"Discovering plugins in {args.plugins_dir}...")
-    plugins = discover_plugins(args.plugins_dir)
+    plugins, load_failures = discover_plugins(args.plugins_dir)
     log(f"Loaded {len(plugins)} valid plugin(s)")
+    log_load_failures(load_failures)
 
     if args.plugin_id:
         plugins = [p for p in plugins if p["plugin_id"] in args.plugin_id]
@@ -979,15 +1029,23 @@ def main():
                                   "rollup": rollup_status(rows)})
         all_findings.extend(findings)
 
-    if is_unfiltered_run:
+    load_failed_plugin_ids = {f["plugin_id"] for f in load_failures if f["plugin_id"] is not None}
+    if is_unfiltered_run and any(f["plugin_id"] is None for f in load_failures):
+        # A broken file we can't attribute to a plugin_id could be any
+        # plugin's -- closing anything as remediated would be a guess.
+        log("[WARN] A plugin file with no identifiable plugin_id failed to load -- skipping "
+            "the stale-plugin safety net this run so none of its findings are wrongly "
+            "marked remediated.")
+    elif is_unfiltered_run:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             closed, stale_plugin_count = close_stale_plugin_evidence(
                 cur, evidence_run_id, client_id, executed_control_test_ids, run_timestamp,
+                load_failed_plugin_ids,
             )
         conn.commit()
         if stale_plugin_count:
             log(f"Closed {closed} finding(s) from {stale_plugin_count} plugin(s) no longer present "
-                f"(removed from plugins/ or failed to load) as remediated.")
+                f"in plugins/ as remediated.")
     else:
         log("Filtered run (--plugin-id/--category) -- skipping the stale-plugin safety net, "
             "since plugins not selected this run were deliberately skipped, not removed.")
@@ -1017,6 +1075,10 @@ def main():
         excel_filename = f"adaudit-findings_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
         write_excel_report(plugin_summaries, all_findings, inventory_results, excel_filename)
         log(f"Wrote Excel findings report to {excel_filename}")
+
+    # Repeated at the very end so it's the last thing on screen, not
+    # buried above the full report.
+    log_load_failures(load_failures)
 
 
 if __name__ == "__main__":

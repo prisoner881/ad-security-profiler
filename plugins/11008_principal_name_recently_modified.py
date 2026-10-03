@@ -37,6 +37,30 @@ and they are the three that the 2026 vulnerabilities manipulate. Watching
 every attribute would produce noise; watching these three produces a short,
 reviewable list.
 
+[v1.1] Creation is no longer reported as modification. v1.0 never looked
+at the attribute version counter or at whenCreated, so every account created
+in the last 14 days was reported -- at high severity -- because its
+sAMAccountName (version 1, originating change == creation time) looked like
+a recent change. An attribute entry is now treated as a modification only
+when it happened meaningfully after the object existed:
+
+  * version > 1 (the attribute has been written again since it was first
+    set) AND the change is more than 10 minutes after whenCreated; or
+  * version = 1 for userPrincipalName or servicePrincipalName AND the change
+    is more than 10 minutes after whenCreated -- the attribute was first
+    populated on an already-existing account. This keeps the
+    "add an SPN to a user to Kerberoast it" case, which leaves the SPN at
+    version 1. sAMAccountName is mandatory and always set at creation, so
+    version 1 there is never a modification.
+
+The 10-minute provisioning window absorbs the follow-up writes that domain
+join and account-provisioning tools make immediately after creating an
+object (dNSHostName/SPN registration by netjoin, a UPN set by a script a
+few seconds after New-ADUser). Where whenCreated is missing or unparseable,
+only version > 1 counts. Generalized-time values are now interpreted as UTC
+rather than in the database session's time zone. The evidence carries the
+creation time alongside each change.
+
 Timestamp format caveat
 -----------------------
 adprofiler.py parses msDS-ReplAttributeMetaData into structured JSON, but
@@ -58,8 +82,8 @@ PLUGIN = {
     "plugin_id": 11008,
     "category": "Change Detection",
     "name": "Principal Name Attribute Modified Recently (Replication Metadata)",
-    "version": "1.0",
-    "revision_date": "2026-09-29",
+    "version": "1.1",
+    "revision_date": "2026-10-03",
     "remediation": (
         "Reconcile each change against a known administrative action. The "
         "evidence names the attribute, the originating domain controller and "
@@ -106,8 +130,11 @@ PLUGIN = {
         "vulnerabilities; the plugin exists to distinguish a long-standing "
         "misconfiguration from a change made this week. Evidence includes "
         "the originating domain controller and the attribute version "
-        "counter. Timestamps that cannot be parsed are treated as unknown "
-        "and produce no finding."
+        "counter. The value written when an account is created is not a "
+        "modification: sAMAccountName at version 1, and any change within "
+        "10 minutes of whenCreated, are ignored, so newly created accounts "
+        "are not reported. Timestamps that cannot be parsed are treated as "
+        "unknown and produce no finding."
     ),
     "base_severity": "medium",
     "query": """
@@ -147,7 +174,8 @@ PLUGIN = {
                    e.value ->> 'attributeName'                 AS attr_name,
                    e.value ->> 'version'                       AS attr_version,
                    e.value ->> 'lastOriginatingDcInvocationId' AS origin_dc,
-                   e.value ->> 'lastOriginatingChangeTime'     AS change_time_raw
+                   e.value ->> 'lastOriginatingChangeTime'     AS change_time_raw,
+                   v.attributes_full ->> 'whenCreated'          AS when_created_raw
             FROM directory_object_version v
             CROSS JOIN LATERAL jsonb_array_elements(
                      v.attributes_full -> 'msDS-ReplAttributeMetaData') AS e
@@ -160,18 +188,55 @@ PLUGIN = {
         ),
         parsed AS (
             SELECT m.*,
+                   CASE WHEN m.attr_version ~ '^[0-9]+$'
+                        THEN m.attr_version::bigint END AS attr_version_num,
                    CASE
                        -- ISO-like: 2026-09-14T15:00:00Z / 2026-09-14 15:00:00+00
                        WHEN m.change_time_raw ~
                             '^[0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2}:[0-9]{2}'
                            THEN m.change_time_raw::timestamptz
-                       -- LDAP generalized time: 20260914150000.0Z
+                       -- LDAP generalized time: 20260914150000.0Z (always UTC)
                        WHEN m.change_time_raw ~ '^[0-9]{14}'
                            THEN to_timestamp(substr(m.change_time_raw, 1, 14),
-                                             'YYYYMMDDHH24MISS')
+                                             'YYYYMMDDHH24MISS')::timestamp
+                                AT TIME ZONE 'UTC'
                        ELSE NULL
-                   END AS change_time
+                   END AS change_time,
+                   -- [v1.1] whenCreated, stored by adprofiler.py as ISO text
+                   -- (or the raw generalized time if it could not be parsed).
+                   CASE
+                       WHEN m.when_created_raw ~
+                            '^[0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2}:[0-9]{2}'
+                           THEN m.when_created_raw::timestamptz
+                       WHEN m.when_created_raw ~ '^[0-9]{14}'
+                           THEN to_timestamp(substr(m.when_created_raw, 1, 14),
+                                             'YYYYMMDDHH24MISS')::timestamp
+                                AT TIME ZONE 'UTC'
+                       ELSE NULL
+                   END AS created_at
             FROM meta m
+        ),
+        modification AS (
+            -- [v1.1] Exclude the value written when the object was created.
+            -- Version 1 of sAMAccountName is always the creation value; a
+            -- change inside the 10-minute provisioning window after
+            -- whenCreated is part of creating the account, not a change to
+            -- an existing one. A UPN or SPN first populated (version 1)
+            -- well after creation IS a modification -- that is how an SPN
+            -- is added to a user account to make it Kerberoastable.
+            SELECT p.*
+            FROM parsed p
+            WHERE p.change_time IS NOT NULL
+              AND p.attr_version_num IS NOT NULL
+              AND CASE
+                      WHEN p.created_at IS NULL
+                          THEN p.attr_version_num > 1
+                      WHEN p.change_time <= p.created_at + interval '10 minutes'
+                          THEN false
+                      WHEN p.attr_name = 'sAMAccountName'
+                          THEN p.attr_version_num > 1
+                      ELSE p.attr_version_num >= 1
+                  END
         ),
         recent AS (
             SELECT p.object_guid,
@@ -183,12 +248,12 @@ PLUGIN = {
                        'attribute', p.attr_name,
                        'changed_at', p.change_time,
                        'version', p.attr_version,
+                       'object_created_at', p.created_at,
                        'originating_dc_invocation_id', p.origin_dc
                    ) ORDER BY p.change_time DESC) AS changes
-            FROM parsed p
+            FROM modification p
             CROSS JOIN reference r
-            WHERE p.change_time IS NOT NULL
-              AND p.change_time >  r.ref_time - interval '14 days'
+            WHERE p.change_time >  r.ref_time - interval '14 days'
               AND p.change_time <= r.ref_time + interval '1 day'
             GROUP BY p.object_guid
         )
