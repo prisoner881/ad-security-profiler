@@ -12,14 +12,26 @@ two chains: PASSWD_NOTREQD is already a high-severity condition on its
 own, and the exploitation story is identical either way (walk in with a
 blank password), unlike Kerberoasting vs. AS-REP roasting which have
 genuinely different mechanics worth distinguishing.
+
+[v1.2] GenericAll/GenericWrite are now recognised in the form AD stores
+them. ACE masks are stored already mapped: GenericAll as 0xF01FF and
+GenericWrite as 0x20028 (WRITE_PROP with no object type, i.e. write
+every property), so the raw GENERIC_ALL (0x10000000) / GENERIC_WRITE
+(0x40000000) bits tested before essentially never matched --
+GenericWrite-only grants were missed and GenericAll was labelled as
+WriteDacl/WriteOwner (raw bits are still matched too). Inherit-only ACEs
+(acl_edge.inherit_only, schema v34) are skipped: they grant nothing on
+the object they are stored on, only on its descendants. Also requires
+the trustee to actually hold DCSync or a dangerous right: any allow ACE
+on those objects used to produce a finding.
 """
 
 PLUGIN = {
     "plugin_id": 1030,
     "category": "User Accounts",
     "name": "Password-Not-Required User Account Directly Holds DCSync or Dangerous ACL Rights",
-    "version": "1.1",
-    "revision_date": "2026-07-17",
+    "version": "1.2",
+    "revision_date": "2026-10-03",
     "remediation": (
         "Verify immediately whether this account currently has a blank "
         "password (attempt authentication with an empty password in a "
@@ -56,7 +68,10 @@ PLUGIN = {
             SELECT DISTINCT do2.object_guid,
                    bool_or(a.object_type_guid IN ('1131f6aa-9c07-11d1-f79f-00c04fc2dcd2',
                                                    '1131f6ad-9c07-11d1-f79f-00c04fc2dcd2')) AS has_dcsync,
-                   bool_or((a.access_mask & (268435456 | 1073741824 | 262144 | 524288)) != 0) AS has_dangerous
+                   bool_or((a.access_mask & (268435456 | 1073741824 | 262144 | 524288)) != 0
+                           OR (a.access_mask & 983551) = 983551                    -- GenericAll, as stored
+                           OR ((a.access_mask & 32) <> 0 AND a.object_type_guid IS NULL)  -- GenericWrite, as stored
+                           ) AS has_dangerous
             FROM acl_edge a
             JOIN directory_object secured
                 ON secured.object_guid = a.object_guid AND secured.client_id = a.client_id
@@ -64,11 +79,20 @@ PLUGIN = {
             WHERE a.client_id = %(client_id)s
               AND a.valid_to IS NULL
               AND a.ace_type = 'allow'
+              AND a.inherit_only IS NOT TRUE   -- [v1.2] inherit-only: grants nothing on this object
               AND (
                     secured.dn_current ILIKE 'CN=AdminSDHolder,%%'
                     OR EXISTS (SELECT 1 FROM ad_domain d WHERE d.object_guid = secured.object_guid AND d.valid_to IS NULL)
                   )
             GROUP BY do2.object_guid
+            -- [v1.2] Only trustees that hold one of the two; before, any
+            -- allow ACE at all on the domain root/AdminSDHolder (e.g. a
+            -- read grant) produced a finding labelled 'dangerous ACL rights'.
+            HAVING bool_or(a.object_type_guid IN ('1131f6aa-9c07-11d1-f79f-00c04fc2dcd2',
+                                                   '1131f6ad-9c07-11d1-f79f-00c04fc2dcd2'))
+                OR bool_or((a.access_mask & (268435456 | 1073741824 | 262144 | 524288)) != 0
+                           OR (a.access_mask & 983551) = 983551
+                           OR ((a.access_mask & 32) <> 0 AND a.object_type_guid IS NULL))
         )
         SELECT
             'fail' AS status,

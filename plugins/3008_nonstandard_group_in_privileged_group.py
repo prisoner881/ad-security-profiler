@@ -12,14 +12,22 @@ groups) nested inside a privileged group -- a genuinely non-default
 administrative action worth a second look, since indirect privilege
 granted this way is easy to overlook when reviewing the privileged
 group's own direct member list.
+
+[v1.7] The ACL/ownership half of "privileged group" (outer group) now
+comes from the shared Tier 0 view v_privileged_principal (schema v34),
+limited to its direct sources. The old inline subquery counted
+GenericAll/GenericWrite/WriteDACL/WriteOwner on, or ownership of, ANY
+object, so a custom group nested in a helpdesk group with OU delegation
+was reported as nested inside a privileged group. AdminSDHolder-protected
+outer groups are still matched via is_protected_group.
 """
 
 PLUGIN = {
     "plugin_id": 3008,
     "category": "Groups",
     "name": "Non-Standard Group Nested Inside a Privileged Group",
-    "version": "1.6",
-    "revision_date": "2026-09-02",
+    "version": "1.7",
+    "revision_date": "2026-10-03",
     "remediation": (
         "Confirm this nesting was a deliberate, documented administrative "
         "decision. Anyone added to the nested group inherits the outer "
@@ -70,32 +78,21 @@ PLUGIN = {
                    OR do2.object_sid LIKE '%%-551' OR do2.object_sid LIKE '%%-552')
         ),
         acl_privileged_groups AS (
-            -- [v1.x, ACL-aware] A group can grant real privilege to
-            -- everyone nested inside it without being one of the
-            -- classic RID-identified protected groups at all, if it
-            -- directly holds dangerous or DCSync rights on the domain
-            -- root/AdminSDHolder, or owns either object outright.
-            -- Broadens "privileged group" (outer_g) the same way
-            -- already applied to individual accounts and to plugin
-            -- 3004's own membership-bloat check.
-            SELECT do_acl.object_guid
-            FROM acl_edge a
-            JOIN directory_object do_acl ON do_acl.object_sid = a.trustee_sid AND do_acl.client_id = a.client_id
-            WHERE a.client_id = %(client_id)s
-              AND a.valid_to IS NULL
-              AND a.ace_type = 'allow'
-              AND (
-                    (a.access_mask & (268435456 | 1073741824 | 262144 | 524288)) != 0
-                    OR a.object_type_guid IN ('1131f6aa-9c07-11d1-f79f-00c04fc2dcd2',
-                                               '1131f6ad-9c07-11d1-f79f-00c04fc2dcd2')
-                  )
-            UNION
-            SELECT do_owner.object_guid
-            FROM directory_object owned_target
-            JOIN directory_object do_owner
-                ON do_owner.object_sid = owned_target.owner_sid AND do_owner.client_id = owned_target.client_id
-            WHERE owned_target.client_id = %(client_id)s
-              AND owned_target.owner_sid IS NOT NULL
+            -- [v1.7] A group can grant real privilege to everyone nested
+            -- inside it without being one of the classic protected groups,
+            -- if it directly holds control rights on, or owns, a Tier 0
+            -- object, or holds DCSync -- taken from the shared Tier 0 view
+            -- (schema v34). The old inline subquery counted a dangerous
+            -- right on or ownership of ANY object, so a group with OU
+            -- delegation was treated as a privileged outer group. Only the
+            -- view's direct sources: protected_group_member is covered by
+            -- is_protected_group below, and a *_via_group outer group's
+            -- nested members are already effective members of the holder
+            -- group itself, which is reported in its place.
+            SELECT DISTINCT object_guid
+            FROM v_privileged_principal
+            WHERE client_id = %(client_id)s
+              AND privilege_source IN ('tier0_acl_control', 'dcsync', 'tier0_ownership')
         ),
         nestings AS (
             SELECT inner_g.object_guid AS inner_guid, inner_g.sam_account_name AS inner_name,

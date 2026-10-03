@@ -4,7 +4,7 @@
  adprofiler.py -- Active Directory Security & Compliance Profiler (Collector)
 ================================================================================
 
-VERSION: 0.5.12
+VERSION: 0.5.13
 
 PURPOSE:
     Connects to an on-premise Active Directory Domain Controller via LDAP,
@@ -180,7 +180,7 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
-VERSION = "0.5.12"
+VERSION = "0.5.13"
 # [client-test-branch] These are always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
 # connect_postgres() is ever called -- the values here are placeholders,
@@ -605,6 +605,7 @@ ACE_TYPE_DENIED = 0x01
 ACE_TYPE_ALLOWED_OBJECT = 0x05
 ACE_TYPE_DENIED_OBJECT = 0x06
 ACE_INHERITED_FLAG = 0x10  # from ACE.INHERITED_ACE in impacket's ldaptypes
+ACE_INHERIT_ONLY_FLAG = 0x08  # ACE.INHERIT_ONLY_ACE: applies to descendants only, not this object
 
 
 def parse_dns_zone_allow_update(raw_dns_property_values):
@@ -701,10 +702,14 @@ def parse_security_descriptor(raw_sd_bytes):
         access_mask = body["Mask"]["Mask"]
 
         object_type_guid = None
+        inherited_object_type_guid = None
         if ace_type_byte in (ACE_TYPE_ALLOWED_OBJECT, ACE_TYPE_DENIED_OBJECT):
             object_type_bytes = body["ObjectType"]
             if object_type_bytes:
                 object_type_guid = bin_to_string(object_type_bytes).lower()
+            inherited_object_type_bytes = body["InheritedObjectType"]
+            if inherited_object_type_bytes:
+                inherited_object_type_guid = bin_to_string(inherited_object_type_bytes).lower()
 
         aces.append({
             "trustee_sid": trustee_sid,
@@ -712,6 +717,13 @@ def parse_security_descriptor(raw_sd_bytes):
             "access_mask": access_mask,
             "object_type_guid": object_type_guid,
             "is_inherited": is_inherited,
+            # [v0.5.13] Previously discarded. An inherit-only ACE grants
+            # nothing on this object -- e.g. "Full Control over
+            # descendant Computer objects" delegated at the domain root
+            # -- and without this flag it was indistinguishable from
+            # Full Control over the domain root itself.
+            "inherit_only": bool(ace["AceFlags"] & ACE_INHERIT_ONLY_FLAG),
+            "inherited_object_type_guid": inherited_object_type_guid,
         })
 
     return owner_sid, aces
@@ -753,7 +765,7 @@ def get_object_security_descriptor(conn, dn):
         return None
 
 
-def build_acl_desired_edges(object_guid, raw_sd, label, desired_out):
+def build_acl_desired_edges(object_guid, raw_sd, label, desired_out, unreadable_out=None):
     """[v0.3.0, fixed same version] Parses one object's security
     descriptor and MERGES its desired ACE keys into desired_out --
     does NOT call sync_edges itself.
@@ -784,27 +796,123 @@ def build_acl_desired_edges(object_guid, raw_sd, label, desired_out):
     is itself a real, distinct security-relevant fact (BloodHound's
     "Owns" edge: an owner implicitly holds WRITE_DAC-equivalent rights
     over an object regardless of what the DACL itself says, since an
-    owner can always rewrite the DACL)."""
+    owner can always rewrite the DACL).
+
+    [v0.5.13] On a failed read/parse, object_guid is added to
+    unreadable_out (when given) so the caller can carry that object's
+    currently-open ACL edges forward unchanged -- see
+    carry_forward_unreadable_acl_edges(). Previously the object simply
+    contributed nothing to desired_out, and the single sync_edges() call
+    then closed every one of its ACL edges: exactly the "this object has
+    no ACEs" conclusion parse_security_descriptor()'s docstring warns
+    must never be drawn from a read failure.
+
+    [v0.5.13] Also records inherit_only / inherited_object_type_guid per
+    edge (schema v34). Several ACEs can share one edge key (object,
+    trustee, type, mask, object type) while differing only in
+    inheritance flags; the edge is inherit_only only if every one of them
+    is, since any one that applies to the object itself makes the right
+    real on this object."""
     if raw_sd is None:
         log_warn(f"No security descriptor available for {label} -- "
-                 f"ACL data for this object will not be collected this run.")
+                 f"keeping its previously collected ACL data unchanged this run.")
+        if unreadable_out is not None:
+            unreadable_out.add(object_guid)
         return False, None
 
     owner_sid, aces = parse_security_descriptor(raw_sd)
     if owner_sid is None and not aces:
         log_warn(f"Security descriptor for {label} could not be parsed -- "
-                 f"ACL data for this object will not be collected this run.")
+                 f"keeping its previously collected ACL data unchanged this run.")
+        if unreadable_out is not None:
+            unreadable_out.add(object_guid)
         return False, None
 
     for ace in aces:
         key = (object_guid, ace["trustee_sid"], ace["ace_type"],
                ace["access_mask"], ace["object_type_guid"])
-        desired_out[key] = {"inherited": ace["is_inherited"]}
+        payload = desired_out.get(key)
+        if payload is None:
+            desired_out[key] = {
+                "inherited": ace["is_inherited"],
+                "inherit_only": ace["inherit_only"],
+                "inherited_object_type_guid": ace["inherited_object_type_guid"],
+            }
+            continue
+        payload["inherit_only"] = payload["inherit_only"] and ace["inherit_only"]
+        if payload["inherited_object_type_guid"] != ace["inherited_object_type_guid"]:
+            payload["inherited_object_type_guid"] = None
     return True, owner_sid
 
 
+def carry_forward_unreadable_acl_edges(pg_cur, client_id, unreadable_guids, desired_out):
+    """[v0.5.13] For every object whose security descriptor couldn't be
+    read or parsed this run, adds its currently-open acl_edge rows to
+    desired_out exactly as they are, so the run's single sync_edges()
+    call leaves them open instead of closing them. The ACL is treated as
+    unknown-this-run, not as empty. Returns the number of edges carried."""
+    if not unreadable_guids:
+        return 0
+    pg_cur.execute(
+        "SELECT object_guid, trustee_sid, ace_type, access_mask, object_type_guid, "
+        "       inherited, inherit_only, inherited_object_type_guid "
+        "FROM acl_edge WHERE client_id = %s AND valid_to IS NULL "
+        "AND object_guid = ANY(%s::uuid[])",
+        (client_id, list(unreadable_guids)),
+    )
+    carried = 0
+    for row in pg_cur.fetchall():
+        key = tuple(row[:5])
+        desired_out[key] = {"inherited": row[5], "inherit_only": row[6],
+                            "inherited_object_type_guid": row[7]}
+        carried += 1
+    return carried
+
+
+def reconcile_acl_edge_inheritance(pg_cur, client_id, run_id, run_timestamp, desired_out):
+    """[v0.5.13] sync_edges() compares edge KEYS only, so a change to
+    inherit_only / inherited_object_type_guid on an otherwise identical
+    ACE would never be recorded, and rows collected before schema v34
+    would keep NULL there forever. Run immediately before
+    sync_edges("acl_edge", ...):
+      - open row with NULL inherit_only (pre-v34): filled in place. This
+        is a backfill of a fact that was never recorded, not a change,
+        so it deliberately doesn't close/reopen the edge -- doing that
+        would make change-detection plugins (e.g. 11007, newly granted
+        DCSync) report every existing grant as new.
+      - open row whose recorded values differ from this run's: closed,
+        so sync_edges() reopens it with the new values (a real change,
+        versioned like any other).
+    Returns (backfilled, changed)."""
+    pg_cur.execute(
+        "SELECT edge_id, object_guid, trustee_sid, ace_type, access_mask, object_type_guid, "
+        "       inherit_only, inherited_object_type_guid "
+        "FROM acl_edge WHERE client_id = %s AND valid_to IS NULL",
+        (client_id,),
+    )
+    backfilled = changed = 0
+    for row in pg_cur.fetchall():
+        edge_id = row[0]
+        key = tuple(row[1:6])
+        payload = desired_out.get(key)
+        if payload is None:
+            continue
+        if row[6] is None:
+            pg_cur.execute(
+                "UPDATE acl_edge SET inherit_only = %s, inherited_object_type_guid = %s "
+                "WHERE edge_id = %s AND valid_to IS NULL",
+                (payload["inherit_only"], payload["inherited_object_type_guid"], edge_id),
+            )
+            backfilled += 1
+        elif (row[6] != payload["inherit_only"]
+              or row[7] != payload["inherited_object_type_guid"]):
+            close_edge_by_id(pg_cur, "acl_edge", edge_id, run_id, run_timestamp)
+            changed += 1
+    return backfilled, changed
+
+
 def collect_well_known_container_acl(conn, pg_cur, client_id, run_id, dn, label,
-                                      run_timestamp, desired_out):
+                                      run_timestamp, desired_out, unreadable_out=None):
     """[v0.3.0, fixed same version] Registers a well-known container object
     (currently just AdminSDHolder) as a minimal directory_object row --
     necessary because acl_edge.object_guid has a hard foreign key
@@ -851,7 +959,7 @@ def collect_well_known_container_acl(conn, pg_cur, client_id, run_id, dn, label,
     )
     pg_cur.fetchone()
 
-    _, owner_sid = build_acl_desired_edges(object_guid, raw_sd, label, desired_out)
+    _, owner_sid = build_acl_desired_edges(object_guid, raw_sd, label, desired_out, unreadable_out)
     if owner_sid:
         pg_cur.execute(
             "UPDATE directory_object SET owner_sid = %s WHERE object_guid = %s AND client_id = %s",
@@ -1429,6 +1537,12 @@ REQUIRED_SCHEMA_COLUMNS = {
     "group_member_edge": {"edge_id", "client_id", "group_guid", "member_guid",
                            "is_direct", "valid_from", "valid_to",
                            "run_id_valid_from", "run_id_valid_to"},
+    # [v0.5.13] Not listed before, even though written every run.
+    # inherit_only/inherited_object_type_guid are schema v34.
+    "acl_edge": {"edge_id", "client_id", "object_guid", "trustee_sid", "ace_type",
+                  "access_mask", "object_type_guid", "inherited", "inherit_only",
+                  "inherited_object_type_guid", "valid_from", "valid_to",
+                  "run_id_valid_from", "run_id_valid_to"},
     "spn_edge": {"edge_id", "client_id", "object_guid", "spn", "valid_from",
                  "valid_to", "run_id_valid_from", "run_id_valid_to"},
     "delegation_edge": {"edge_id", "client_id", "source_guid", "target_guid",
@@ -1475,7 +1589,7 @@ REQUIRED_IDENTITY_COLUMNS = {
 # the structural check remains the backstop for a schema altered
 # outside the approved migration files, where the version number could
 # claim to be current while the actual structure doesn't match it.
-EXPECTED_SCHEMA_VERSION = 33
+EXPECTED_SCHEMA_VERSION = 34
 
 
 def check_schema_version(pg_conn):
@@ -3224,6 +3338,38 @@ def collect_deleted_objects(conn, pg_cur, client_id, run_id, dc_host, base_dn,
     log_success(f"Deleted objects: {count} newly marked deleted")
 
 
+def clear_deleted_flag_on_restored_objects(pg_cur, client_id, run_id):
+    """[v0.5.13] An object restored from the AD Recycle Bin keeps its
+    objectGUID, so it comes back as the same directory_object row --
+    still flagged is_deleted from when the deletion was detected.
+    upsert_directory_object() never cleared the flag, so
+    repair_orphaned_deleted_typed_rows() closed the restored object's
+    freshly written typed row on that run and every run after it: the
+    object stayed invisible to every plugin forever (a restored Domain
+    Admin included). Any object confirmed live in THIS run
+    (last_confirmed_run_id = run_id) can't be deleted, so the flag is
+    cleared for exactly those. Must run before
+    repair_orphaned_deleted_typed_rows(). Returns the restored DNs."""
+    pg_cur.execute(
+        """
+        UPDATE directory_object
+           SET is_deleted = FALSE, deleted_run_id = NULL, deleted_detected_at = NULL
+         WHERE client_id = %s AND is_deleted AND last_confirmed_run_id = %s
+        RETURNING dn_current;
+        """,
+        (client_id, run_id),
+    )
+    restored = [row[0] for row in pg_cur.fetchall()]
+    if restored:
+        log_info(f"Restored objects (deleted earlier, live again -- e.g. AD Recycle Bin "
+                 f"restore): {len(restored)}")
+        for dn in restored[:20]:
+            log_info(f"    {dn}")
+        if len(restored) > 20:
+            log_info(f"    ... and {len(restored) - 20} more")
+    return restored
+
+
 def repair_orphaned_deleted_typed_rows(pg_cur, client_id, run_timestamp):
     """[v0.2.0] Self-healing reconciliation, run on EVERY invocation
     regardless of run_type -- not just a one-time fix for the v0.1.8 bug.
@@ -3669,11 +3815,12 @@ def main():
             # incorrectly closed every other already-scanned object's
             # ACEs on each subsequent call.
             acl_desired = {}
+            acl_unreadable = set()  # [v0.5.13] see carry_forward_unreadable_acl_edges()
             domain_root_guid = dn_to_guid.get(base_dn.lower())
             if domain_root_guid:
                 raw_domain_sd = get_object_security_descriptor(ldap_conn, base_dn)
                 _, domain_owner_sid = build_acl_desired_edges(
-                    domain_root_guid, raw_domain_sd, "domain root", acl_desired,
+                    domain_root_guid, raw_domain_sd, "domain root", acl_desired, acl_unreadable,
                 )
                 if domain_owner_sid:
                     cur.execute(
@@ -3686,7 +3833,7 @@ def main():
             adminsdholder_dn = f"CN=AdminSDHolder,CN=System,{base_dn}"
             collect_well_known_container_acl(
                 ldap_conn, cur, client_id, run_id, adminsdholder_dn,
-                "AdminSDHolder", run_timestamp, acl_desired,
+                "AdminSDHolder", run_timestamp, acl_desired, acl_unreadable,
             )
 
             ou_acl_read_failures = 0
@@ -3696,7 +3843,7 @@ def main():
                     continue
                 raw_ou_sd = get_object_security_descriptor(ldap_conn, ou_dn)
                 ok, ou_owner_sid = build_acl_desired_edges(
-                    ou_guid, raw_ou_sd, ou_dn, acl_desired,
+                    ou_guid, raw_ou_sd, ou_dn, acl_desired, acl_unreadable,
                 )
                 if not ok:
                     ou_acl_read_failures += 1
@@ -3895,15 +4042,15 @@ def main():
                 pki_container_base = f"CN=Public Key Services,CN=Services,{rootdse['config_nc']}"
                 collect_well_known_container_acl(
                     ldap_conn, cur, client_id, run_id, pki_container_base,
-                    "Public Key Services container", run_timestamp, acl_desired,
+                    "Public Key Services container", run_timestamp, acl_desired, acl_unreadable,
                 )
                 collect_well_known_container_acl(
                     ldap_conn, cur, client_id, run_id, cert_template_container,
-                    "Certificate Templates container", run_timestamp, acl_desired,
+                    "Certificate Templates container", run_timestamp, acl_desired, acl_unreadable,
                 )
                 collect_well_known_container_acl(
                     ldap_conn, cur, client_id, run_id, enrollment_service_container,
-                    "Enrollment Services container", run_timestamp, acl_desired,
+                    "Enrollment Services container", run_timestamp, acl_desired, acl_unreadable,
                 )
 
                 # NTAuthCertificates was already collected as a real object
@@ -3918,7 +4065,7 @@ def main():
                 if ntauth_guid:
                     raw_ntauth_sd = get_object_security_descriptor(ldap_conn, ntauth_dn)
                     build_acl_desired_edges(
-                        ntauth_guid, raw_ntauth_sd, "NTAuthCertificates", acl_desired,
+                        ntauth_guid, raw_ntauth_sd, "NTAuthCertificates", acl_desired, acl_unreadable,
                     )
 
                 # ESC4: each individual certificate template's own ACL.
@@ -3929,7 +4076,7 @@ def main():
                         continue
                     raw_template_sd = get_object_security_descriptor(ldap_conn, template_dn)
                     ok, _ = build_acl_desired_edges(
-                        template_guid, raw_template_sd, template_dn, acl_desired,
+                        template_guid, raw_template_sd, template_dn, acl_desired, acl_unreadable,
                     )
                     if not ok:
                         cert_template_acl_failures += 1
@@ -3948,7 +4095,8 @@ def main():
                     ca_dn = ca_full.get("distinguishedName")
                     if ca_dn:
                         raw_ca_sd = get_object_security_descriptor(ldap_conn, ca_dn)
-                        ok, _ = build_acl_desired_edges(ca_guid, raw_ca_sd, ca_dn, acl_desired)
+                        ok, _ = build_acl_desired_edges(ca_guid, raw_ca_sd, ca_dn, acl_desired,
+                                                        acl_unreadable)
                         if not ok:
                             ca_acl_failures += 1
 
@@ -3964,7 +4112,7 @@ def main():
                             raw_ca_computer_sd = get_object_security_descriptor(ldap_conn, computer_dn)
                             build_acl_desired_edges(
                                 ca_computer_guid, raw_ca_computer_sd,
-                                f"CA computer object ({ca_hostname})", acl_desired,
+                                f"CA computer object ({ca_hostname})", acl_desired, acl_unreadable,
                             )
 
                 log_success(
@@ -3985,6 +4133,17 @@ def main():
             # every matched CA computer object + the three PKI containers +
             # NTAuthCertificates, all accumulated into one dict, synced
             # here exactly once.
+            acl_carried = carry_forward_unreadable_acl_edges(cur, client_id, acl_unreadable, acl_desired)
+            if acl_unreadable:
+                log_warn(f"ACLs: {len(acl_unreadable)} object(s) had an unreadable security "
+                         f"descriptor this run; their {acl_carried} previously collected ACL "
+                         f"edge(s) were kept unchanged rather than closed.")
+            acl_backfilled, acl_inheritance_changed = reconcile_acl_edge_inheritance(
+                cur, client_id, run_id, run_timestamp, acl_desired,
+            )
+            if acl_backfilled:
+                log_info(f"ACLs: recorded inheritance flags on {acl_backfilled} edge(s) "
+                         f"collected before schema v34 (in place, not a change).")
             acl_opened, acl_closed = sync_edges(
                 cur, "acl_edge", client_id, run_id, run_timestamp,
                 ["object_guid", "trustee_sid", "ace_type", "access_mask", "object_type_guid"],
@@ -3992,7 +4151,9 @@ def main():
             )
             log_success(f"ACLs: {acl_opened} edge(s) opened, {acl_closed} closed "
                         f"(domain root + AdminSDHolder + {len(ou_entries)} OU(s) + "
-                        f"ADCS objects, {ou_acl_read_failures} OU ACL read failure(s))")
+                        f"ADCS objects, {ou_acl_read_failures} OU ACL read failure(s)"
+                        + (f", {acl_inheritance_changed} with changed inheritance flags"
+                           if acl_inheritance_changed else "") + ")")
 
             # --- v0.5.4: Sites/Subnets, schema objects, DisplaySpecifiers,
             # cert OIDs -- new gaps identified via this project's own
@@ -4121,6 +4282,7 @@ def main():
                     prior_watermark, stats, run_timestamp,
                 )
 
+            clear_deleted_flag_on_restored_objects(cur, client_id, run_id)
             repair_orphaned_deleted_typed_rows(cur, client_id, run_timestamp)
 
         pg_conn.commit()

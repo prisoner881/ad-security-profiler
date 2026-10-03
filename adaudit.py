@@ -2,7 +2,7 @@
 """
 adaudit.py -- AD Security & Compliance Plugin Runner
 ======================================================
-VERSION: 0.7.2
+VERSION: 0.7.3
 
 Companion to adprofiler.py. Where adprofiler.py collects AD data,
 adaudit.py analyzes it: discovers every plugin file in plugins/, runs each
@@ -92,6 +92,25 @@ USAGE:
     python3 adaudit.py --plugin-id 1001 1002     # run only these plugins
     python3 adaudit.py --category "User Accounts"  # run only this category
     python3 adaudit.py --plugins-dir ./plugins   # override plugin location
+    python3 adaudit.py --fail-on warn            # exit 4 if any open WARN/FAIL finding
+
+EXIT STATUS ([v0.7.3]; always 0 before):
+    0   Run completed and every selected plugin ran.
+    1   Fatal error: no database connection, no successful collection
+        run to analyze, the Excel report couldn't be written, or an
+        unexpected error. Results are missing or unusable.
+    2   Command-line usage error (argparse's own convention).
+    3   Run completed, but INCOMPLETE: at least one plugin failed to
+        load, a finding plugin's query or evidence write failed, or an
+        inventory query failed. Every other plugin's results are valid
+        and recorded; the report lists which ones are missing.
+    4   Run completed and complete, and --fail-on was given and at least
+        one current (not remediated) finding is at or above that level.
+        Without --fail-on, findings never affect the exit status --
+        finding problems is a successful audit, not a failed run.
+    130 Interrupted (Ctrl-C).
+    When both 3 and 4 apply, 3 is returned: an incomplete run can't
+    vouch for its findings either way.
 """
 
 import sys
@@ -105,7 +124,7 @@ from datetime import datetime, timezone
 import psycopg2
 import psycopg2.extras
 
-VERSION = "0.7.2"
+VERSION = "0.7.3"
 
 # [test-candidate-branch] Always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
@@ -121,6 +140,13 @@ DEFAULT_PLUGINS_DIR = Path(__file__).parent / "plugins"
 
 SEVERITY_VALUES = {"info", "low", "medium", "high", "critical"}
 STATUS_ORDER = {"fail": 2, "warn": 1, "pass": 0}
+
+# Exit statuses -- see "EXIT STATUS" in the module docstring.
+EXIT_OK = 0
+EXIT_FATAL = 1
+EXIT_INCOMPLETE = 3
+EXIT_FINDINGS = 4
+EXIT_INTERRUPTED = 130
 
 REQUIRED_PLUGIN_KEYS = {"plugin_id", "category", "name", "base_severity", "query",
                          "version", "revision_date", "remediation"}
@@ -706,7 +732,11 @@ def print_inventory_report(inventory_results):
 
     for plugin, rows in inventory_results:
         print()
-        print(f"--- #{plugin['plugin_id']} {plugin['name']} ({len(rows)} row(s)) "
+        # [v0.7.3] len(rows) used to be evaluated before the None check
+        # below, so one failed inventory query raised TypeError here and
+        # took the Excel report down with it.
+        row_count = "query failed" if rows is None else f"{len(rows)} row(s)"
+        print(f"--- #{plugin['plugin_id']} {plugin['name']} ({row_count}) "
               + "-" * max(0, 40 - len(plugin["name"])))
         if rows is None:
             print("  [ERROR] query failed -- see log above")
@@ -901,6 +931,10 @@ def main():
                          help="Run only these plugin IDs")
     parser.add_argument("--category", nargs="+", default=None,
                          help="Run only plugins in these categories")
+    parser.add_argument("--fail-on", choices=["fail", "warn"], default=None,
+                         help="Exit with status 4 if any current (not remediated) finding "
+                              "is at or above this level: 'fail' = FAIL only, 'warn' = WARN "
+                              "or FAIL. Default: findings don't affect the exit status.")
     parser.add_argument("--version", action="store_true")
     parser.add_argument("--pg-host", default=None,
                          help="PostgreSQL server hostname or IP. Required unless --version is given.")
@@ -917,7 +951,7 @@ def main():
 
     if args.version:
         print(f"adaudit.py v{VERSION}")
-        return
+        return EXIT_OK
 
     if not args.pg_host or not args.pg_user:
         parser.error("the following arguments are required: --pg-host, --pg-user")
@@ -954,7 +988,7 @@ def main():
 
     if not plugins:
         log("No plugins to run.")
-        return
+        return EXIT_INCOMPLETE if load_failures else EXIT_OK
 
     finding_plugins = [p for p in plugins if p["plugin_type"] == "finding"]
     inventory_plugins = [p for p in plugins if p["plugin_type"] == "inventory"]
@@ -1080,6 +1114,43 @@ def main():
     # buried above the full report.
     log_load_failures(load_failures)
 
+    errored_plugins = [s for s in plugin_summaries if s["rollup"] == "error"]
+    failed_inventory = [p for p, rows in inventory_results if rows is None]
+    if load_failures or errored_plugins or failed_inventory:
+        log(f"[ERROR] Run INCOMPLETE: {len(load_failures)} plugin file(s) failed to load, "
+            f"{len(errored_plugins)} finding plugin(s) errored, {len(failed_inventory)} "
+            f"inventory plugin(s) failed (exit status {EXIT_INCOMPLETE}).")
+        for summary in errored_plugins:
+            log(f"    - plugin {summary['plugin_id']} ({summary['name']}): errored")
+        for plugin in failed_inventory:
+            log(f"    - inventory plugin {plugin['plugin_id']} ({plugin['name']}): query failed")
+        return EXIT_INCOMPLETE
+
+    if args.fail_on:
+        threshold = STATUS_ORDER[args.fail_on]
+        over = [f for f in all_findings
+                if f["change_status"] != "remediated" and STATUS_ORDER.get(f["status"], 0) >= threshold]
+        if over:
+            log(f"{len(over)} current finding(s) at or above --fail-on {args.fail_on} "
+                f"(exit status {EXIT_FINDINGS}).")
+            return EXIT_FINDINGS
+    return EXIT_OK
+
+
+def cli():
+    """Entry point: maps main()'s outcome to the exit statuses documented
+    in the module docstring. Fatal errors are logged as one clear line
+    rather than a traceback for the expected cases (database unreachable,
+    nothing collected yet, report file not writable)."""
+    try:
+        return main()
+    except KeyboardInterrupt:
+        log("[ERROR] Interrupted (Ctrl-C).")
+        return EXIT_INTERRUPTED
+    except (psycopg2.Error, RuntimeError, OSError, ImportError) as exc:
+        log(f"[ERROR] Fatal: {exc}".rstrip())
+        return EXIT_FATAL
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(cli())

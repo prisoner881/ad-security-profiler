@@ -8,14 +8,24 @@ than merged into 1026: GenericAll/WriteDacl is arguably even more
 dangerous than DCSync alone, since it lets the holder grant themselves
 DCSync (or anything else) at will, not just replicate secrets directly --
 a distinct mechanism worth its own explicit call-out.
+
+[v1.3] GenericAll/GenericWrite are now recognised in the form AD stores
+them. ACE masks are stored already mapped: GenericAll as 0xF01FF and
+GenericWrite as 0x20028 (WRITE_PROP with no object type, i.e. write
+every property), so the raw GENERIC_ALL (0x10000000) / GENERIC_WRITE
+(0x40000000) bits tested before essentially never matched --
+GenericWrite-only grants were missed and GenericAll was labelled as
+WriteDacl/WriteOwner (raw bits are still matched too). Inherit-only ACEs
+(acl_edge.inherit_only, schema v34) are skipped: they grant nothing on
+the object they are stored on, only on its descendants.
 """
 
 PLUGIN = {
     "plugin_id": 1027,
     "category": "User Accounts",
     "name": "Kerberoastable User Account Directly Holds Dangerous ACL Rights",
-    "version": "1.2",
-    "revision_date": "2026-07-17",
+    "version": "1.3",
+    "revision_date": "2026-10-03",
     "remediation": (
         "Treat as an active, complete attack path: anyone who can "
         "request a service ticket for this account can crack it "
@@ -50,8 +60,9 @@ PLUGIN = {
     "query": """
         WITH dangerous_holders AS (
             SELECT do2.object_guid,
-                   bool_or((a.access_mask & 268435456) != 0) AS is_generic_all,
-                   bool_or((a.access_mask & 1073741824) != 0) AS is_generic_write,
+                   bool_or((a.access_mask & 983551) = 983551 OR (a.access_mask & 268435456) <> 0) AS is_generic_all,
+                   bool_or(((a.access_mask & 32) <> 0 AND a.object_type_guid IS NULL)
+                              OR (a.access_mask & 1073741824) <> 0) AS is_generic_write,
                    bool_or((a.access_mask & 262144) != 0) AS is_write_dacl,
                    bool_or((a.access_mask & 524288) != 0) AS is_write_owner
             FROM acl_edge a
@@ -61,7 +72,12 @@ PLUGIN = {
             WHERE a.client_id = %(client_id)s
               AND a.valid_to IS NULL
               AND a.ace_type = 'allow'
-              AND (a.access_mask & (268435456 | 1073741824 | 262144 | 524288)) != 0
+              AND a.inherit_only IS NOT TRUE   -- [v1.3] inherit-only: grants nothing on this object
+              AND (
+                    (a.access_mask & (268435456 | 1073741824 | 262144 | 524288)) != 0
+                    OR (a.access_mask & 983551) = 983551                    -- GenericAll, as stored
+                    OR ((a.access_mask & 32) <> 0 AND a.object_type_guid IS NULL)  -- GenericWrite, as stored
+                  )
               AND (
                     secured.dn_current ILIKE 'CN=AdminSDHolder,%%'
                     OR EXISTS (SELECT 1 FROM ad_domain d WHERE d.object_guid = secured.object_guid AND d.valid_to IS NULL)

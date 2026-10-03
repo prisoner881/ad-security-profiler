@@ -8,14 +8,23 @@ plugin 3003 (which is specific to Schema/Enterprise Admins and flags any
 nonzero membership): this applies more broadly to any AdminSDHolder-
 protected group, at a higher, "handful of administrators" threshold
 rather than zero.
+
+[v1.5] The ACL/ownership half of "privileged group" now comes from the
+shared Tier 0 view v_privileged_principal (schema v34). The old inline
+subquery counted GenericAll/GenericWrite/WriteDACL/WriteOwner on, or
+ownership of, ANY object, so a helpdesk group with OU delegation (or a
+group that had created an OU) was reported as a privileged group.
+AdminSDHolder-protected groups are still included via is_protected_group
+(the view lists their members, not the groups themselves). detail gains
+privilege_sources.
 """
 
 PLUGIN = {
     "plugin_id": 3004,
     "category": "Groups",
     "name": "Privileged Group Has an Unusually Large Number of Members",
-    "version": "1.4",
-    "revision_date": "2026-09-02",
+    "version": "1.5",
+    "revision_date": "2026-10-03",
     "remediation": (
         "Review the full membership list and confirm each member "
         "genuinely needs this level of access on an ongoing, standing "
@@ -50,35 +59,21 @@ PLUGIN = {
     "base_severity": "medium",
     "query": """
         WITH acl_privileged_groups AS (
-            -- [v1.x, ACL-aware] "Privileged group" now means the classic,
-            -- RID-based is_protected_group definition OR ACL-derived
-            -- privilege: the group directly holds a dangerous right or
-            -- DCSync rights on the domain root/AdminSDHolder, or owns
-            -- either object outright. A group with none of the classic
-            -- protected-group RIDs but that itself directly holds
-            -- GenericAll on the domain root is privileged in every
-            -- meaningful sense, and every member of it inherits that
-            -- power -- exactly the same reasoning already applied to
-            -- individual user and computer accounts (plugins 1001-1024,
-            -- 2008), now extended to groups acting as the trustee.
-            SELECT do_acl.object_guid
-            FROM acl_edge a
-            JOIN directory_object do_acl ON do_acl.object_sid = a.trustee_sid AND do_acl.client_id = a.client_id
-            WHERE a.client_id = %(client_id)s
-              AND a.valid_to IS NULL
-              AND a.ace_type = 'allow'
-              AND (
-                    (a.access_mask & (268435456 | 1073741824 | 262144 | 524288)) != 0
-                    OR a.object_type_guid IN ('1131f6aa-9c07-11d1-f79f-00c04fc2dcd2',
-                                               '1131f6ad-9c07-11d1-f79f-00c04fc2dcd2')
-                  )
-            UNION
-            SELECT do_owner.object_guid
-            FROM directory_object owned_target
-            JOIN directory_object do_owner
-                ON do_owner.object_sid = owned_target.owner_sid AND do_owner.client_id = owned_target.client_id
-            WHERE owned_target.client_id = %(client_id)s
-              AND owned_target.owner_sid IS NOT NULL
+            -- [v1.5] "Privileged group" is the classic is_protected_group
+            -- definition OR the shared Tier 0 view (schema v34): the group
+            -- holds control rights on, or owns, a Tier 0 object, holds
+            -- DCSync, or is nested in a group that does -- every member
+            -- inherits that power. The old inline subquery counted a
+            -- dangerous right on or ownership of ANY object, so any group
+            -- with OU delegation (or that created an OU) was reported as a
+            -- bloated privileged group. One row per group; the view's
+            -- reasons are carried into detail.
+            SELECT object_guid,
+                   array_agg(DISTINCT privilege_source ORDER BY privilege_source) AS privilege_sources,
+                   bool_or(privilege_source <> 'protected_group_member') AS via_acl_or_ownership
+            FROM v_privileged_principal
+            WHERE client_id = %(client_id)s
+            GROUP BY object_guid
         )
         SELECT
             'warn' AS status,
@@ -94,7 +89,8 @@ PLUGIN = {
                 'sam_account_name', g.sam_account_name,
                 'member_count_direct', g.member_count_direct,
                 'privileged_via_group_rid', g.is_protected_group,
-                'privileged_via_acl_or_ownership', apg.object_guid IS NOT NULL,
+                'privileged_via_acl_or_ownership', COALESCE(apg.via_acl_or_ownership, FALSE),
+                'privilege_sources', apg.privilege_sources,
                 'members', (
                     SELECT array_agg(mdo.sam_account_name ORDER BY mdo.sam_account_name)
                     FROM group_member_edge gme

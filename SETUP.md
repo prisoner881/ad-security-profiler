@@ -29,6 +29,8 @@ USB drive, secure file transfer, etc.):
 - `adaudit.py`
 - `requirements.txt`
 - `schema_init.sql`
+- Every `schema_migration_vNN.sql` file (only needed to upgrade an
+  existing database -- see Troubleshooting)
 - A `plugins/` subdirectory containing every plugin `.py` file
 
 When done, `~/adprofiler` should look like:
@@ -209,6 +211,13 @@ before), and additionally writes a timestamped Excel workbook:
   output and its own timestamped log, unchanged.
 - Separate inventory tabs (User Inventory, Computer Inventory, Group
   Inventory) with the full, unfiltered data those plugins produce.
+
+`adaudit.py`'s exit status says whether the run is complete: `0` means
+every plugin ran; `3` means it finished but at least one plugin failed
+to load or errored (the end of the output lists which -- the rest of
+the results are still valid); `1` means a fatal error such as no
+database connection. Add `--fail-on fail` (or `--fail-on warn`) to
+also get exit status `4` when there are open findings at that level.
 
 ## 8. Reviewing results together
 

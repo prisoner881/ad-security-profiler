@@ -11,14 +11,25 @@ domain-root counterpart alongside it.
 Flags GenericAll, GenericWrite, WriteDacl, and WriteOwner specifically --
 the rights that let a holder grant themselves (or anyone) further
 access, not just read/limited-write rights.
+
+[v1.4] GenericAll/GenericWrite are now recognised in the form AD stores
+them. ACE masks are stored already mapped: GenericAll as 0xF01FF and
+GenericWrite as 0x20028 (WRITE_PROP with no object type, i.e. write
+every property), so the raw GENERIC_ALL (0x10000000) / GENERIC_WRITE
+(0x40000000) bits tested before essentially never matched --
+GenericWrite-only grants were missed and GenericAll was labelled as
+WriteDacl/WriteOwner (raw bits are still matched too). The rights label
+names only GenericAll when it is held, since it subsumes the rest.
+Inherit-only ACEs (acl_edge.inherit_only, schema v34) are skipped: they
+grant nothing on the object they are stored on, only on its descendants.
 """
 
 PLUGIN = {
     "plugin_id": 5003,
     "category": "ACLs",
     "name": "Dangerous Rights on the Domain Root Held by an Unexpected Principal",
-    "version": "1.3",
-    "revision_date": "2026-09-02",
+    "version": "1.4",
+    "revision_date": "2026-10-03",
     "remediation": (
         "Remove the grant unless it's a deliberate, understood exception "
         "(`dsacls \"DC=...\" /R <trustee>`, or via ADSI Edit's Security "
@@ -62,8 +73,9 @@ PLUGIN = {
         ),
         dangerous_aces AS (
             SELECT a.trustee_sid, a.access_mask,
-                   (a.access_mask & 268435456) != 0 AS is_generic_all,
-                   (a.access_mask & 1073741824) != 0 AS is_generic_write,
+                   ((a.access_mask & 983551) = 983551 OR (a.access_mask & 268435456) <> 0) AS is_generic_all,
+                   (((a.access_mask & 32) <> 0 AND a.object_type_guid IS NULL)
+                       OR (a.access_mask & 1073741824) <> 0) AS is_generic_write,
                    (a.access_mask & 262144) != 0 AS is_write_dacl,
                    (a.access_mask & 524288) != 0 AS is_write_owner
             FROM acl_edge a
@@ -71,7 +83,12 @@ PLUGIN = {
             WHERE a.client_id = %(client_id)s
               AND a.valid_to IS NULL
               AND a.ace_type = 'allow'
-              AND (a.access_mask & (268435456 | 1073741824 | 262144 | 524288)) != 0
+              AND a.inherit_only IS NOT TRUE   -- [v1.4] inherit-only: grants nothing on this object
+              AND (
+                    (a.access_mask & (268435456 | 1073741824 | 262144 | 524288)) != 0
+                    OR (a.access_mask & 983551) = 983551                    -- GenericAll, as stored
+                    OR ((a.access_mask & 32) <> 0 AND a.object_type_guid IS NULL)  -- GenericWrite, as stored
+                  )
         )
         SELECT
             'fail' AS status,
@@ -85,9 +102,9 @@ PLUGIN = {
                 || ' holds ' || (
                     SELECT string_agg(x, ', ') FROM (VALUES
                         (CASE WHEN da.is_generic_all THEN 'GenericAll' END),
-                        (CASE WHEN da.is_generic_write THEN 'GenericWrite' END),
-                        (CASE WHEN da.is_write_dacl THEN 'WriteDacl' END),
-                        (CASE WHEN da.is_write_owner THEN 'WriteOwner' END)
+                        (CASE WHEN da.is_generic_write AND NOT da.is_generic_all THEN 'GenericWrite' END),
+                        (CASE WHEN da.is_write_dacl AND NOT da.is_generic_all THEN 'WriteDacl' END),
+                        (CASE WHEN da.is_write_owner AND NOT da.is_generic_all THEN 'WriteOwner' END)
                     ) AS v(x) WHERE x IS NOT NULL
                 )
                 || ' on the domain root' AS summary,
