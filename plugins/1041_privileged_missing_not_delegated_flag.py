@@ -18,14 +18,24 @@ narrower, purpose-built tool for exactly this one protection --
 checked on its own rather than assuming Protected Users membership
 alone covers it, since an organization may have valid operational
 reasons to use one protection without the other.
+
+[v1.2] "Privileged" now comes from the shared Tier 0 view
+v_privileged_principal (schema v34) instead of an inline subquery that
+counted GenericAll/GenericWrite/WriteDACL/WriteOwner on, or ownership of,
+ANY object with a collected ACL -- every OU, every certificate template --
+so OU delegates and whoever created an OU were treated as privileged.
+Protected-group membership, control of or ownership of a Tier 0 object
+(domain root, AdminSDHolder, DCs, CAs, ...), DCSync, and membership in a
+group holding any of those still count. detail gains privilege_sources
+(the view's reasons, sorted); summary wording is unchanged.
 """
 
 PLUGIN = {
     "plugin_id": 1041,
     "category": "User Accounts",
     "name": "Privileged Account Missing the \"Cannot Be Delegated\" Protection Flag",
-    "version": "1.1",
-    "revision_date": "2026-09-02",
+    "version": "1.2",
+    "revision_date": "2026-10-03",
     "remediation": (
         "Set the flag: check \"This account is sensitive and cannot be "
         "delegated\" on the account's Account tab (or add 1048576 to "
@@ -57,33 +67,20 @@ PLUGIN = {
     "base_severity": "medium",
     "query": """
         WITH privileged_check AS (
-            SELECT DISTINCT vem.member_guid AS object_guid
-            FROM v_effective_group_membership vem
-            JOIN directory_object pgo
-                ON pgo.object_guid = vem.group_guid AND pgo.client_id = vem.client_id
-            JOIN ad_group pg
-                ON pg.object_guid = pgo.object_guid AND pg.valid_to IS NULL
-            WHERE vem.client_id = %(client_id)s
-              AND pg.is_protected_group
-            UNION
-            SELECT do_acl.object_guid
-            FROM acl_edge a
-            JOIN directory_object do_acl ON do_acl.object_sid = a.trustee_sid AND do_acl.client_id = a.client_id
-            WHERE a.client_id = %(client_id)s
-              AND a.valid_to IS NULL
-              AND a.ace_type = 'allow'
-              AND (
-                    (a.access_mask & (268435456 | 1073741824 | 262144 | 524288)) != 0
-                    OR a.object_type_guid IN ('1131f6aa-9c07-11d1-f79f-00c04fc2dcd2',
-                                               '1131f6ad-9c07-11d1-f79f-00c04fc2dcd2')
-                  )
-            UNION
-            SELECT do_owner.object_guid
-            FROM directory_object owned_target
-            JOIN directory_object do_owner
-                ON do_owner.object_sid = owned_target.owner_sid AND do_owner.client_id = owned_target.client_id
-            WHERE owned_target.client_id = %(client_id)s
-              AND owned_target.owner_sid IS NOT NULL
+            -- [v1.2] "Privileged" is the shared Tier 0 definition in
+            -- v_privileged_principal (schema v34): membership, direct or
+            -- nested, in an AdminSDHolder-protected group; a control right
+            -- (GenericAll/GenericWrite/WriteDACL/WriteOwner) on, or
+            -- ownership of, a Tier 0 object; DCSync on the domain root; or
+            -- membership in a group that holds any of those. The inline
+            -- subquery this replaces counted such a right on, or ownership
+            -- of, ANY object with a collected ACL, so every OU delegate and
+            -- OU creator was treated as privileged.
+            SELECT object_guid,
+                   array_agg(DISTINCT privilege_source ORDER BY privilege_source) AS privilege_sources
+            FROM v_privileged_principal
+            WHERE client_id = %(client_id)s
+            GROUP BY object_guid
         )
         SELECT
             'warn' AS status,
@@ -99,7 +96,8 @@ PLUGIN = {
                 'sam_account_name', u.sam_account_name,
                 'user_principal_name', u.user_principal_name,
                 'admin_count', u.admin_count,
-                'is_enabled', u.is_enabled
+                'is_enabled', u.is_enabled,
+                'privilege_sources', pc.privilege_sources
             ) AS detail
         FROM ad_user u
         JOIN directory_object udo ON udo.object_guid = u.object_guid AND udo.client_id = u.client_id

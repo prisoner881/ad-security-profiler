@@ -21,14 +21,24 @@ genuinely reachable through the OU the moment SDProp's protection
 lapses or is bypassed -- and more directly, anyone who can reset the
 account's password via OU delegation doesn't need to touch the
 account's own ACL at all to compromise it.
+
+[v1.2] GenericAll/GenericWrite are now recognised in the form AD stores
+them. ACE masks are stored already mapped: GenericAll as 0xF01FF and
+GenericWrite as 0x20028 (WRITE_PROP with no object type, i.e. write
+every property), so the raw GENERIC_ALL (0x10000000) / GENERIC_WRITE
+(0x40000000) bits tested before essentially never matched; GenericWrite-
+only OU delegation was missed entirely (raw bits are still matched too).
+Inherit-only ACEs are deliberately still counted: rights an OU's ACL
+grants over its descendant objects are exactly how the privileged user
+in it is reachable.
 """
 
 PLUGIN = {
     "plugin_id": 1037,
     "category": "User Accounts",
     "name": "Privileged User Account Resides in a Delegated Organizational Unit",
-    "version": "1.1",
-    "revision_date": "2026-08-04",
+    "version": "1.2",
+    "revision_date": "2026-10-03",
     "remediation": (
         "Move this account to a dedicated, tightly-controlled OU "
         "reserved for privileged accounts (a common Tier-0 hardening "
@@ -88,7 +98,11 @@ PLUGIN = {
             WHERE a.client_id = %(client_id)s
               AND a.valid_to IS NULL
               AND a.ace_type = 'allow'
-              AND (a.access_mask & (268435456 | 1073741824 | 262144 | 524288)) != 0
+              AND (
+                    (a.access_mask & (268435456 | 1073741824 | 262144 | 524288)) != 0
+                    OR (a.access_mask & 983551) = 983551                    -- GenericAll, as stored
+                    OR ((a.access_mask & 32) <> 0 AND a.object_type_guid IS NULL)  -- GenericWrite, as stored
+                  )
               AND NOT EXISTS (SELECT 1 FROM expected_holders eh WHERE eh.object_guid = trustee_do.object_guid)
         ),
         -- [fix, caught via a real production crash at large scale (525

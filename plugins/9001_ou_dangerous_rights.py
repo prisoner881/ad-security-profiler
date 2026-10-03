@@ -20,14 +20,25 @@ holders excluded elsewhere in this project (Domain Admins, Enterprise
 Admins, Administrators, SYSTEM); a security team reviewing results
 will need to apply their own knowledge of what delegation is
 legitimate for their specific OU structure.
+
+[v1.2] GenericAll/GenericWrite are now recognised in the form AD stores
+them. ACE masks are stored already mapped: GenericAll as 0xF01FF and
+GenericWrite as 0x20028 (WRITE_PROP with no object type, i.e. write
+every property), so the raw GENERIC_ALL (0x10000000) / GENERIC_WRITE
+(0x40000000) bits tested before essentially never matched --
+GenericWrite-only grants were missed and GenericAll was labelled as
+WriteDacl/WriteOwner (raw bits are still matched too). The rights label
+names only GenericAll when it is held, since it subsumes the rest.
+Inherit-only ACEs are deliberately still counted: OU delegation to
+descendant objects is what this plugin reports.
 """
 
 PLUGIN = {
     "plugin_id": 9001,
     "category": "Organizational Units",
     "name": "Dangerous Rights on an Organizational Unit Held by an Unexpected Principal",
-    "version": "1.1",
-    "revision_date": "2026-08-04",
+    "version": "1.2",
+    "revision_date": "2026-10-03",
     "remediation": (
         "Confirm whether this grant is a deliberate, understood "
         "delegation (e.g. a help desk team scoped to manage computers "
@@ -78,8 +89,9 @@ PLUGIN = {
         ),
         dangerous_aces AS (
             SELECT a.object_guid AS ou_guid, a.trustee_sid, a.access_mask,
-                   (a.access_mask & 268435456) != 0 AS is_generic_all,
-                   (a.access_mask & 1073741824) != 0 AS is_generic_write,
+                   ((a.access_mask & 983551) = 983551 OR (a.access_mask & 268435456) <> 0) AS is_generic_all,
+                   (((a.access_mask & 32) <> 0 AND a.object_type_guid IS NULL)
+                       OR (a.access_mask & 1073741824) <> 0) AS is_generic_write,
                    (a.access_mask & 262144) != 0 AS is_write_dacl,
                    (a.access_mask & 524288) != 0 AS is_write_owner
             FROM acl_edge a
@@ -87,7 +99,11 @@ PLUGIN = {
             WHERE a.client_id = %(client_id)s
               AND a.valid_to IS NULL
               AND a.ace_type = 'allow'
-              AND (a.access_mask & (268435456 | 1073741824 | 262144 | 524288)) != 0
+              AND (
+                    (a.access_mask & (268435456 | 1073741824 | 262144 | 524288)) != 0
+                    OR (a.access_mask & 983551) = 983551                    -- GenericAll, as stored
+                    OR ((a.access_mask & 32) <> 0 AND a.object_type_guid IS NULL)  -- GenericWrite, as stored
+                  )
         ),
         unexpected_holders AS (
             SELECT da.ou_guid, da.trustee_sid,
@@ -96,9 +112,9 @@ PLUGIN = {
                    da.access_mask,
                    (SELECT string_agg(x, ', ') FROM (VALUES
                         (CASE WHEN da.is_generic_all THEN 'GenericAll' END),
-                        (CASE WHEN da.is_generic_write THEN 'GenericWrite' END),
-                        (CASE WHEN da.is_write_dacl THEN 'WriteDacl' END),
-                        (CASE WHEN da.is_write_owner THEN 'WriteOwner' END)
+                        (CASE WHEN da.is_generic_write AND NOT da.is_generic_all THEN 'GenericWrite' END),
+                        (CASE WHEN da.is_write_dacl AND NOT da.is_generic_all THEN 'WriteDacl' END),
+                        (CASE WHEN da.is_write_owner AND NOT da.is_generic_all THEN 'WriteOwner' END)
                     ) AS v(x) WHERE x IS NOT NULL) AS rights_label
             FROM dangerous_aces da
             JOIN directory_object trustee_do

@@ -9,6 +9,29 @@ the script's own docstring now keeps a one-line summary per entry, this
 file keeps the complete detail (root causes, what was verified, why a
 decision was made a particular way) for anyone who wants it.
 
+    0.5.13 - Requires schema v34 (schema_migration_v34.sql). Three fixes:
+            (1) ACE inheritance flags are now collected. An ACE carrying
+            INHERIT_ONLY_ACE grants nothing on the object it sits on --
+            e.g. "Full Control over descendant Computer objects"
+            delegated at the domain root -- but the flag was discarded,
+            so it read as Full Control over the domain root itself.
+            acl_edge.inherit_only / inherited_object_type_guid now
+            record it; when several ACEs share one edge key the edge is
+            inherit-only only if all of them are. Rows collected before
+            v34 are backfilled in place on the next run (not closed and
+            reopened, which would make change-detection plugins report
+            every existing grant as new); a real later change in the
+            flags is versioned normally (close + reopen). (2) A security
+            descriptor that couldn't be read or parsed no longer closes
+            that object's ACL edges: the object's currently open edges
+            are carried forward unchanged and a warning names how many,
+            since a failed read means the ACL is unknown, not empty.
+            (3) Objects restored from the AD Recycle Bin are visible
+            again. They keep their objectGUID, so they came back as the
+            same directory_object row still flagged is_deleted, and
+            repair_orphaned_deleted_typed_rows() closed their typed row
+            on every run. Any object confirmed live in the current run
+            now has its deleted flag cleared first, and is logged.
     0.5.12 - LDAP failures are no longer silently treated as empty
             results. The connection used ldap3's default
             raise_exceptions=False, under which a failed search returns

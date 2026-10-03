@@ -14,14 +14,21 @@ under a curated, non-circular list of well-known privileged root groups
 (identified by RID, not by is_protected_group -- using is_protected_group
 here would be circular, since it's the exact value this plugin exists to
 validate).
+
+[v1.5] The "currently privileged without group nesting" exclusion now
+uses the shared Tier 0 view v_privileged_principal (schema v34), minus
+its protected_group_member rows (they rest on is_protected_group, which
+would be circular here). The old inline subquery treated a dangerous
+right on, or ownership of, ANY object as privilege, so a stale group that
+merely held OU delegation or had created an OU was never reported.
 """
 
 PLUGIN = {
     "plugin_id": 3005,
     "category": "Groups",
     "name": "Group Has a Stale AdminSDHolder Protection Marker",
-    "version": "1.4",
-    "revision_date": "2026-07-15",
+    "version": "1.5",
+    "revision_date": "2026-10-03",
     "remediation": (
         "Investigate why this group is no longer nested under a "
         "privileged group despite carrying the AdminSDHolder protection "
@@ -101,32 +108,21 @@ PLUGIN = {
               AND vem.group_guid IN (SELECT object_guid FROM well_known_roots)
         ),
         acl_privileged_groups AS (
-            -- [v1.x, ACL-aware] A group can be genuinely, currently
-            -- privileged without any group nesting at all, if it
-            -- directly holds dangerous or DCSync rights on the domain
-            -- root/AdminSDHolder, or owns either object outright. Such
-            -- a group's admin_count=1 is NOT stale -- excluding it here
-            -- avoids a real false positive this check would otherwise
-            -- produce, same reasoning already applied on the user side
-            -- (plugin 1025) and the group-membership side (plugin 3004).
-            SELECT do_acl.object_guid
-            FROM acl_edge a
-            JOIN directory_object do_acl ON do_acl.object_sid = a.trustee_sid AND do_acl.client_id = a.client_id
-            WHERE a.client_id = %(client_id)s
-              AND a.valid_to IS NULL
-              AND a.ace_type = 'allow'
-              AND (
-                    (a.access_mask & (268435456 | 1073741824 | 262144 | 524288)) != 0
-                    OR a.object_type_guid IN ('1131f6aa-9c07-11d1-f79f-00c04fc2dcd2',
-                                               '1131f6ad-9c07-11d1-f79f-00c04fc2dcd2')
-                  )
-            UNION
-            SELECT do_owner.object_guid
-            FROM directory_object owned_target
-            JOIN directory_object do_owner
-                ON do_owner.object_sid = owned_target.owner_sid AND do_owner.client_id = owned_target.client_id
-            WHERE owned_target.client_id = %(client_id)s
-              AND owned_target.owner_sid IS NOT NULL
+            -- [v1.5] A group can be genuinely, currently privileged
+            -- without any protected-group nesting, if it holds control
+            -- rights on, or owns, a Tier 0 object, or holds DCSync (directly
+            -- or through a group). Such a group's admin_count=1 is NOT
+            -- stale. Taken from the shared Tier 0 view (schema v34) rather
+            -- than the old inline subquery, which counted a dangerous right
+            -- on or ownership of ANY object. The view's
+            -- protected_group_member rows are excluded: they rest on
+            -- is_protected_group (admin_count=1), the very signal this
+            -- plugin validates -- currently_nested covers real
+            -- protected-group nesting by RID instead.
+            SELECT DISTINCT object_guid
+            FROM v_privileged_principal
+            WHERE client_id = %(client_id)s
+              AND privilege_source <> 'protected_group_member'
         )
         SELECT
             'warn' AS status,

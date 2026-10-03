@@ -26,14 +26,22 @@ require anyone to actually be a MEMBER of Enterprise Key Admins to be
 a real, present risk -- the ACE exists on the domain naming context
 itself regardless of membership, and would become immediately
 exploitable the moment anyone is added.
+
+[v1.2] is_generic_all (detail) now recognises GenericAll in the form AD
+stores it, 0xF01FF; it tested only the raw GENERIC_ALL bit (0x10000000),
+which stored ACE masks essentially never carry, so it was always false
+(the raw bit still counts too). Which ACEs are reported is unchanged;
+inherit-only ACEs are deliberately still counted, since an unscoped
+right inherited by every descendant is the dangerous part of the ADPREP
+bug pattern.
 """
 
 PLUGIN = {
     "plugin_id": 5009,
     "category": "ACLs",
     "name": "Enterprise Key Admins Holds Excessive Rights on the Domain Root",
-    "version": "1.1",
-    "revision_date": "2026-08-04",
+    "version": "1.2",
+    "revision_date": "2026-10-03",
     "remediation": (
         "Remove the overly broad ACE and replace it with the correctly-"
         "scoped one Microsoft's own remediation guidance specifies: "
@@ -75,7 +83,7 @@ PLUGIN = {
     "query": """
         WITH matches AS (
             SELECT a.object_guid, a.trustee_sid, a.access_mask, a.object_type_guid,
-                   (a.access_mask & 268435456) != 0 AS is_generic_all
+                   ((a.access_mask & 983551) = 983551 OR (a.access_mask & 268435456) <> 0) AS is_generic_all
             FROM acl_edge a
             JOIN ad_domain d ON d.object_guid = a.object_guid AND d.valid_to IS NULL
             WHERE a.client_id = %(client_id)s
