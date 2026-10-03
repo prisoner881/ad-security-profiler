@@ -2,7 +2,7 @@
 """
 adaudit.py -- AD Security & Compliance Plugin Runner
 ======================================================
-VERSION: 0.7.3
+VERSION: 0.7.4
 
 Companion to adprofiler.py. Where adprofiler.py collects AD data,
 adaudit.py analyzes it: discovers every plugin file in plugins/, runs each
@@ -25,6 +25,14 @@ DESIGN:
       as: (status, object_guid, stig_severity, stig_reference,
       tool_severity, tool_reference, fd_severity, summary, detail).
       Zero rows returned = clean pass, nothing to report.
+    - [v0.7.4] Retiring a plugin: replace its file with a stub whose
+      PLUGIN dict is {"plugin_id", "name", "retired": True,
+      "superseded_by": <plugin_id>, "revision_date"}. The stub never
+      runs; its open findings are closed with change_status 'retired'
+      (schema v35), not 'remediated', since the issue still exists and
+      is now reported by the successor. adaudit.py also refuses to run
+      against a database older than REQUIRED_SCHEMA_VERSION, naming the
+      migration files to apply.
     - [v0.7.2] A plugin file that fails to load (syntax error, bad or
       missing PLUGIN dict, duplicate plugin_id) is reported in one
       consolidated [ERROR] block, both right after discovery and again
@@ -124,7 +132,7 @@ from datetime import datetime, timezone
 import psycopg2
 import psycopg2.extras
 
-VERSION = "0.7.3"
+VERSION = "0.7.4"
 
 # [test-candidate-branch] Always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
@@ -185,7 +193,9 @@ def discover_plugins(plugins_dir):
     same isolation philosophy as query-execution failures, just applied
     one step earlier.
 
-    Returns (plugins, load_failures). load_failures is a list of
+    Returns (plugins, load_failures, retired). retired lists the
+    retired-plugin stubs ({"plugin_id", "superseded_by", "name"}).
+    load_failures is a list of
     {"file", "plugin_id", "reason"} dicts, one per skipped file --
     plugin_id is the PLUGIN dict's own value when it got far enough to
     be read, otherwise the numeric filename prefix (every plugin file is
@@ -195,6 +205,7 @@ def discover_plugins(plugins_dir):
     plugins = []
     seen_ids = {}
     load_failures = []
+    retired = []
 
     def fail(path, reason, plugin=None):
         log(f"  [ERROR] {path.name}: {reason} -- skipped")
@@ -221,6 +232,22 @@ def discover_plugins(plugins_dir):
         plugin = getattr(module, "PLUGIN", None)
         if plugin is None:
             fail(path, "has no PLUGIN dict")
+            continue
+
+        # [v0.7.4] A retired plugin is kept as a stub naming its successor
+        # (see close_retired_plugin_evidence()); it's never run.
+        if plugin.get("retired"):
+            pid = plugin.get("plugin_id")
+            successor = plugin.get("superseded_by")
+            if not isinstance(pid, int) or not isinstance(successor, int):
+                fail(path, "retired PLUGIN dict needs integer plugin_id and superseded_by", plugin)
+                continue
+            if pid in seen_ids:
+                fail(path, f"plugin_id {pid} already used by {seen_ids[pid]}", plugin)
+                continue
+            seen_ids[pid] = path.name
+            retired.append({"plugin_id": pid, "superseded_by": successor,
+                            "name": plugin.get("name", path.stem), "_source_file": path.name})
             continue
 
         # Absence of "plugin_type" means "finding" -- every plugin written
@@ -261,7 +288,7 @@ def discover_plugins(plugins_dir):
         plugin["_source_file"] = path.name
         plugins.append(plugin)
 
-    return sorted(plugins, key=lambda p: p["plugin_id"]), load_failures
+    return sorted(plugins, key=lambda p: p["plugin_id"]), load_failures, retired
 
 
 def log_load_failures(load_failures):
@@ -338,6 +365,37 @@ def connect_postgres():
         cur.execute("SET search_path TO ad_intel, public;")
     conn.commit()
     return conn
+
+
+# [v0.7.4] Lowest schema version this adaudit.py and its plugins work
+# against: v34 added v_privileged_principal and acl_edge.inherit_only
+# (used by many plugins), v35 the 'retired' change_status.
+REQUIRED_SCHEMA_VERSION = 35
+
+
+def check_schema_version(conn):
+    """Fails fast, with the fix, on a database older than this version
+    expects -- otherwise every plugin that uses a newer view or column
+    errors individually and the run ends 'incomplete' with dozens of
+    SQL errors instead of one clear message."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('ad_intel.schema_migration_history') IS NOT NULL;")
+        if not cur.fetchone()[0]:
+            raise RuntimeError(
+                "Database predates schema version tracking -- apply the "
+                "schema_migration_vNN.sql files (v31 onward) to bring it to "
+                f"v{REQUIRED_SCHEMA_VERSION}.")
+        cur.execute("SELECT max(version_number) FROM schema_migration_history;")
+        current = cur.fetchone()[0] or 0
+    conn.commit()
+    if current < REQUIRED_SCHEMA_VERSION:
+        missing = ", ".join(f"schema_migration_v{v}.sql"
+                            for v in range(current + 1, REQUIRED_SCHEMA_VERSION + 1))
+        raise RuntimeError(
+            f"Database schema is v{current}; this adaudit.py needs v{REQUIRED_SCHEMA_VERSION}. "
+            f"Apply, in order: {missing} (psql -v ON_ERROR_STOP=1 -f <file>). Never "
+            f"re-run schema_init.sql against a database that already has data.")
+    return current
 
 
 def get_latest_client_and_run(conn):
@@ -576,6 +634,34 @@ def sync_evidence(pg_cur, evidence_run_id, control_test_id, client_id, rows, plu
             findings.append(finding_dict(existing, "remediated"))
 
     return findings
+
+
+def close_retired_plugin_evidence(pg_cur, evidence_run_id, client_id, retired, run_timestamp):
+    """[v0.7.4] Closes every open finding of each retired plugin with
+    change_status 'retired' (schema v35) and marks its control_test
+    inactive. A plugin is retired when another plugin now reports the
+    same issue; its stub file in plugins/ names the successor. Closing
+    those findings as 'remediated' (what the stale-plugin safety net
+    would otherwise do once the file stopped running) would claim the
+    issue was fixed when it wasn't. Runs on every invocation, filtered
+    or not: retirement is declared explicitly, not inferred from a
+    plugin's absence. Returns [(retired_plugin, closed_count)]."""
+    results = []
+    for plugin in retired:
+        pg_cur.execute("""
+            UPDATE control_evidence_fact cef
+            SET valid_to = %(valid_to)s, evidence_run_id_valid_to = %(evidence_run_id)s,
+                change_status = 'retired'
+            FROM control_test ct
+            WHERE ct.control_test_id = cef.control_test_id AND ct.plugin_id = %(plugin_id)s
+              AND cef.client_id = %(client_id)s AND cef.valid_to IS NULL;
+        """, {"valid_to": run_timestamp, "evidence_run_id": evidence_run_id,
+              "plugin_id": plugin["plugin_id"], "client_id": client_id})
+        closed = pg_cur.rowcount
+        pg_cur.execute("UPDATE control_test SET is_active = FALSE WHERE plugin_id = %s AND is_active;",
+                       (plugin["plugin_id"],))
+        results.append((plugin, closed))
+    return results
 
 
 def close_stale_plugin_evidence(pg_cur, evidence_run_id, client_id, executed_control_test_ids, run_timestamp,
@@ -974,8 +1060,9 @@ def main():
     print("=" * 62)
 
     log(f"Discovering plugins in {args.plugins_dir}...")
-    plugins, load_failures = discover_plugins(args.plugins_dir)
-    log(f"Loaded {len(plugins)} valid plugin(s)")
+    plugins, load_failures, retired_plugins = discover_plugins(args.plugins_dir)
+    log(f"Loaded {len(plugins)} valid plugin(s)"
+        + (f", {len(retired_plugins)} retired stub(s)" if retired_plugins else ""))
     log_load_failures(load_failures)
 
     if args.plugin_id:
@@ -994,6 +1081,7 @@ def main():
     inventory_plugins = [p for p in plugins if p["plugin_type"] == "inventory"]
 
     conn = connect_postgres()
+    check_schema_version(conn)
     client_id, run_id, client_name, completed_at = get_latest_client_and_run(conn)
     log(f"Analyzing latest collection for {client_name} (run_id={run_id}, {completed_at})")
 
@@ -1062,6 +1150,17 @@ def main():
                                   "name": plugin["name"], "version": plugin["version"],
                                   "rollup": rollup_status(rows)})
         all_findings.extend(findings)
+
+    if retired_plugins:
+        with conn.cursor() as cur:
+            retired_results = close_retired_plugin_evidence(
+                cur, evidence_run_id, client_id, retired_plugins, run_timestamp,
+            )
+        conn.commit()
+        for plugin, closed in retired_results:
+            if closed:
+                log(f"Plugin {plugin['plugin_id']} ({plugin['name']}) is retired, superseded by "
+                    f"plugin {plugin['superseded_by']}: closed {closed} open finding(s) as 'retired'.")
 
     load_failed_plugin_ids = {f["plugin_id"] for f in load_failures if f["plugin_id"] is not None}
     if is_unfiltered_run and any(f["plugin_id"] is None for f in load_failures):

@@ -4,7 +4,7 @@
  adprofiler.py -- Active Directory Security & Compliance Profiler (Collector)
 ================================================================================
 
-VERSION: 0.5.13
+VERSION: 0.5.14
 
 PURPOSE:
     Connects to an on-premise Active Directory Domain Controller via LDAP,
@@ -180,7 +180,7 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
-VERSION = "0.5.13"
+VERSION = "0.5.14"
 # [client-test-branch] These are always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
 # connect_postgres() is ever called -- the values here are placeholders,
@@ -411,6 +411,13 @@ CERT_OID_FILTER = "(objectClass=msPKI-Enterprise-Oid)"
 DNS_ZONE_ATTRS = ["objectGUID", "distinguishedName", "name"]
 DNS_ZONE_FILTER = "(objectClass=dnsZone)"
 DNSPROPERTY_ID_ALLOW_UPDATE = 2  # DSPROPERTY_ZONE_ALLOW_UPDATE, [MS-DNSP] 2.3.2.1.1
+
+# [v0.5.14] Synthetic attributes_full key on the domain object holding the
+# domain-level settings read from OTHER objects (see the domain
+# collect_object_class() call in main()). Not an LDAP attribute name --
+# the "adprofiler:" prefix can't collide with one.
+DERIVED_DOMAIN_SETTINGS_KEY = "adprofiler:derivedDomainSettings"
+
 
 class CollectorAbort(Exception):
     """
@@ -1589,7 +1596,7 @@ REQUIRED_IDENTITY_COLUMNS = {
 # the structural check remains the backstop for a schema altered
 # outside the approved migration files, where the version number could
 # claim to be current while the actual structure doesn't match it.
-EXPECTED_SCHEMA_VERSION = 34
+EXPECTED_SCHEMA_VERSION = 35
 
 
 def check_schema_version(pg_conn):
@@ -1885,8 +1892,44 @@ def open_edge(pg_cur, table, columns):
     pg_cur.execute(query, vals)
 
 
+def get_open_edge_payloads(pg_cur, table, client_id, key_cols, payload_cols):
+    """Like get_open_edges(), but returns {key: (edge_id, {payload_col: value})}."""
+    if table not in KNOWN_EDGE_TABLES:
+        raise ValueError(f"Refusing to read from unrecognized table: {table}")
+    query = sql.SQL("SELECT edge_id, {}, {} FROM {} WHERE client_id = %s AND valid_to IS NULL").format(
+        sql.SQL(", ").join(map(sql.Identifier, key_cols)),
+        sql.SQL(", ").join(map(sql.Identifier, payload_cols)),
+        sql.Identifier(table),
+    )
+    pg_cur.execute(query, (client_id,))
+    n = len(key_cols)
+    return {tuple(row[1:1 + n]): (row[0], dict(zip(payload_cols, row[1 + n:])))
+            for row in pg_cur.fetchall()}
+
+
 def sync_edges(pg_cur, table, client_id, run_id, valid_from, key_cols,
-               desired_edges):
+               desired_edges, payload_cols=None):
+    """Diff-only SCD2 sync of one edge table for the whole client.
+
+    [v0.5.14] payload_cols: non-key columns whose changes are real,
+    versioned changes (e.g. a GPO link being disabled or enforced).
+    Previously only keys were compared, so once an edge existed its
+    payload was frozen at whatever it was when first opened -- disabling
+    or enforcing an existing GPO link was never recorded. When given, an
+    edge whose key is unchanged but whose payload differs is closed and
+    reopened with the new values, and counted in both opened and closed.
+    """
+    payload_changed = 0
+    if payload_cols:
+        existing_payloads = get_open_edge_payloads(pg_cur, table, client_id, key_cols, payload_cols)
+        for key, (edge_id, current) in existing_payloads.items():
+            wanted = desired_edges.get(key)
+            if wanted is None:
+                continue
+            if any(current[col] != wanted.get(col) for col in payload_cols):
+                close_edge_by_id(pg_cur, table, edge_id, run_id, valid_from)
+                payload_changed += 1
+
     existing = get_open_edges(pg_cur, table, client_id, key_cols)
     desired_keys = set(desired_edges.keys())
     existing_keys = set(existing.keys())
@@ -1906,7 +1949,7 @@ def sync_edges(pg_cur, table, client_id, run_id, valid_from, key_cols,
         close_edge_by_id(pg_cur, table, existing[key], run_id, valid_from)
         closed += 1
 
-    return opened, closed
+    return opened, closed + payload_changed
 
 
 # [v0.5.12] LDAP retry policy. Before this, the connection used ldap3's
@@ -2246,8 +2289,14 @@ class CollectionStats:
 def collect_object_class(conn, pg_cur, client_id, run_id, dc_host, base_dn,
                           object_filter, attrs, page_size, label,
                           typed_table, typed_column_fn, dn_to_guid, stats,
-                          run_timestamp):
+                          run_timestamp, extra_attributes=None):
     """
+    [v0.5.14] extra_attributes: values merged into every collected
+    object's attributes_full BEFORE change detection, so that facts read
+    from somewhere other than the object itself still version it when
+    they change. Used for the domain object (see
+    DERIVED_DOMAIN_SETTINGS_KEY).
+
     [v0.0.6 fix] valid_from is now run_timestamp (one fixed value shared by
     every row this run writes), not the AD object's own whenChanged
     attribute. Using whenChanged meant a baseline run against an object
@@ -2289,6 +2338,8 @@ def collect_object_class(conn, pg_cur, client_id, run_id, dc_host, base_dn,
         if not object_guid:
             log_warn(f"Skipping entry with unreadable objectGUID: {dn}")
             continue
+        if extra_attributes:
+            attributes_full.update(extra_attributes)
 
         dn_to_guid[dn.lower()] = object_guid
         stats.seen += 1
@@ -3004,6 +3055,7 @@ def resolve_gpo_links(pg_cur, client_id, run_id, dn_to_guid, linkable_entries, s
     opened, closed = sync_edges(
         pg_cur, "gpo_link_edge", client_id, run_id, run_timestamp,
         ["container_guid", "gpo_guid"], desired,
+        payload_cols=["link_order", "link_enabled", "link_enforced"],
     )
     stats.edges_opened += opened
     stats.edges_closed += closed
@@ -3247,6 +3299,7 @@ def resolve_gmsa_password_readers(pg_cur, client_id, run_id, computer_entries, s
     opened, closed = sync_edges(
         pg_cur, "gmsa_password_reader_edge", client_id, run_id, valid_from,
         ["gmsa_guid", "trustee_sid"], desired,
+        payload_cols=["access_mask", "ace_type"],
     )
     stats.edges_opened += opened
     stats.edges_closed += closed
@@ -3368,6 +3421,74 @@ def clear_deleted_flag_on_restored_objects(pg_cur, client_id, run_id):
         if len(restored) > 20:
             log_info(f"    ... and {len(restored) - 20} more")
     return restored
+
+
+def reconcile_absent_objects(conn, pg_cur, client_id, run_id, dc_host, typed_table,
+                             base_dn, collected, label, stats, run_timestamp):
+    """[v0.5.14] Detects deletions by absence, for object classes outside
+    the domain naming context: certificate templates, Enterprise CAs,
+    NTAuth, sites, subnets, schema objects, DisplaySpecifiers and cert
+    OIDs (Configuration NC), and DNS zones (DomainDnsZones partition).
+    collect_deleted_objects() only searches CN=Deleted Objects of the
+    DOMAIN partition, so a template, CA or site deleted from the
+    Configuration partition kept its typed row open forever and plugins
+    kept reporting on it (stale ESC findings for a template that no
+    longer exists, for example).
+
+    These classes are small and fully re-enumerated every run, so
+    "previously current under base_dn, not seen this run" is a reliable
+    deletion signal -- with two guards:
+      - only called after the enumeration completed (any LDAP failure
+        aborts the run, see LDAPCollectionError), and
+      - only if base_dn itself still exists and is served by this DC: an
+        absent container, or a referral (e.g. a DC that doesn't host the
+        DomainDnsZones partition), returns zero entries, which must not be
+        read as "everything was deleted".
+    Objects are matched to base_dn by DN suffix, so two collections
+    sharing a typed table but not a base (or vice versa) don't affect
+    each other. Pass every collection's results for a shared base/table
+    together (the two ad_schema_object passes). Returns the count."""
+    if not ldap_search(conn, base_dn, "(objectClass=*)", ldap3.BASE, ["objectGUID"],
+                       what=f"{label} container (deletion check)"):
+        log_info(f"{label}: container {base_dn} not present on this DC -- "
+                 f"skipping deletion check rather than treating its objects as deleted.")
+        return 0
+    if typed_table not in KNOWN_TYPED_TABLES:
+        raise ValueError(f"Refusing to read from unrecognized table: {typed_table}")
+    seen = {object_guid for object_guid, _ in collected}
+    base = base_dn.lower()
+    pg_cur.execute(
+        sql.SQL("""
+            SELECT t.object_guid, d.dn_current
+            FROM {} t
+            JOIN directory_object d
+              ON d.object_guid = t.object_guid AND d.client_id = t.client_id
+            WHERE t.client_id = %s AND t.valid_to IS NULL AND NOT d.is_deleted
+              AND (lower(d.dn_current) = %s
+                   OR right(lower(d.dn_current), %s) = %s);
+        """).format(sql.Identifier(typed_table)),
+        (client_id, base, len(base) + 1, "," + base),
+    )
+    missing = [(guid, dn) for guid, dn in pg_cur.fetchall() if str(guid) not in seen]
+    for object_guid, dn in missing:
+        pg_cur.execute(
+            """
+            UPDATE directory_object
+               SET is_deleted = TRUE, deleted_run_id = %s, deleted_detected_at = %s
+             WHERE object_guid = %s AND client_id = %s AND NOT is_deleted;
+            """,
+            (run_id, run_timestamp, object_guid, client_id),
+        )
+        write_object_version(
+            pg_cur, object_guid, client_id, run_id, dc_host,
+            "deleted", {"isDeleted": True}, {"isDeleted": True}, run_timestamp,
+        )
+        close_typed_row_if_open(pg_cur, object_guid, run_timestamp)
+        stats.deleted += 1
+        log_info(f"  {label}: no longer present, marked deleted: {dn}")
+    if missing:
+        log_success(f"{label}: {len(missing)} object(s) deleted since the last run")
+    return len(missing)
 
 
 def repair_orphaned_deleted_typed_rows(pg_cur, client_id, run_timestamp):
@@ -3760,6 +3881,29 @@ def main():
             except LDAPException as exc:
                 log_warn(f"Could not read DFSR-GlobalSettings (non-fatal): {exc}")
 
+            # [v0.5.14] Every input to ad_domain's typed columns that is
+            # NOT an attribute of the domain object itself (dSHeuristics
+            # and tombstone lifetime live on CN=Directory Service in the
+            # Configuration NC; functional level comes from RootDSE;
+            # msDFSR-Flags from DFSR-GlobalSettings; LAPS presence from
+            # the schema) is folded into the domain object's
+            # attributes_full under one synthetic key. Before, the typed
+            # row was only rewritten when a domain-object attribute
+            # changed, so e.g. enabling anonymous LDAP via dSHeuristics
+            # was never recorded until something unrelated changed on
+            # the domain object. Now any change to these versions the
+            # domain object like any other change. Expect one "modified"
+            # domain version on the first run with this code, since the
+            # key is new.
+            derived_domain_settings = {
+                "domain_functionality": rootdse.get("domain_functionality"),
+                "tombstone_lifetime_days": tombstone_lifetime,
+                "tombstone_lifetime_is_default": tombstone_lifetime_is_default,
+                "dsheuristics_anonymous_access": dsheuristics_anonymous_access,
+                "dsheuristics_uniqueness": dsheuristics_uniqueness,
+                "laps_schema_present": bool(laps_legacy_present or laps_modern_present),
+                "dfsr_migration_flags": dfsr_migration_flags,
+            }
             domain_entries = collect_object_class(
                 ldap_conn, cur, client_id, run_id, args.dc_host, base_dn,
                 "(objectClass=domain)", DOMAIN_ATTRS, args.page_size,
@@ -3771,6 +3915,7 @@ def main():
                     dsheuristics_uniqueness,
                 ),
                 dn_to_guid, stats, run_timestamp,
+                extra_attributes={DERIVED_DOMAIN_SETTINGS_KEY: derived_domain_settings},
             )
 
             # [v0.5.0] Organizational Units -- same full typed-table
@@ -3983,6 +4128,10 @@ def main():
                     "certificate templates", "ad_cert_template",
                     cert_template_typed_columns, dn_to_guid, stats, run_timestamp,
                 )
+                reconcile_absent_objects(
+                    ldap_conn, cur, client_id, run_id, args.dc_host, "ad_cert_template",
+                    cert_template_container, cert_template_entries, "certificate templates", stats, run_timestamp,
+                )
 
                 enrollment_service_container = (
                     f"CN=Enrollment Services,CN=Public Key Services,"
@@ -3993,6 +4142,10 @@ def main():
                     ENROLLMENT_SERVICE_FILTER, ENROLLMENT_SERVICE_ATTRS, args.page_size,
                     "enrollment services", "ad_enrollment_service",
                     enrollment_service_typed_columns, dn_to_guid, stats, run_timestamp,
+                )
+                reconcile_absent_objects(
+                    ldap_conn, cur, client_id, run_id, args.dc_host, "ad_enrollment_service",
+                    enrollment_service_container, ca_entries, "enrollment services (CAs)", stats, run_timestamp,
                 )
 
                 collect_cert_template_publication(
@@ -4014,11 +4167,15 @@ def main():
                     f"CN=NTAuthCertificates,CN=Public Key Services,"
                     f"CN=Services,{rootdse['config_nc']}"
                 )
-                collect_object_class(
+                ntauth_entries = collect_object_class(
                     ldap_conn, cur, client_id, run_id, args.dc_host, ntauth_dn,
                     NTAUTH_FILTER, NTAUTH_ATTRS, args.page_size,
                     "NTAuth store", "ad_ntauth_store",
                     ntauth_typed_columns, dn_to_guid, stats, run_timestamp,
+                )
+                reconcile_absent_objects(
+                    ldap_conn, cur, client_id, run_id, args.dc_host, "ad_ntauth_store",
+                    ntauth_dn, ntauth_entries, "NTAuth store", stats, run_timestamp,
                 )
 
                 # [v0.5.4] ADCS ACL collection -- ESC4 (a non-admin can
@@ -4164,20 +4321,28 @@ def main():
             # abort collection of everything else.
             try:
                 sites_container = f"CN=Sites,{rootdse['config_nc']}"
-                collect_object_class(
+                site_entries = collect_object_class(
                     ldap_conn, cur, client_id, run_id, args.dc_host, sites_container,
                     SITE_FILTER, SITE_ATTRS, args.page_size, "AD sites",
                     "ad_site", site_typed_columns, dn_to_guid, stats, run_timestamp,
+                )
+                reconcile_absent_objects(
+                    ldap_conn, cur, client_id, run_id, args.dc_host, "ad_site",
+                    sites_container, site_entries, "AD sites", stats, run_timestamp,
                 )
             except LDAPException as exc:
                 log_warn(f"AD Sites collection failed (non-fatal): {exc}")
 
             try:
                 subnets_container = f"CN=Subnets,CN=Sites,{rootdse['config_nc']}"
-                collect_object_class(
+                subnet_entries = collect_object_class(
                     ldap_conn, cur, client_id, run_id, args.dc_host, subnets_container,
                     SUBNET_FILTER, SUBNET_ATTRS, args.page_size, "AD subnets",
                     "ad_subnet", subnet_typed_columns, dn_to_guid, stats, run_timestamp,
+                )
+                reconcile_absent_objects(
+                    ldap_conn, cur, client_id, run_id, args.dc_host, "ad_subnet",
+                    subnets_container, subnet_entries, "AD subnets", stats, run_timestamp,
                 )
             except LDAPException as exc:
                 log_warn(f"AD Subnets collection failed (non-fatal): {exc}")
@@ -4187,39 +4352,51 @@ def main():
                 # convention (confirmed against [MS-ADTS]), not a separate
                 # RootDSE field this collector needs to look up.
                 schema_nc = f"CN=Schema,{rootdse['config_nc']}"
-                collect_object_class(
+                schema_entries = collect_object_class(
                     ldap_conn, cur, client_id, run_id, args.dc_host, schema_nc,
                     SCHEMA_JAVA_FILTER, SCHEMA_JAVA_ATTRS, args.page_size,
                     "schema (Java extension check)", "ad_schema_object",
                     schema_java_typed_columns, dn_to_guid, stats, run_timestamp,
                 )
-                collect_object_class(
+                schema_entries += collect_object_class(
                     ldap_conn, cur, client_id, run_id, args.dc_host, schema_nc,
                     SCHEMA_POSSSUPERIOR_FILTER, SCHEMA_POSSSUPERIOR_ATTRS, args.page_size,
                     "schema (possSuperiors check)", "ad_schema_object",
                     schema_posssuperior_typed_columns, dn_to_guid, stats, run_timestamp,
+                )
+                reconcile_absent_objects(
+                    ldap_conn, cur, client_id, run_id, args.dc_host, "ad_schema_object",
+                    schema_nc, schema_entries, "schema objects", stats, run_timestamp,
                 )
             except LDAPException as exc:
                 log_warn(f"Schema object collection failed (non-fatal): {exc}")
 
             try:
                 display_specifiers_container = f"CN=DisplaySpecifiers,{rootdse['config_nc']}"
-                collect_object_class(
+                display_specifier_entries = collect_object_class(
                     ldap_conn, cur, client_id, run_id, args.dc_host, display_specifiers_container,
                     DISPLAY_SPECIFIER_FILTER, DISPLAY_SPECIFIER_ATTRS, args.page_size,
                     "DisplaySpecifiers", "ad_display_specifier",
                     display_specifier_typed_columns, dn_to_guid, stats, run_timestamp,
+                )
+                reconcile_absent_objects(
+                    ldap_conn, cur, client_id, run_id, args.dc_host, "ad_display_specifier",
+                    display_specifiers_container, display_specifier_entries, "DisplaySpecifiers", stats, run_timestamp,
                 )
             except LDAPException as exc:
                 log_warn(f"DisplaySpecifier collection failed (non-fatal): {exc}")
 
             try:
                 cert_oid_container = f"CN=OID,CN=Public Key Services,CN=Services,{rootdse['config_nc']}"
-                collect_object_class(
+                cert_oid_entries = collect_object_class(
                     ldap_conn, cur, client_id, run_id, args.dc_host, cert_oid_container,
                     CERT_OID_FILTER, CERT_OID_ATTRS, args.page_size,
                     "certificate OIDs", "ad_cert_oid",
                     cert_oid_typed_columns, dn_to_guid, stats, run_timestamp,
+                )
+                reconcile_absent_objects(
+                    ldap_conn, cur, client_id, run_id, args.dc_host, "ad_cert_oid",
+                    cert_oid_container, cert_oid_entries, "certificate OIDs", stats, run_timestamp,
                 )
             except LDAPException as exc:
                 log_warn(f"Certificate OID collection failed (non-fatal): {exc}")
@@ -4237,6 +4414,10 @@ def main():
                     DNS_ZONE_FILTER, DNS_ZONE_ATTRS, args.page_size,
                     "DNS zones", "ad_dns_zone",
                     dns_zone_typed_columns, dn_to_guid, stats, run_timestamp,
+                )
+                reconcile_absent_objects(
+                    ldap_conn, cur, client_id, run_id, args.dc_host, "ad_dns_zone",
+                    dns_zones_container, dns_zone_entries, "DNS zones", stats, run_timestamp,
                 )
                 # [v0.5.6] dNSProperty is read separately, per zone, via
                 # a targeted raw_attributes search -- NOT through the

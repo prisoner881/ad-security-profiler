@@ -1,88 +1,37 @@
 """
-Plugin 4023: Domain Controller Computer Object Not Owned by an Expected Principal
+Plugin 4023: Domain Controller Computer Object Not Owned by an Expected Principal -- RETIRED 2026-10-03
 
-By default, a domain controller's own computer object is owned by
-Domain Admins or Enterprise Admins. A different owner is most commonly
-residue from how the DC was originally promoted (e.g. promoted by an
-account that was a Domain Admin at the time but was later demoted, or
-promoted from an already-existing server object joined to the domain
-by someone else beforehand) rather than deliberate tampering -- but
-whoever holds ownership of an object can always rewrite its ACL
-outright, regardless of what the ACL currently says, making an
-unexpected owner on a domain controller's own account object worth a
-second look regardless of how it got there.
+Retired as a duplicate of plugin 2030 (Domain Controller Computer Object
+Owned by an Unexpected Principal). Both checked directory_object.owner_sid
+of every DC computer object, on the same object_guid, but with
+conflicting allow-lists: 4023 flagged (medium) the RID-500 Administrator
+and BUILTIN\\Administrators owners that 2030 accepted, while 2030 flagged
+(high) everything else -- so one DC could get two findings with
+different severities for one owner.
 
-Owner data comes from a targeted, DC-only security descriptor read
-added specifically to support this plugin (adprofiler.py v0.5.5) --
-domain controllers are typically few in number, the same low-cost
-profile as the existing domain root/AdminSDHolder targeted reads, and
-deliberately scoped to owner extraction only (not full ACE scanning,
-which wasn't requested and would add LDAP read cost with nothing
-currently using it).
+2030 v1.1 consolidates both with a single tiered model:
+  - Domain Admins (-512) / Enterprise Admins (-519): expected, no finding.
+  - BUILTIN\\Administrators, the RID-500 account, SYSTEM: Tier 0 already,
+    reported as a low-severity hygiene deviation (the case only 4023
+    used to report).
+  - Any other principal that is privileged per v_privileged_principal:
+    medium deviation.
+  - A non-Tier-0 principal, or an owner SID that does not resolve: high.
+4023's PingCastle P-DCOwner reference, dns_hostname detail key and
+promotion-residue explanation were folded into 2030.
+
+Retiring 4023 also removes its control_id "DOM-423", which collided with
+plugin 4022 (DOM-423 stays with 4022, matching the DOM-421/422/424
+sequence of its neighbors).
+
+adaudit does not run retired plugins; it closes this plugin's open
+findings with change_status 'retired' and records the successor.
 """
 
 PLUGIN = {
     "plugin_id": 4023,
-    "category": "Domain",
     "name": "Domain Controller Computer Object Not Owned by an Expected Principal",
-    "version": "1.0",
-    "revision_date": "2026-08-05",
-    "remediation": (
-        "Review who currently owns this DC's computer object and "
-        "confirm it's expected. If not, change ownership to Domain "
-        "Admins: open the object in ADSI Edit or Active Directory "
-        "Users and Computers (Advanced Features enabled) -> Properties "
-        "-> Security tab -> Advanced -> Owner -> change to Domain "
-        "Admins. Whoever holds ownership of an object can always "
-        "rewrite its ACL regardless of what the ACL currently allows, "
-        "so an unexpected owner is worth resolving even if the DC's "
-        "current ACL itself looks otherwise correct."
-    ),
-    "control_id": "DOM-423",
-    "framework_tags": [],
-    "references": [
-        {"title": "PingCastle: ACL Check rules -- P-DCOwner",
-         "url": "https://pingcastle.com/PingCastleFiles/ad_hc_rules_list.html"},
-    ],
-    "description": (
-        "A domain controller's own computer object is owned by a "
-        "principal other than Domain Admins or Enterprise Admins. Most "
-        "commonly residue from how the DC was originally promoted "
-        "(promoted by an account that was privileged at the time but "
-        "isn't now, or promoted from an already-existing computer "
-        "object) rather than deliberate tampering -- but ownership "
-        "always permits rewriting an object's ACL outright regardless "
-        "of the ACL's current content, so an unexpected owner is worth "
-        "reviewing regardless of how it arose."
-    ),
-    "base_severity": "medium",
-    "query": """
-        SELECT
-            'fail' AS status,
-            c.object_guid,
-            NULL AS stig_severity,
-            NULL AS stig_reference,
-            NULL AS tool_severity,
-            NULL AS tool_reference,
-            'medium' AS fd_severity,
-            'Domain Controller ' || c.sam_account_name || ' is owned by '
-                || COALESCE(owner_do.sam_account_name, do2.owner_sid)
-                || ', not Domain Admins/Enterprise Admins' AS summary,
-            jsonb_build_object(
-                'sam_account_name', c.sam_account_name,
-                'dns_hostname', c.dns_hostname,
-                'owner_sid', do2.owner_sid,
-                'owner_sam_account_name', owner_do.sam_account_name
-            ) AS detail
-        FROM ad_computer c
-        JOIN directory_object do2 ON do2.object_guid = c.object_guid AND do2.client_id = c.client_id
-        LEFT JOIN directory_object owner_do
-            ON owner_do.object_sid = do2.owner_sid AND owner_do.client_id = do2.client_id
-        WHERE c.client_id = %(client_id)s
-          AND c.valid_to IS NULL
-          AND c.is_domain_controller
-          AND do2.owner_sid IS NOT NULL
-          AND do2.owner_sid NOT LIKE '%%-512'
-          AND do2.owner_sid NOT LIKE '%%-519'
-    """,
+    "retired": True,
+    "superseded_by": 2030,
+    "revision_date": "2026-10-03",
 }

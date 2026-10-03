@@ -17,19 +17,28 @@ that rule).
 
 Covers both users and computers, since either can hold a
 Kerberos-usable credential with DES explicitly enabled.
+
+[v1.1] Absorbs plugin 1011 (User Account Supports Deprecated DES Kerberos
+Encryption), now retired with superseded_by=1038. 1011 checked only the
+0x1/0x2 bits on enabled users -- a strict subset of this query -- so it
+reported every one of its accounts a second time. Its Microsoft
+encryption-types reference and its "target value 24 (AES128+AES256)"
+remediation note are carried over; the query, summary and severity are
+unchanged, so existing 1038 findings do not churn.
 """
 
 PLUGIN = {
     "plugin_id": 1038,
     "category": "User Accounts",
     "name": "Account Configured to Allow DES Kerberos Encryption",
-    "version": "1.0",
-    "revision_date": "2026-08-05",
+    "version": "1.1",
+    "revision_date": "2026-10-03",
     "remediation": (
         "Remove DES support: clear bits 0x1 and 0x2 from "
         "msDS-SupportedEncryptionTypes (e.g. via `Set-ADAccountControl` "
         "or `Set-ADUser`/`Set-ADComputer -KerberosEncryptionType` "
-        "specifying only AES128/AES256), and uncheck 'Use Kerberos DES "
+        "specifying only AES128/AES256 -- an msDS-SupportedEncryptionTypes "
+        "value of 24 is the modern target for most environments), and uncheck 'Use Kerberos DES "
         "encryption for this account' in the account's Account tab if "
         "present (clears userAccountControl bit 0x200000). Confirm no "
         "legacy system genuinely requires DES before removing it -- "
@@ -41,6 +50,8 @@ PLUGIN = {
     "references": [
         {"title": "Microsoft [MS-KILE]: msDS-SupportedEncryptionTypes bit flags",
          "url": "https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-kile/6cfc7b50-11ed-4b4d-846d-6f08f0812919"},
+        {"title": "Microsoft: Network security -- Configure encryption types allowed for Kerberos",
+         "url": "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/network-security-configure-encryption-types-allowed-for-kerberos"},
         {"title": "PingCastle: Old authentication protocols rules -- S-DesEnabled",
          "url": "https://pingcastle.com/PingCastleFiles/ad_hc_rules_list.html"},
     ],
