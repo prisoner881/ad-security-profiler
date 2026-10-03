@@ -21,14 +21,22 @@ different number without a specific reason to.
 
 Uses only ad_user.pwd_last_set and admin_count, both already
 collected -- no new collector or schema work needed for this one.
+
+[v1.1] The summary now states the password-last-set time as a date (UTC,
+to the day) rather than a day count computed from now(). The count
+differed on every run, so an unchanged finding was recorded as 'changed'
+on every audit; the date only moves when the underlying attribute does.
+Severity and inclusion thresholds are unchanged. The day count is still
+reported in detail (password_age_days), which is not part of the
+finding's identity because object_guid is always set for this plugin.
 """
 
 PLUGIN = {
     "plugin_id": 1036,
     "category": "User Accounts",
     "name": "Privileged Account Password Has Not Rotated in Over 3 Years",
-    "version": "1.0",
-    "revision_date": "2026-07-31",
+    "version": "1.1",
+    "revision_date": "2026-10-03",
     "remediation": (
         "Rotate this account's password now, regardless of whether its "
         "expiration policy currently permits it to remain unchanged. A "
@@ -100,8 +108,8 @@ PLUGIN = {
             NULL AS tool_reference,
             'medium' AS fd_severity,
             'Privileged User Account ' || COALESCE(u.user_principal_name, u.sam_account_name)
-                || ' has not rotated its password in '
-                || EXTRACT(DAY FROM now() - u.pwd_last_set)::int || ' days' AS summary,
+                || ' has not rotated its password since '
+                || to_char(u.pwd_last_set AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS summary,
             jsonb_build_object(
                 'sam_account_name', u.sam_account_name,
                 'user_principal_name', u.user_principal_name,

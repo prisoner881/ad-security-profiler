@@ -15,14 +15,20 @@ procedure isn't being followed as intended. Confirmed against
 PingCastle's own equivalent check, which uses the same 35-day window
 and the same underlying attribute (lastLogonTimestamp) this project
 already collects.
+
+[v1.1] The summary now states the last logon time as a date (UTC, to the
+day) rather than a day count computed from now(). The count differed on
+every run, so an unchanged finding was recorded as 'changed' on every
+audit; the date only moves when the underlying attribute does. Severity
+and inclusion thresholds are unchanged.
 """
 
 PLUGIN = {
     "plugin_id": 1033,
     "category": "User Accounts",
     "name": "Built-in Administrator Account Used Recently",
-    "version": "1.0",
-    "revision_date": "2026-07-18",
+    "version": "1.1",
+    "revision_date": "2026-10-03",
     "remediation": (
         "Identify who used this account and why, and move that work to "
         "an individually attributable administrative account instead. "
@@ -63,8 +69,7 @@ PLUGIN = {
             NULL AS tool_reference,
             'medium' AS fd_severity,
             'Built-in Administrator account (RID 500, currently named "' || u.sam_account_name
-                || '") logged on ' || EXTRACT(DAY FROM now() - u.last_logon_timestamp)::int
-                || ' days ago' AS summary,
+                || '") last logged on ' || to_char(u.last_logon_timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS summary,
             jsonb_build_object(
                 'sam_account_name', u.sam_account_name,
                 'last_logon_timestamp', u.last_logon_timestamp,

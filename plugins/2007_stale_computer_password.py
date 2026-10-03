@@ -8,14 +8,22 @@ cleaned up -- a distinct signal from last_logon_timestamp staleness,
 since a machine can retain a recent logon while its password rotation
 has separately stopped working (e.g. a machine stuck unable to reach a
 DC to complete rotation).
+
+[v1.3] The summary now states the password-last-set time as a date (UTC,
+to the day) rather than a day count computed from now(). The count
+differed on every run, so an unchanged finding was recorded as 'changed'
+on every audit; the date only moves when the underlying attribute does.
+Severity and inclusion thresholds are unchanged. The day count is still
+reported in detail (password_age_days), which is not part of the
+finding's identity because object_guid is always set for this plugin.
 """
 
 PLUGIN = {
     "plugin_id": 2007,
     "category": "Computer Accounts",
     "name": "Computer Account Password Has Not Rotated Recently",
-    "version": "1.2",
-    "revision_date": "2026-07-15",
+    "version": "1.3",
+    "revision_date": "2026-10-03",
     "remediation": (
         "If the machine still exists, confirm it can actually reach a "
         "domain controller and that its computer account password "
@@ -53,8 +61,8 @@ PLUGIN = {
             CASE WHEN c.is_domain_controller THEN 'medium' ELSE 'low' END AS fd_severity,
             (CASE WHEN c.is_domain_controller THEN 'Domain Controller ' ELSE '' END)
                 || 'Computer Account ' || c.sam_account_name
-                || ' password has not rotated in '
-                || EXTRACT(DAY FROM now() - c.pwd_last_set)::int || ' days' AS summary,
+                || ' password has not rotated since '
+                || to_char(c.pwd_last_set AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS summary,
             jsonb_build_object(
                 'sam_account_name', c.sam_account_name,
                 'dns_hostname', c.dns_hostname,

@@ -32,8 +32,8 @@ PLUGIN = {
     "plugin_id": 11005,
     "category": "Change Detection",
     "name": "Resource-Based Constrained Delegation Newly Configured",
-    "version": "1.0",
-    "revision_date": "2026-09-02",
+    "version": "1.1",
+    "revision_date": "2026-10-03",
     "remediation": (
         "Establish whether the delegation was configured deliberately. "
         "RBCD has legitimate uses, but they are specific and "
@@ -92,10 +92,30 @@ PLUGIN = {
                   AND sr.run_id < %(run_id)s
                   AND sr.status = 'succeeded'
             ) AS have_prior
+        ),
+        -- [v1.1] One row per delegation target. The finding is keyed on the
+        -- target's GUID, so two principals newly granted RBCD on the same
+        -- host in one run used to emit two rows with the same object_guid
+        -- and collide on idx_cef_one_open_version. The individual
+        -- delegations now live in detail.delegations, sorted by source name
+        -- so the summary and detail are stable from run to run.
+        new_rbcd AS (
+            SELECT de.target_guid, de.source_guid, de.delegation_type, de.valid_from,
+                   sdo.sam_account_name AS source_sam, sdo.dn_current AS source_dn,
+                   sdo.object_class AS source_class,
+                   COALESCE(sdo.sam_account_name, sdo.dn_current, de.source_guid::text)
+                       AS source_label
+            FROM delegation_edge de
+            LEFT JOIN directory_object sdo
+                ON sdo.object_guid = de.source_guid AND sdo.client_id = de.client_id
+            WHERE de.client_id = %(client_id)s
+              AND de.valid_to IS NULL
+              AND de.delegation_type = 'rbcd'
+              AND de.run_id_valid_from = %(run_id)s
         )
         SELECT
             'fail' AS status,
-            de.target_guid AS object_guid,
+            nr.target_guid AS object_guid,
             NULL AS stig_severity,
             NULL AS stig_reference,
             NULL AS tool_severity,
@@ -103,39 +123,44 @@ PLUGIN = {
             CASE WHEN tc.is_domain_controller THEN 'critical' ELSE 'high' END
                 AS fd_severity,
             'Resource-based constrained delegation was newly configured allowing '
-                || COALESCE(sdo.sam_account_name, sdo.dn_current, de.source_guid::text)
+                || CASE WHEN count(*) > 1
+                        THEN count(*) || ' principals ('
+                             || string_agg(nr.source_label, ', '
+                                           ORDER BY nr.source_label, nr.source_guid)
+                             || ')'
+                        ELSE min(nr.source_label) END
                 || ' to impersonate users to '
-                || COALESCE(tdo.sam_account_name, tdo.dn_current, de.target_guid::text)
+                || COALESCE(tdo.sam_account_name, tdo.dn_current, nr.target_guid::text)
                 || CASE WHEN tc.is_domain_controller
                         THEN ' -- the target is a DOMAIN CONTROLLER, which is a direct '
                              'path to DCSync and full domain compromise'
                         ELSE '' END AS summary,
             jsonb_build_object(
-                'delegated_to_principal', sdo.sam_account_name,
-                'delegated_to_dn', sdo.dn_current,
-                'delegated_to_object_class', sdo.object_class,
+                'delegation_count', count(*),
+                'delegations', jsonb_agg(jsonb_build_object(
+                    'delegated_to_principal', nr.source_sam,
+                    'delegated_to_dn', nr.source_dn,
+                    'delegated_to_object_class', nr.source_class,
+                    'delegation_type', nr.delegation_type,
+                    'change_observed_at', nr.valid_from
+                ) ORDER BY nr.source_label, nr.source_guid),
                 'target', tdo.sam_account_name,
                 'target_dn', tdo.dn_current,
                 'target_is_domain_controller', COALESCE(tc.is_domain_controller, false),
                 'target_operating_system', tc.operating_system,
-                'delegation_type', de.delegation_type,
-                'change_observed_at', de.valid_from,
+                'change_observed_at', min(nr.valid_from),
                 'corroborating_event_id', 5136
             ) AS detail
-        FROM delegation_edge de
+        FROM new_rbcd nr
         JOIN directory_object tdo
-            ON tdo.object_guid = de.target_guid AND tdo.client_id = de.client_id
-        LEFT JOIN directory_object sdo
-            ON sdo.object_guid = de.source_guid AND sdo.client_id = de.client_id
+            ON tdo.object_guid = nr.target_guid AND tdo.client_id = %(client_id)s
         LEFT JOIN ad_computer tc
-            ON tc.object_guid = de.target_guid
-           AND tc.client_id = de.client_id
+            ON tc.object_guid = nr.target_guid
+           AND tc.client_id = %(client_id)s
            AND tc.valid_to IS NULL
         CROSS JOIN prior_run pr
-        WHERE de.client_id = %(client_id)s
-          AND de.valid_to IS NULL
-          AND de.delegation_type = 'rbcd'
-          AND de.run_id_valid_from = %(run_id)s
-          AND pr.have_prior
+        WHERE pr.have_prior
+        GROUP BY nr.target_guid, tdo.sam_account_name, tdo.dn_current,
+                 tc.is_domain_controller, tc.operating_system
     """,
 }

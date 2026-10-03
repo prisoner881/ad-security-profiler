@@ -4,7 +4,7 @@
  adprofiler.py -- Active Directory Security & Compliance Profiler (Collector)
 ================================================================================
 
-VERSION: 0.5.10
+VERSION: 0.5.12
 
 PURPOSE:
     Connects to an on-premise Active Directory Domain Controller via LDAP,
@@ -135,6 +135,8 @@ import uuid
 import json
 import base64
 import re
+import random
+import time
 from cryptography import x509
 from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes
@@ -143,7 +145,9 @@ import xml.etree.ElementTree as ET
 
 try:
     import ldap3
-    from ldap3.core.exceptions import LDAPException
+    from ldap3.core.exceptions import (
+        LDAPException, LDAPCommunicationError, LDAPResponseTimeoutError,
+    )
     from ldap3.protocol.microsoft import security_descriptor_control
 except ImportError:
     print("\033[91mERROR: the 'ldap3' package is not installed.\033[0m")
@@ -176,7 +180,7 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
-VERSION = "0.5.11"
+VERSION = "0.5.12"
 # [client-test-branch] These are always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
 # connect_postgres() is ever called -- the values here are placeholders,
@@ -419,6 +423,20 @@ class CollectorAbort(Exception):
     process's actual exit code was still correct (1), but the printed
     Run Summary incorrectly showed "Result: SUCCESS". This exception is
     caught explicitly in main() so the summary reports FAILED correctly.
+    """
+    pass
+
+
+class LDAPCollectionError(CollectorAbort):
+    """
+    [v0.5.12] An LDAP search that still failed after ldap_search()'s /
+    ldap_paged_search()'s retries. Deliberately NOT an LDAPException
+    subclass, so the many "non-fatal" `except LDAPException` wrappers
+    around optional collection steps don't swallow it: a server-side
+    failure mid-collection means the data for that step is incomplete,
+    and syncing incomplete data closes real edges/rows as if they had
+    been removed from AD. main() catches it, rolls the whole run back
+    and marks sync_run 'failed'.
     """
     pass
 
@@ -723,11 +741,12 @@ def get_object_security_descriptor(conn, dn):
     purpose."""
     try:
         sd_flags_control = security_descriptor_control(sdflags=0x07)
-        conn.search(dn, "(objectClass=*)", search_scope=ldap3.BASE,
-                    attributes=["nTSecurityDescriptor"], controls=sd_flags_control)
-        if not conn.response:
+        entries = ldap_search(conn, dn, "(objectClass=*)", ldap3.BASE,
+                              ["nTSecurityDescriptor"], controls=sd_flags_control,
+                              what=f"the security descriptor of {dn}")
+        if not entries:
             return None
-        raw = conn.response[0]["raw_attributes"].get("nTSecurityDescriptor")
+        raw = entries[0]["raw_attributes"].get("nTSecurityDescriptor")
         return raw[0] if raw else None
     except LDAPException as exc:
         log_warn(f"Could not read security descriptor for {dn}: {exc}")
@@ -806,13 +825,13 @@ def collect_well_known_container_acl(conn, pg_cur, client_id, run_id, dn, label,
     SDProp process)."""
     try:
         sd_flags_control = security_descriptor_control(sdflags=0x07)
-        conn.search(dn, "(objectClass=*)", search_scope=ldap3.BASE,
-                    attributes=["objectGUID", "objectSid", "nTSecurityDescriptor"],
-                    controls=sd_flags_control)
-        if not conn.response:
+        entries = ldap_search(conn, dn, "(objectClass=*)", ldap3.BASE,
+                              ["objectGUID", "objectSid", "nTSecurityDescriptor"],
+                              controls=sd_flags_control, what=label)
+        if not entries:
             log_warn(f"{label} not found at {dn} -- ACL data for it will not be collected this run.")
             return None
-        raw_attrs = conn.response[0]["raw_attributes"]
+        raw_attrs = entries[0]["raw_attributes"]
         raw_guid = raw_attrs.get("objectGUID")
         object_guid = guid_bytes_to_str(raw_guid[0]) if raw_guid else None
         if not object_guid:
@@ -1121,10 +1140,10 @@ def get_domain_sid_and_tombstone_lifetime(conn, base_dn, config_nc):
     implementation detail."""
     domain_sid = None
     try:
-        conn.search(base_dn, "(objectClass=domain)",
-                    search_scope=ldap3.BASE, attributes=["objectSid"])
-        if conn.response:
-            raw = conn.response[0]["raw_attributes"].get("objectSid")
+        entries = ldap_search(conn, base_dn, "(objectClass=domain)", ldap3.BASE,
+                              ["objectSid"], what="the domain SID")
+        if entries:
+            raw = entries[0]["raw_attributes"].get("objectSid")
             if raw:
                 domain_sid = sid_bytes_to_str(raw[0])
     except LDAPException as exc:
@@ -1141,11 +1160,11 @@ def get_domain_sid_and_tombstone_lifetime(conn, base_dn, config_nc):
     if config_nc:
         ds_dn = f"CN=Directory Service,CN=Windows NT,CN=Services,{config_nc}"
         try:
-            conn.search(ds_dn, "(objectClass=*)", search_scope=ldap3.BASE,
-                        attributes=["msDS-DeletedObjectLifetime", "tombstoneLifetime",
-                                    "dSHeuristics"])
-            if conn.response:
-                attrs = conn.response[0]["attributes"]
+            entries = ldap_search(conn, ds_dn, "(objectClass=*)", ldap3.BASE,
+                                  ["msDS-DeletedObjectLifetime", "tombstoneLifetime",
+                                   "dSHeuristics"], what="the Directory Service object")
+            if entries:
+                attrs = entries[0]["attributes"]
                 dol_val = attrs.get("msDS-DeletedObjectLifetime")
                 tsl_val = attrs.get("tombstoneLifetime")
                 dsh_val = attrs.get("dSHeuristics")
@@ -1217,16 +1236,21 @@ def ldap_attribute_exists(conn, config_nc, attribute_ldap_name):
     "not present" rather than raised, since this is only ever used to
     decide whether to *add* an optional field, never something the run
     should hard-fail over.
+
+    [v0.5.12] Except a search that still fails after retries
+    (LDAPCollectionError, propagated): silently treating that as "LAPS
+    not present" would null every computer's LAPS fields and make the
+    LAPS plugin flag the whole domain.
     """
     if not config_nc:
         return False
     schema_nc = f"CN=Schema,{config_nc}"
     try:
-        conn.search(
-            schema_nc, f"(lDAPDisplayName={attribute_ldap_name})",
-            search_scope=ldap3.SUBTREE, attributes=["cn"],
+        entries = ldap_search(
+            conn, schema_nc, f"(lDAPDisplayName={attribute_ldap_name})",
+            ldap3.SUBTREE, ["cn"], what=f"schema attribute {attribute_ldap_name}",
         )
-        return bool(conn.response)
+        return bool(entries)
     except LDAPException:
         return False
 
@@ -1234,14 +1258,14 @@ def ldap_attribute_exists(conn, config_nc, attribute_ldap_name):
 def run_capability_probe(conn, base_dn):
     results = {}
     try:
-        conn.search(base_dn, "(objectClass=*)", search_scope=ldap3.BASE,
-                    attributes=["distinguishedName"])
-        ok = bool(conn.response)
+        entries = ldap_search(conn, base_dn, "(objectClass=*)", ldap3.BASE,
+                              ["distinguishedName"], what="the base DN (capability probe)")
+        ok = bool(entries)
         results["base_read"] = {
             "passed": ok,
             "detail": "OK" if ok else "Search returned no results for the base DN.",
         }
-    except LDAPException as exc:
+    except (LDAPException, LDAPCollectionError) as exc:
         results["base_read"] = {"passed": False, "detail": str(exc)}
 
     try:
@@ -1255,9 +1279,10 @@ def run_capability_probe(conn, base_dn):
         # the same technique SharpHound/BloodHound/SOAPHound use (SDFlags
         # 0x7 = OWNER + GROUP + DACL, deliberately excluding SACL's 0x8).
         sd_flags_control = security_descriptor_control(sdflags=0x07)
-        conn.search(base_dn, "(objectClass=*)", search_scope=ldap3.BASE,
-                    attributes=["nTSecurityDescriptor"], controls=sd_flags_control)
-        raw = conn.response[0]["raw_attributes"].get("nTSecurityDescriptor") if conn.response else None
+        entries = ldap_search(conn, base_dn, "(objectClass=*)", ldap3.BASE,
+                              ["nTSecurityDescriptor"], controls=sd_flags_control,
+                              what="the domain root security descriptor (capability probe)")
+        raw = entries[0]["raw_attributes"].get("nTSecurityDescriptor") if entries else None
         ok = bool(raw)
         results["security_descriptor_read"] = {
             "passed": ok,
@@ -1267,22 +1292,24 @@ def run_capability_probe(conn, base_dn):
                 "domain root (see PERMISSIONS.md)."
             ),
         }
-    except LDAPException as exc:
+    except (LDAPException, LDAPCollectionError) as exc:
         results["security_descriptor_read"] = {"passed": False, "detail": str(exc)}
 
     try:
         deleted_container = f"CN=Deleted Objects,{base_dn}"
-        conn.search(
-            deleted_container, "(isDeleted=TRUE)",
-            search_scope=ldap3.LEVEL,
-            attributes=["distinguishedName"],
-            controls=[(LDAP_CONTROL_SHOW_DELETED, True, None)],
+        # [v0.5.12] Previously always passed: with raise_exceptions off,
+        # a refused search returned False instead of raising, so the
+        # except branch below never ran.
+        entries = ldap_search(
+            conn, deleted_container, "(isDeleted=TRUE)", ldap3.LEVEL,
+            ["distinguishedName"], controls=[(LDAP_CONTROL_SHOW_DELETED, True, None)],
+            what="the Deleted Objects container (capability probe)",
         )
         results["view_deleted_objects"] = {
             "passed": True,
-            "detail": f"OK ({len(conn.response)} deleted object(s) currently visible)",
+            "detail": f"OK ({len(entries)} deleted object(s) currently visible)",
         }
-    except LDAPException as exc:
+    except (LDAPException, LDAPCollectionError) as exc:
         results["view_deleted_objects"] = {
             "passed": False,
             "detail": (
@@ -1768,21 +1795,148 @@ def sync_edges(pg_cur, table, client_id, run_id, valid_from, key_cols,
     return opened, closed
 
 
+# [v0.5.12] LDAP retry policy. Before this, the connection used ldap3's
+# default raise_exceptions=False, under which a failed search just looks
+# like an empty (or, for a paged search, truncated) result: a DC answering
+# "busy" or "time limit exceeded" partway through enumerating groups
+# produced a run that committed as 'succeeded' and closed every edge for
+# the objects it never saw. Every search now goes through ldap_search()/
+# ldap_paged_search(), which check the LDAP result code explicitly:
+#   - success (0) -> results returned
+#   - noSuchObject (32) / referral (10) -> empty result: the container
+#     genuinely isn't there (or isn't held by this DC), which several
+#     optional collection steps already treat as a normal finding
+#   - busy (51) / unavailable (52) / timeLimitExceeded (3) -> retried
+#     with backoff (2s, 4s, 8s, plus jitter)
+#   - operationsError (1) and dropped/timed-out connections -> rebind,
+#     then retried the same way (AD answers operationsError once an
+#     idle connection has been dropped server-side, MaxConnIdleTime)
+#   - anything else, or retries exhausted -> LDAPCollectionError, which
+#     aborts and rolls back the whole run.
+LDAP_MAX_ATTEMPTS = 4
+LDAP_BACKOFF_BASE_SECONDS = 2
+LDAP_RESULT_SUCCESS = 0
+LDAP_RESULT_OPERATIONS_ERROR = 1
+LDAP_ABSENT_RESULT_CODES = {10, 32}            # referral, noSuchObject
+LDAP_TRANSIENT_RESULT_CODES = {3, 51, 52}      # timeLimitExceeded, busy, unavailable
+LDAP_PAGED_RESULTS_OID = "1.2.840.113556.1.4.319"
+
+
+def _ldap_reconnect(conn):
+    """Drops and re-establishes the connection (same server, credentials
+    and options), raising the underlying error if the rebind fails."""
+    try:
+        conn.unbind()
+    except Exception:
+        pass
+    if not conn.bind():  # bind() reopens a closed connection itself
+        raise LDAPCommunicationError(f"rebind failed: {conn.result}")
+    log_info("  Reconnected and re-bound to the domain controller.")
+
+
+def _ldap_search_with_retry(conn, what, search_kwargs, on_reconnect=None):
+    """Runs one conn.search() request, retrying transient failures.
+    Returns (searchResEntry list, result dict). on_reconnect, if given,
+    is called after a reconnect and returns replacement search_kwargs
+    (a paged search's cookie doesn't survive a new connection)."""
+    attempt = 0
+    while True:
+        attempt += 1
+        reconnect = False
+        try:
+            conn.search(**search_kwargs)
+            result = conn.result or {}
+            code = result.get("result", LDAP_RESULT_SUCCESS)
+            if code == LDAP_RESULT_SUCCESS or code in LDAP_ABSENT_RESULT_CODES:
+                entries = [e for e in (conn.response or []) if e.get("type") == "searchResEntry"]
+                return entries, result
+            problem = (f"LDAP result {code} ({result.get('description')})"
+                       + (f": {result.get('message').strip()}" if result.get("message") else ""))
+            if code == LDAP_RESULT_OPERATIONS_ERROR:
+                reconnect = True
+            elif code not in LDAP_TRANSIENT_RESULT_CODES:
+                raise LDAPCollectionError(
+                    f"LDAP search for {what} failed with {problem}. Aborting: continuing "
+                    f"would record incomplete data for this step as if it were complete. "
+                    f"Check the bind account's read access and the DC's health, then re-run."
+                )
+        except (LDAPCommunicationError, LDAPResponseTimeoutError) as exc:
+            problem = f"connection error: {exc}"
+            reconnect = True
+
+        if attempt >= LDAP_MAX_ATTEMPTS:
+            raise LDAPCollectionError(
+                f"LDAP search for {what} still failing after {LDAP_MAX_ATTEMPTS} attempts "
+                f"(last error: {problem}). Aborting rather than recording incomplete data -- "
+                f"re-run once the domain controller is reachable and responsive, or point "
+                f"--dc-host at a different DC."
+            )
+        delay = LDAP_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)) + random.uniform(0, 1)
+        log_warn(f"  LDAP search for {what} failed ({problem}); retrying in {delay:.0f}s "
+                 f"(attempt {attempt + 1} of {LDAP_MAX_ATTEMPTS})...")
+        time.sleep(delay)
+        if reconnect:
+            try:
+                _ldap_reconnect(conn)
+            except LDAPException as exc:
+                log_warn(f"  Reconnect failed: {exc}")
+                continue  # counts as the attempt; the next search will fail fast and retry
+            if on_reconnect is not None:
+                search_kwargs = on_reconnect()
+
+
+def ldap_search(conn, search_base, search_filter, search_scope, attributes,
+                controls=None, what=None):
+    """Single (non-paged) search with _ldap_search_with_retry()'s
+    semantics. Returns a list of searchResEntry dicts -- empty when the
+    base object doesn't exist. Use instead of conn.search() followed by
+    conn.response, which can't tell 'no results' from 'search failed'."""
+    entries, _ = _ldap_search_with_retry(
+        conn, what or search_base,
+        dict(search_base=search_base, search_filter=search_filter,
+             search_scope=search_scope, attributes=attributes, controls=controls),
+    )
+    return entries
+
+
 def ldap_paged_search(conn, base_dn, search_filter, attributes, page_size,
                        controls=None):
-    entry_generator = conn.extend.standard.paged_search(
-        search_base=base_dn,
-        search_filter=search_filter,
-        search_scope=ldap3.SUBTREE,
-        attributes=attributes,
-        paged_size=page_size,
-        generator=True,
-        controls=controls,
-    )
-    for entry in entry_generator:
-        if entry.get("type") != "searchResEntry":
-            continue
-        yield entry["dn"], entry.get("attributes", {}), entry.get("raw_attributes", {})
+    """[v0.5.12] Paged search driven page by page (rather than through
+    ldap3's paged_search generator, which silently stops on a failed
+    page when raise_exceptions is off), so each page request gets
+    _ldap_search_with_retry()'s retry/abort handling. If the connection
+    has to be re-established, AD's paging cookie is no longer valid, so
+    the search restarts from the first page; entries already yielded
+    are recognized by DN and skipped, so callers never see a duplicate."""
+    what = f"'{search_filter}' under {base_dn}"
+    seen_dns = set()
+    cookie = None
+
+    def kwargs_for(page_cookie):
+        return dict(search_base=base_dn, search_filter=search_filter,
+                    search_scope=ldap3.SUBTREE, attributes=attributes,
+                    controls=controls, paged_size=page_size, paged_cookie=page_cookie)
+
+    def on_reconnect():
+        nonlocal cookie
+        if cookie is not None:
+            log_warn(f"  Restarting paged search for {what} from the first page "
+                     f"({len(seen_dns)} entries already processed will be skipped).")
+        cookie = None
+        return kwargs_for(None)
+
+    while True:
+        entries, result = _ldap_search_with_retry(conn, what, kwargs_for(cookie), on_reconnect)
+        for entry in entries:
+            dn_key = entry["dn"].lower()
+            if dn_key in seen_dns:
+                continue
+            seen_dns.add(dn_key)
+            yield entry["dn"], entry.get("attributes", {}), entry.get("raw_attributes", {})
+        cookie = ((result.get("controls") or {}).get(LDAP_PAGED_RESULTS_OID) or {}) \
+            .get("value", {}).get("cookie")
+        if not cookie:
+            break
 
 
 def count_ldap_entries(conn, base_dn, search_filter):
@@ -1810,11 +1964,11 @@ def resolve_ranged_attribute(conn, dn, attr_name, first_batch_raw_keys, first_va
 
     while True:
         next_attr = f"{attr_name};range={next_start}-*"
-        conn.search(dn, "(objectClass=*)", search_scope=ldap3.BASE,
-                    attributes=[next_attr])
-        if not conn.response:
+        entries = ldap_search(conn, dn, "(objectClass=*)", ldap3.BASE, [next_attr],
+                              what=f"{next_attr} of {dn}")
+        if not entries:
             break
-        raw = conn.response[0]["raw_attributes"]
+        raw = entries[0]["raw_attributes"]
         matched_key = next(
             (k for k in raw if k.startswith(attr_name + ";range=")), None
         )
@@ -2599,12 +2753,12 @@ def collect_group_membership(conn, pg_cur, client_id, run_id, base_dn,
 
     for object_guid, full in group_entries:
         dn = full.get("distinguishedName")
-        conn.search(dn, "(objectClass=*)", search_scope=ldap3.BASE,
-                    attributes=["member"])
-        if not conn.response:
+        entries = ldap_search(conn, dn, "(objectClass=*)", ldap3.BASE, ["member"],
+                              what=f"members of {dn}")
+        if not entries:
             update_group_member_count(pg_cur, object_guid, 0)
             continue
-        raw = conn.response[0]["raw_attributes"]
+        raw = entries[0]["raw_attributes"]
         first_values = raw.get("member", [])
         member_dns = resolve_ranged_attribute(conn, dn, "member", raw.keys(), first_values)
         update_group_member_count(pg_cur, object_guid, len(member_dns))
@@ -3449,12 +3603,12 @@ def main():
             dfsr_globalsettings_dn = f"CN=DFSR-GlobalSettings,CN=System,{base_dn}"
             dfsr_migration_flags = None
             try:
-                ldap_conn.search(
-                    dfsr_globalsettings_dn, "(objectClass=*)", search_scope=ldap3.BASE,
-                    attributes=["msDFSR-Flags"],
+                dfsr_entries = ldap_search(
+                    ldap_conn, dfsr_globalsettings_dn, "(objectClass=*)", ldap3.BASE,
+                    ["msDFSR-Flags"], what="DFSR-GlobalSettings",
                 )
-                if ldap_conn.response:
-                    raw_flags = ldap_conn.response[0]["raw_attributes"].get("msDFSR-Flags")
+                if dfsr_entries:
+                    raw_flags = dfsr_entries[0]["raw_attributes"].get("msDFSR-Flags")
                     if raw_flags:
                         dfsr_migration_flags = int(raw_flags[0])
             except LDAPException as exc:
@@ -3939,12 +4093,12 @@ def main():
                     if not zone_dn:
                         continue
                     try:
-                        ldap_conn.search(zone_dn, "(objectClass=*)", search_scope=ldap3.BASE,
-                                          attributes=["dNSProperty"])
-                        if not ldap_conn.response:
+                        zone_entries = ldap_search(ldap_conn, zone_dn, "(objectClass=*)", ldap3.BASE,
+                                                   ["dNSProperty"], what=f"dNSProperty of {zone_dn}")
+                        if not zone_entries:
                             dns_property_read_failures += 1
                             continue
-                        raw_props = ldap_conn.response[0]["raw_attributes"].get("dNSProperty") or []
+                        raw_props = zone_entries[0]["raw_attributes"].get("dNSProperty") or []
                         allow_update = parse_dns_zone_allow_update(raw_props)
                     except LDAPException as exc:
                         log_warn(f"Could not read dNSProperty for {zone_dn}: {exc}")
@@ -3994,6 +4148,24 @@ def main():
                                        failure_reason="Interrupted by user (Ctrl-C).")
                 except Exception as exc:
                     log_error(f"Could not finalize sync_run as aborted: {exc}")
+
+    except LDAPCollectionError as exc:
+        # [v0.5.12] Not logged at the point of failure (unlike the other
+        # CollectorAbort cases below), and nothing has finalized
+        # sync_run yet -- do both here.
+        exit_code = 1
+        log_error(str(exc))
+        if pg_conn is not None:
+            try:
+                pg_conn.rollback()
+                log_info("Data transaction rolled back (no partial data committed).")
+            except Exception as rb_exc:
+                log_error(f"Rollback failed: {rb_exc}")
+            if run_id is not None:
+                try:
+                    finalize_sync_run(pg_conn, run_id, "failed", failure_reason=str(exc))
+                except Exception as fin_exc:
+                    log_error(f"Could not finalize sync_run as failed: {fin_exc}")
 
     except CollectorAbort:
         # Already logged in detail at the point of failure (LDAP bind

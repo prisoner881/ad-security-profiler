@@ -6,14 +6,20 @@ authenticated at all, despite existing for a while) is unnecessary attack
 surface -- every credential-guessing/enumeration technique that works
 against an active account works against a forgotten one too, with nobody
 watching for the anomaly.
+
+[v1.3] The summary now states the last logon time as a date (UTC, to the
+day) rather than a day count computed from now(). The count differed on
+every run, so an unchanged finding was recorded as 'changed' on every
+audit; the date only moves when the underlying attribute does. Severity
+and inclusion thresholds are unchanged.
 """
 
 PLUGIN = {
     "plugin_id": 1007,
     "category": "User Accounts",
     "name": "Dormant Enabled User Account",
-    "version": "1.2",
-    "revision_date": "2026-07-15",
+    "version": "1.3",
+    "revision_date": "2026-10-03",
     "remediation": (
     "Disable or remove accounts inactive beyond the organization's defined "
     'threshold. If an account has a legitimate ongoing but infrequent purpose, '
@@ -50,8 +56,8 @@ PLUGIN = {
             'User Account ' || COALESCE(u.user_principal_name, u.sam_account_name)
                 || CASE
                      WHEN u.last_logon_timestamp IS NULL THEN ' has never logged on'
-                     ELSE ' has not logged on in '
-                          || EXTRACT(DAY FROM now() - u.last_logon_timestamp)::int || ' days'
+                     ELSE ' has not logged on since '
+                          || to_char(u.last_logon_timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD')
                    END AS summary,
             jsonb_build_object(
                 'sam_account_name', u.sam_account_name,

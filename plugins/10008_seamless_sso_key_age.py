@@ -27,14 +27,22 @@ in this project even though the consequence is entirely cloud-side.
 Reports the account's absence as nothing at all: if Seamless SSO is not
 deployed, the object does not exist and this plugin correctly returns
 no rows.
+
+[v1.1] The summary now states the key's last rotation time as a date
+(UTC, to the day) rather than a day count computed from now(). The count
+differed on every run, so an unchanged finding was recorded as 'changed'
+on every audit; the date only moves when the underlying attribute does.
+Severity and inclusion thresholds are unchanged. The day count is still
+reported in detail (key_age_days), which is not part of the finding's
+identity because object_guid is always set for this plugin.
 """
 
 PLUGIN = {
     "plugin_id": 10008,
     "category": "Hybrid Identity",
     "name": "Seamless SSO Account (AZUREADSSOACC$) Kerberos Key Not Rotated",
-    "version": "1.0",
-    "revision_date": "2026-09-02",
+    "version": "1.1",
+    "revision_date": "2026-10-03",
     "remediation": (
         "Roll the AZUREADSSOACC$ Kerberos decryption key, then put the "
         "rotation on a recurring schedule of 30 days or less. On the "
@@ -104,8 +112,8 @@ PLUGIN = {
                 || CASE
                        WHEN c.pwd_last_set IS NULL
                            THEN 'has no recorded rotation date'
-                       ELSE 'has not been rotated in '
-                            || EXTRACT(DAY FROM now() - c.pwd_last_set)::int || ' days'
+                       ELSE 'has not been rotated since '
+                            || to_char(c.pwd_last_set AT TIME ZONE 'UTC', 'YYYY-MM-DD')
                    END
                 || ' (Microsoft guidance: at least every 30 days) -- anyone holding '
                    'this key can forge Kerberos tickets and sign in to Entra ID as '

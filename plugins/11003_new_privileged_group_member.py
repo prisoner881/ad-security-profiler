@@ -24,14 +24,22 @@ within them, then new edges into any of those groups are reported.
 Legitimate privilege grants happen, so each finding is a 'warn' for
 reconciliation against a change record. The severity is uniformly high
 because the blast radius of an unreviewed addition here is the domain.
+
+[v1.1] Emits one finding per member rather than one per new membership
+edge. The finding is keyed on the member's GUID, so an account added to
+two privileged groups in the same run produced two rows with the same
+object_guid and broke the one-open-version-per-identity constraint.
+Individual additions are now listed in detail.memberships (sorted by
+group), and the summary names every group in a stable order; a single
+addition is worded exactly as before.
 """
 
 PLUGIN = {
     "plugin_id": 11003,
     "category": "Change Detection",
     "name": "New Membership in a Privileged Group Since Previous Run",
-    "version": "1.0",
-    "revision_date": "2026-09-02",
+    "version": "1.1",
+    "revision_date": "2026-10-03",
     "remediation": (
         "Match every addition to an approved request before accepting "
         "it. Security event IDs 4728, 4732 and 4756 (member added to a "
@@ -133,41 +141,73 @@ PLUGIN = {
               AND gme.valid_to IS NULL
               AND gme.run_id_valid_from = %(run_id)s
             GROUP BY gme.member_guid, gme.group_guid, gme.is_direct, gme.valid_from
+        ),
+        -- [v1.1] One row per member. The finding is keyed on the member's
+        -- GUID, so an account added to two privileged groups in the same run
+        -- used to emit two rows with the same object_guid and collide on
+        -- idx_cef_one_open_version. The individual additions now live in
+        -- detail.memberships, sorted by group name so the summary and detail
+        -- are stable from run to run.
+        described AS (
+            SELECT ne.*,
+                   ne.added_to_group <> ALL (ne.confers_privilege_of) AS via_nesting,
+                   '"' || ne.added_to_group || '"'
+                       || CASE
+                              WHEN ne.added_to_group <> ALL (ne.confers_privilege_of)
+                                  THEN ' (confers the privilege of '
+                                       || array_to_string(ne.confers_privilege_of, ', ')
+                                       || ' through nesting)'
+                              ELSE ''
+                          END AS group_phrase
+            FROM new_edges ne
         )
         SELECT
             'warn' AS status,
-            ne.member_guid AS object_guid,
+            d.member_guid AS object_guid,
             NULL AS stig_severity,
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
             'high' AS fd_severity,
             COALESCE(mdo.sam_account_name, mdo.dn_current)
-                || ' was added to privileged group "' || ne.added_to_group
-                || '" since the previous collection run'
                 || CASE
-                       WHEN ne.added_to_group <> ALL (ne.confers_privilege_of)
-                           THEN ', which confers the privilege of '
-                                || array_to_string(ne.confers_privilege_of, ', ')
-                                || ' through nesting'
-                       ELSE ''
+                       WHEN count(*) = 1
+                           -- Single addition: wording unchanged from v1.0.
+                           THEN ' was added to privileged group "' || min(d.added_to_group)
+                                || '" since the previous collection run'
+                                || CASE
+                                       WHEN bool_or(d.via_nesting)
+                                           THEN ', which confers the privilege of '
+                                                || min(array_to_string(d.confers_privilege_of, ', '))
+                                                || ' through nesting'
+                                       ELSE ''
+                                   END
+                       ELSE ' was added to ' || count(*) || ' privileged groups since the '
+                            'previous collection run: '
+                            || string_agg(d.group_phrase, ', '
+                                          ORDER BY d.added_to_group, d.group_guid)
                    END AS summary,
             jsonb_build_object(
                 'member_sam_account_name', mdo.sam_account_name,
                 'member_distinguished_name', mdo.dn_current,
                 'member_object_class', mdo.object_class,
-                'added_to_group', ne.added_to_group,
-                'confers_privilege_of', ne.confers_privilege_of,
-                'is_direct_membership', ne.is_direct,
-                'granted_via_nesting',
-                    ne.added_to_group <> ALL (ne.confers_privilege_of),
-                'change_observed_at', ne.valid_from,
+                'membership_count', count(*),
+                'memberships', jsonb_agg(jsonb_build_object(
+                    'added_to_group', d.added_to_group,
+                    'confers_privilege_of', d.confers_privilege_of,
+                    'is_direct_membership', d.is_direct,
+                    'granted_via_nesting', d.via_nesting,
+                    'change_observed_at', d.valid_from
+                ) ORDER BY d.added_to_group, d.group_guid),
+                'granted_via_nesting', bool_or(d.via_nesting),
+                'change_observed_at', min(d.valid_from),
                 'corroborating_event_ids', jsonb_build_array(4728, 4732, 4756)
             ) AS detail
-        FROM new_edges ne
+        FROM described d
         JOIN directory_object mdo
-            ON mdo.object_guid = ne.member_guid AND mdo.client_id = %(client_id)s
+            ON mdo.object_guid = d.member_guid AND mdo.client_id = %(client_id)s
         CROSS JOIN prior_run pr
         WHERE pr.have_prior
+        GROUP BY d.member_guid, mdo.sam_account_name, mdo.dn_current, mdo.object_class
     """,
 }

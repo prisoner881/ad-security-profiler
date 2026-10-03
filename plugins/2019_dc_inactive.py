@@ -8,14 +8,22 @@ workstation, since another account with rights over that DC object could
 reset its password without anyone noticing, and the DC itself represents
 significant standing privilege regardless of whether it's actually being
 used.
+
+[v1.3] The summary now states the last logon time as a date (UTC, to the
+day) rather than a day count computed from now(). The count differed on
+every run, so an unchanged finding was recorded as 'changed' on every
+audit; the date only moves when the underlying attribute does. Severity
+and inclusion thresholds are unchanged. The day count is still reported
+in detail (days_since_logon), which is not part of the finding's
+identity because object_guid is always set for this plugin.
 """
 
 PLUGIN = {
     "plugin_id": 2019,
     "category": "Computer Accounts",
     "name": "Domain Controller Computer Account Appears Inactive",
-    "version": "1.2",
-    "revision_date": "2026-07-15",
+    "version": "1.3",
+    "revision_date": "2026-10-03",
     "remediation": (
         "If this DC has genuinely been retired, demote it properly "
         "(`Uninstall-ADDSDomainController`, or metadata cleanup via "
@@ -53,9 +61,8 @@ PLUGIN = {
             NULL AS tool_severity,
             NULL AS tool_reference,
             'high' AS fd_severity,
-            'Domain Controller ' || c.sam_account_name || ' has not logged on in '
-                || EXTRACT(DAY FROM now() - c.last_logon_timestamp)::int
-                || ' days' AS summary,
+            'Domain Controller ' || c.sam_account_name || ' has not logged on since '
+                || to_char(c.last_logon_timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS summary,
             jsonb_build_object(
                 'sam_account_name', c.sam_account_name,
                 'last_logon_timestamp', c.last_logon_timestamp,

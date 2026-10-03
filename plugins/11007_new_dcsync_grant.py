@@ -28,14 +28,21 @@ Reported at critical severity without qualification. DCSync is
 equivalent to possession of the entire domain credential database,
 including krbtgt, and no routine operational change should produce a
 new grant of it.
+
+[v1.1] Emits one finding per domain root rather than one per trustee.
+Every grant is reported against the domain object's GUID, so two
+trustees granted DCSync in the same run produced two rows with the same
+object_guid and broke the one-open-version-per-identity constraint.
+Individual grants are now listed in detail.grants (sorted by trustee),
+and the summary names every trustee in a stable order.
 """
 
 PLUGIN = {
     "plugin_id": 11007,
     "category": "Change Detection",
     "name": "Directory Replication Rights Newly Granted on the Domain Root",
-    "version": "1.0",
-    "revision_date": "2026-09-02",
+    "version": "1.1",
+    "revision_date": "2026-10-03",
     "remediation": (
         "Treat this as a suspected compromise until proven otherwise. "
         "A new grant of DS-Replication-Get-Changes or "
@@ -115,43 +122,64 @@ PLUGIN = {
               AND a.object_type_guid IN ('1131f6aa-9c07-11d1-f79f-00c04fc2dcd2',
                                           '1131f6ad-9c07-11d1-f79f-00c04fc2dcd2')
             GROUP BY a.object_guid, a.trustee_sid
+        ),
+        -- [v1.1] One row per domain root, not per trustee: every grant shares
+        -- the domain object's GUID as its finding identity, so two trustees
+        -- granted in the same run used to emit two rows with the same
+        -- object_guid and collide on idx_cef_one_open_version. Per-trustee
+        -- facts now live in detail.grants, sorted by trustee name/SID so the
+        -- summary and detail are stable from run to run.
+        described AS (
+            SELECT ng.*,
+                   tdo.sam_account_name, tdo.dn_current, tdo.object_class,
+                   tdo.object_guid IS NOT NULL AS trustee_resolved,
+                   COALESCE(tdo.sam_account_name, ng.trustee_sid) AS trustee_label,
+                   CASE
+                       WHEN ng.has_get_changes AND ng.has_get_changes_all
+                           THEN 'both DS-Replication-Get-Changes and -All'
+                       WHEN ng.has_get_changes THEN 'DS-Replication-Get-Changes'
+                       ELSE 'DS-Replication-Get-Changes-All'
+                   END AS rights_label
+            FROM new_grants ng
+            LEFT JOIN directory_object tdo
+                ON tdo.object_sid = ng.trustee_sid AND tdo.client_id = %(client_id)s
         )
         SELECT
             'fail' AS status,
-            ng.domain_guid AS object_guid,
+            d.domain_guid AS object_guid,
             NULL AS stig_severity,
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
             'critical' AS fd_severity,
             'Directory replication (DCSync) rights were newly granted on the domain '
-                'root to ' || COALESCE(tdo.sam_account_name, ng.trustee_sid)
-                || ' ('
-                || CASE
-                       WHEN ng.has_get_changes AND ng.has_get_changes_all
-                           THEN 'both DS-Replication-Get-Changes and -All'
-                       WHEN ng.has_get_changes THEN 'DS-Replication-Get-Changes'
-                       ELSE 'DS-Replication-Get-Changes-All'
-                   END
-                || ') -- this confers the ability to extract every credential in the '
+                'root to '
+                || CASE WHEN count(*) > 1 THEN count(*) || ' principals: ' ELSE '' END
+                || string_agg(d.trustee_label || ' (' || d.rights_label || ')', ', '
+                              ORDER BY d.trustee_label, d.trustee_sid)
+                || ' -- this confers the ability to extract every credential in the '
                    'domain, including krbtgt' AS summary,
             jsonb_build_object(
-                'trustee_sid', ng.trustee_sid,
-                'trustee_sam_account_name', tdo.sam_account_name,
-                'trustee_distinguished_name', tdo.dn_current,
-                'trustee_object_class', tdo.object_class,
-                'trustee_resolved', tdo.object_guid IS NOT NULL,
-                'has_get_changes', ng.has_get_changes,
-                'has_get_changes_all', ng.has_get_changes_all,
-                'confers_full_dcsync', ng.has_get_changes AND ng.has_get_changes_all,
-                'inherited_ace', ng.any_inherited,
-                'change_observed_at', ng.change_observed_at,
+                'grant_count', count(*),
+                'grants', jsonb_agg(jsonb_build_object(
+                    'trustee_sid', d.trustee_sid,
+                    'trustee_sam_account_name', d.sam_account_name,
+                    'trustee_distinguished_name', d.dn_current,
+                    'trustee_object_class', d.object_class,
+                    'trustee_resolved', d.trustee_resolved,
+                    'has_get_changes', d.has_get_changes,
+                    'has_get_changes_all', d.has_get_changes_all,
+                    'confers_full_dcsync', d.has_get_changes AND d.has_get_changes_all,
+                    'inherited_ace', d.any_inherited,
+                    'change_observed_at', d.change_observed_at
+                ) ORDER BY d.trustee_label, d.trustee_sid),
+                'confers_full_dcsync', bool_or(d.has_get_changes AND d.has_get_changes_all),
+                'change_observed_at', min(d.change_observed_at),
                 'corroborating_event_id', 5136
             ) AS detail
-        FROM new_grants ng
-        LEFT JOIN directory_object tdo
-            ON tdo.object_sid = ng.trustee_sid AND tdo.client_id = %(client_id)s
+        FROM described d
         CROSS JOIN prior_run pr
         WHERE pr.have_prior
+        GROUP BY d.domain_guid
     """,
 }

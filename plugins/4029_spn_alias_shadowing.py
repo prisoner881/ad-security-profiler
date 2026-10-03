@@ -42,6 +42,36 @@ in the directory.
 Note that a conflicting SPN renders identically to a legitimate one in
 dsa.msc -- there is nothing for an administrator to notice by eye.
 
+[v1.1] Re-scoped to the service classes the host operating system
+implements itself. v1.0 reported every mapped-class SPN on another account,
+which flagged the normal, documented Kerberos set-up for a web application
+running under a dedicated identity: HTTP/webserver registered on the
+application-pool service account (or gMSA) while the computer holds
+HOST/webserver. That is not a defect. The KDC resolves an exact SPN match
+before it falls back to the HOST alias, so tickets for HTTP/webserver are
+correctly encrypted with the service account's key -- the account that is
+actually running the web application and can decrypt them. Microsoft's IIS
+and SQL Reporting Services Kerberos guidance prescribes exactly this
+registration, and v1.0 rated it critical whenever the account was a user.
+
+The shadowing is only harmful where the explicit SPN names a service that
+can only ever run under the host's own identity: cifs (the SMB server runs
+in the kernel as SYSTEM), rpcss, netlogon, eventlog, spooler, schedule, time,
+and the rest of the sPNMappings list apart from the web-hosting classes http,
+www and w3svc. No legitimate configuration registers, say, cifs/SERVERB on an
+account other than SERVERB (failover-cluster names carry their own HOST/ SPN
+on their own computer object, so they never match here). Such an SPN breaks
+the service and is the KerberLoss primitive. Those web-hosting classes are
+now excluded; everything else is reported as before.
+
+Exact duplicate SPNs, the ambiguity that setspn -X reports, are deliberately
+NOT reported here: plugin 4028 covers that case, and duplicating it would
+double-count every finding. Severity is now high, or critical only where the
+shadowed host is a domain controller (redirecting a DC's cifs or netlogon
+service breaks SYSVOL and Group Policy processing, and offers the S4U
+escalation path against Tier 0). It no longer depends on whether the
+offending account is a user.
+
 Findings are aggregated one-per-offending-account rather than one per
 conflicting SPN. A single account can shadow several names at once, and
 emitting a row for each would produce multiple findings sharing the same
@@ -55,20 +85,22 @@ PLUGIN = {
     "plugin_id": 4029,
     "category": "Domain",
     "name": "Explicit Service Principal Name Shadowing a HOST-Mapped Alias",
-    "version": "1.0",
-    "revision_date": "2026-09-29",
+    "version": "1.1",
+    "revision_date": "2026-10-03",
     "remediation": (
-        "Establish whether the conflicting SPN is deliberate before removing "
-        "it, because removal will break whatever is currently relying on it. "
-        "The legitimate case is a service running under a dedicated account "
-        "that was registered by a Domain Admin -- an IIS application pool "
-        "holding http/<webserver> where <webserver> is also a domain-joined "
-        "machine is the usual example. Even then it is a misconfiguration: it "
-        "silently redirects every HOST-mapped service ticket for that name to "
-        "the wrong key. The correct pattern is to register the SPN against an "
-        "alias name (a CNAME with its own SPN) rather than the machine's own "
-        "name, or to run the service as the machine account. "
-        "Where the SPN is not accounted for, treat it as an incident. Remove "
+        "Establish how the conflicting SPN came to exist before removing "
+        "it. This finding is limited to service classes the host operating "
+        "system implements under its own identity (cifs, rpcss, netlogon, "
+        "spooler and the other HOST-mapped classes, excluding the "
+        "web-hosting classes http, www and w3svc), so there is no "
+        "legitimate configuration that places one of these SPNs on an "
+        "account other than the host itself; the shadowed service on that "
+        "host is failing Kerberos authentication while it remains. "
+        "Note that HTTP/<webserver> registered on an application-pool "
+        "service account or gMSA is the correct, documented set-up and is "
+        "deliberately not reported. "
+        "Unless it is confirmed as debris predating the 2021 uniqueness "
+        "checks, treat it as an incident. Remove "
         "it with setspn -D <spn> <account>, then determine how it was created: "
         "check who holds WriteSPN (write access to servicePrincipalName) on "
         "the account that carries it, since that right is what makes this "
@@ -94,22 +126,28 @@ PLUGIN = {
          "url": "https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-adts/3c154285-454c-4353-9a99-fb586e806944"},
     ],
     "description": (
-        "Reports an explicitly registered service principal name that shadows "
-        "a HOST-mapped alias belonging to a different account. Because the KDC "
-        "resolves explicit SPNs in preference to aliases, service tickets for "
-        "the shadowed name are encrypted with the wrong account's key. The "
-        "effect is a denial of service against that service, and where "
-        "constrained delegation is configured it is a documented privilege "
-        "escalation path (KerberLoss, CVE-2026-25177). SPN alias uniqueness "
-        "verification normally prevents this registration, so a finding "
-        "indicates the check was bypassed, is disabled, or the SPN was created "
-        "by an administrator. The conflicting SPN is indistinguishable from a "
-        "legitimate one in native management tools."
+        "Reports an explicitly registered service principal name, for a "
+        "service the host operating system implements under its own "
+        "identity (cifs, rpcss, netlogon, spooler and the other HOST-mapped "
+        "classes), that is registered on a different account from the host "
+        "holding the matching HOST/ SPN. Because the KDC resolves explicit "
+        "SPNs in preference to aliases, service tickets for that service "
+        "are encrypted with the wrong account's key: the service on the "
+        "host fails Kerberos authentication, and where constrained "
+        "delegation is configured it is a documented privilege escalation "
+        "path (KerberLoss, CVE-2026-25177). The web-hosting classes http, "
+        "www and w3svc are excluded, because registering HTTP/<host> on a "
+        "dedicated service account is the documented configuration for a "
+        "web application running under that account and is resolved "
+        "correctly by the KDC. Exact duplicate SPNs are reported by plugin "
+        "4028. The conflicting SPN is indistinguishable from a legitimate "
+        "one in native management tools."
     ),
     "base_severity": "high",
     "query": """
         WITH mapped_class (cls) AS (
-            -- Default sPNMappings HOST alias set (MS-ADA3 section 2.276).
+            -- Default sPNMappings HOST alias set (MS-ADA3 section 2.276),
+            -- restricted to services implemented by the host OS itself.
             -- 'host' itself is excluded: HOST/x on two accounts is a plain
             -- duplicate SPN and is reported by plugin 4028, not here.
             VALUES ('alerter'),('appmgmt'),('cisvc'),('clipsrv'),('browser'),
@@ -122,8 +160,14 @@ PLUGIN = {
                    ('remoteaccess'),('rsvp'),('samss'),('scardsvr'),('scesrv'),
                    ('seclogon'),('scm'),('dcom'),('cifs'),('spooler'),('snmp'),
                    ('schedule'),('tapisrv'),('trksvr'),('trkwks'),('ups'),
-                   ('time'),('wins'),('www'),('http'),('w3svc'),('iisadmin'),
-                   ('msdtc')
+                   ('time'),('wins'),('iisadmin'),('msdtc')
+            -- [v1.1] The web-hosting classes http, www and w3svc are
+            -- deliberately absent. HTTP/<host> on an application-pool
+            -- service account (or gMSA) is the documented Kerberos set-up
+            -- for IIS, SSRS and similar; the KDC resolves that exact SPN
+            -- before the HOST alias, so tickets go to the account that runs
+            -- the application. Only classes the OS itself serves under the
+            -- host's own identity are a genuine shadowing defect.
         ),
         parsed AS (
             -- Alias uniqueness compares the WHOLE remainder after the service
@@ -194,20 +238,23 @@ PLUGIN = {
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
+            -- [v1.1] Critical only where a domain controller's own service
+            -- is shadowed; the offending account's object class no longer
+            -- escalates severity on its own.
             CASE
-                WHEN odo.object_class = 'user' THEN 'critical'
                 WHEN a.shadows_dc THEN 'critical'
                 ELSE 'high'
             END AS fd_severity,
             'Account "' || COALESCE(odo.sam_account_name, a.offender_guid::text)
                 || '" holds ' || a.conflict_count
-                || ' explicit SPN(s) that shadow a HOST alias belonging to '
-                   'another account ('
+                || ' explicit host-service SPN(s) that shadow a HOST alias '
+                   'belonging to another account ('
                 || (SELECT string_agg(x.value ->> 'explicit_spn', ', '
                                       ORDER BY x.value ->> 'explicit_spn')
                     FROM jsonb_array_elements(a.conflicts) AS x)
-                || ') -- Kerberos tickets for those services are encrypted '
-                   'with the wrong key'
+                || ') -- these services run under the host''s own identity, so '
+                   'Kerberos tickets the KDC issues for them are encrypted with '
+                   'a key the host does not hold'
                 || CASE WHEN a.shadows_dc
                         THEN ', and a DOMAIN CONTROLLER is among the shadowed hosts'
                         ELSE '' END AS summary,
@@ -218,6 +265,10 @@ PLUGIN = {
                 'conflict_count', a.conflict_count,
                 'shadows_domain_controller', a.shadows_dc,
                 'conflicts', a.conflicts,
+                'scope',
+                    'Host-implemented service classes only; http/www/w3svc on '
+                    'a service account is the documented configuration and is '
+                    'not reported. Exact duplicate SPNs: plugin 4028.',
                 'note',
                     'SPN alias uniqueness verification should have blocked '
                     'these registrations; see plugin 4030 and CVE-2026-25177'
