@@ -1080,7 +1080,7 @@ CREATE TABLE ad_intel.control_evidence_fact (
     change_status text,
     identity_guid uuid GENERATED ALWAYS AS (ad_intel.compute_finding_identity_guid(object_guid, summary, detail)) STORED,
     CONSTRAINT chk_cef_valid_to_after_from CHECK (((valid_to IS NULL) OR (valid_to > valid_from))),
-    CONSTRAINT control_evidence_fact_change_status_check CHECK ((change_status = ANY (ARRAY['new'::text, 'changed'::text, 'remediated'::text]))),
+    CONSTRAINT control_evidence_fact_change_status_check CHECK ((change_status = ANY (ARRAY['new'::text, 'changed'::text, 'remediated'::text, 'retired'::text]))),
     CONSTRAINT control_evidence_fact_fd_severity_check CHECK ((fd_severity = ANY (ARRAY['info'::text, 'low'::text, 'medium'::text, 'high'::text, 'critical'::text]))),
     CONSTRAINT control_evidence_fact_status_check CHECK ((status = ANY (ARRAY['pass'::text, 'warn'::text, 'fail'::text]))),
     CONSTRAINT control_evidence_fact_stig_severity_check CHECK (((stig_severity IS NULL) OR (stig_severity = ANY (ARRAY['CAT_I'::text, 'CAT_II'::text, 'CAT_III'::text])))),
@@ -1127,7 +1127,7 @@ COMMENT ON COLUMN ad_intel.control_evidence_fact.plugin_version IS 'Version of t
 -- Name: COLUMN control_evidence_fact.change_status; Type: COMMENT; Schema: ad_intel; Owner: -
 --
 
-COMMENT ON COLUMN ad_intel.control_evidence_fact.change_status IS '''new'' -- first version ever seen for this (test, finding) pair. ''changed'' -- same identity, but severity/status/content differs from the version it replaced. ''remediated'' -- set on a version when it gets closed with no successor this run (the finding is no longer present, for any reason -- object deleted, setting fixed, etc; this schema deliberately does not distinguish why, only that it stopped appearing). A row with change_status left NULL/unchanged from a prior run and valid_to IS NULL simply means nothing happened to it this run.';
+COMMENT ON COLUMN ad_intel.control_evidence_fact.change_status IS '''new'' -- first version ever seen for this (test, finding) pair. ''changed'' -- same identity, but severity/status/content differs from the version it replaced. ''remediated'' -- set on a version when it gets closed with no successor this run (the finding is no longer present, for any reason -- object deleted, setting fixed, etc; this schema deliberately does not distinguish why, only that it stopped appearing). ''retired'' -- closed because the plugin that produced it was retired in favour of another plugin that now reports the same issue (v35). A row with change_status left NULL/unchanged from a prior run and valid_to IS NULL simply means nothing happened to it this run.';
 
 
 --
@@ -3661,7 +3661,7 @@ CREATE TABLE schema_migration_history (
 -- pretense of having stepped through intermediate versions that were
 -- never actually separately applied to this database.
 INSERT INTO schema_migration_history (version_number, description) VALUES
-    (34, 'Fresh install via schema_init.sql, consolidated through v34');
+    (35, 'Fresh install via schema_init.sql, consolidated through v35');
 
 -- ============================================================================
 -- PARTITIONED TABLE REGISTRY + INITIAL PARTITION CREATION

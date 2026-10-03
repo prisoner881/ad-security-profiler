@@ -32,8 +32,8 @@ PLUGIN = {
     "plugin_id": 11004,
     "category": "Change Detection",
     "name": "Service Principal Name Newly Registered on a User Account",
-    "version": "1.0",
-    "revision_date": "2026-09-02",
+    "version": "1.1",
+    "revision_date": "2026-10-03",
     "remediation": (
         "Confirm the SPN was registered as part of a planned service "
         "deployment. A user account that gained an SPN without a "
@@ -52,8 +52,8 @@ PLUGIN = {
         "move it to a group Managed Service Account so the password "
         "is machine-generated and rotated automatically, or if that "
         "is not possible, set a password of 25 characters or more and "
-        "ensure the account supports AES rather than RC4 (see plugins "
-        "1024 and 1039). Adding the account to Protected Users is not "
+        "ensure the account supports AES rather than RC4 (see plugin "
+        "1024). Adding the account to Protected Users is not "
         "appropriate for most service accounts and can break them -- "
         "prefer gMSA."
     ),

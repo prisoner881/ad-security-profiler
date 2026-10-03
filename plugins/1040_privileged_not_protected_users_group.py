@@ -27,13 +27,26 @@ Protected-group membership, control of or ownership of a Tier 0 object
 (domain root, AdminSDHolder, DCs, CAs, ...), DCSync, and membership in a
 group holding any of those still count. detail gains privilege_sources
 (the view's reasons, sorted); summary wording is unchanged.
+
+[v1.3] Absorbs plugin 1015 (Privileged Account Not a Member of Protected
+Users), now retired with superseded_by=1040. 1015 reported the same
+accounts from ad_user.protected_users_member, a flag that only reflects
+direct memberOf, so it also flagged accounts protected through a nested
+group. This plugin now treats an account as a member if EITHER the
+effective (nested) membership closure OR that direct-membership flag
+says so -- the flag is a fallback for when the Protected Users group's
+own membership edges were not collected, so no account becomes a
+finding here that 1015 considered protected. Not merged: disabled
+privileged accounts (plugin 1042's finding) and accounts privileged only
+by a leftover admin_count=1 (plugin 1025). detail gains
+protected_users_direct_flag. Summary and severity are unchanged.
 """
 
 PLUGIN = {
     "plugin_id": 1040,
     "category": "User Accounts",
     "name": "Privileged Account Not a Member of the Protected Users Group",
-    "version": "1.2",
+    "version": "1.3",
     "revision_date": "2026-10-03",
     "remediation": (
         "Add this account to the built-in Protected Users group, "
@@ -108,6 +121,7 @@ PLUGIN = {
                 'user_principal_name', u.user_principal_name,
                 'admin_count', u.admin_count,
                 'is_enabled', u.is_enabled,
+                'protected_users_direct_flag', u.protected_users_member,
                 'privilege_sources', pc.privilege_sources
             ) AS detail
         FROM ad_user u
@@ -118,6 +132,10 @@ PLUGIN = {
           AND u.valid_to IS NULL
           AND u.is_enabled
           AND pum.object_guid IS NULL
+          -- [v1.3] Fallback from retired plugin 1015: the collector's
+          -- direct-memberOf flag also counts as membership, in case the
+          -- Protected Users group's member edges were not collected.
+          AND NOT COALESCE(u.protected_users_member, false)
           -- [v1.0] krbtgt (RID 502) is, by design, always disabled and
           -- structurally cannot be a normal Protected Users member --
           -- same exclusion precedent already established in plugin

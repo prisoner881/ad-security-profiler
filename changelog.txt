@@ -9,6 +9,38 @@ the script's own docstring now keeps a one-line summary per entry, this
 file keeps the complete detail (root causes, what was verified, why a
 decision was made a particular way) for anyone who wants it.
 
+    0.5.14 - Requires schema v35 (schema_migration_v35.sql, which only
+            widens control_evidence_fact.change_status for adaudit.py).
+            (1) Edge payload changes are now versioned. sync_edges()
+            compared edge keys only, so once a GPO link existed, later
+            disabling or enforcing it (or changing its link order) was
+            never recorded; same for a gMSA password reader's access
+            mask. sync_edges() takes payload_cols: an edge whose key is
+            unchanged but whose tracked payload differs is closed and
+            reopened. Used for gpo_link_edge (link_order, link_enabled,
+            link_enforced) and gmsa_password_reader_edge (access_mask,
+            ace_type). (2) Deletions outside the domain partition are
+            detected. collect_deleted_objects() only searches the domain
+            NC's Deleted Objects container, so deleted certificate
+            templates, CAs, NTAuth, sites, subnets, schema objects,
+            DisplaySpecifiers, cert OIDs and DNS zones kept their typed
+            rows open forever. Those classes are fully re-enumerated
+            each run, so reconcile_absent_objects() marks any previously
+            current object under the same container that wasn't seen
+            this run as deleted -- only after the enumeration completed,
+            and only if the container itself is still present on this
+            DC (an absent container or a referral returns nothing and
+            must not read as "all deleted"). (3) Domain-level settings
+            read from other objects -- dSHeuristics (anonymous access,
+            UPN/SPN uniqueness), tombstone lifetime, functional level,
+            DFSR migration state, LAPS schema presence -- are folded
+            into the domain object's attributes_full under one synthetic
+            key (DERIVED_DOMAIN_SETTINGS_KEY), so a change to any of
+            them versions the domain object and rewrites ad_domain.
+            Before, they only updated when an attribute of the domain
+            object itself changed. Expect one 'modified' domain version
+            on the first run with this version (the key is new); it
+            also fills dsheuristics_uniqueness without --full-rescan.
     0.5.13 - Requires schema v34 (schema_migration_v34.sql). Three fixes:
             (1) ACE inheritance flags are now collected. An ACE carrying
             INHERIT_ONLY_ACE grants nothing on the object it sits on --

@@ -28,17 +28,29 @@ Protected-group membership, control of or ownership of a Tier 0 object
 (domain root, AdminSDHolder, DCs, CAs, ...), DCSync, and membership in a
 group holding any of those still count. detail gains privilege_sources
 (the view's reasons, sorted); summary wording is unchanged.
+
+[v1.3] Absorbs plugin 1014 (Privileged Account Missing NOT_DELEGATED
+Protection), now retired with superseded_by=1041. 1014 reported the
+same missing bit on the same accounts at 'low'. Its extra coverage is
+deliberately not merged: disabled privileged accounts are plugin 1042's
+finding, and accounts privileged only by a leftover admin_count=1 are
+not privileged (plugin 1025 reports the stale marker). Carried over:
+the `Set-ADAccountControl -AccountNotDelegated $true` remediation and
+the MITRE ATT&CK T1558 reference. Query, summary and severity are
+unchanged, so existing 1041 findings do not churn.
 """
 
 PLUGIN = {
     "plugin_id": 1041,
     "category": "User Accounts",
     "name": "Privileged Account Missing the \"Cannot Be Delegated\" Protection Flag",
-    "version": "1.2",
+    "version": "1.3",
     "revision_date": "2026-10-03",
     "remediation": (
         "Set the flag: check \"This account is sensitive and cannot be "
-        "delegated\" on the account's Account tab (or add 1048576 to "
+        "delegated\" on the account's Account tab, or run "
+        "`Set-ADAccountControl -Identity <name> -AccountNotDelegated $true` "
+        "(or add 1048576 to "
         "the account's userAccountControl value directly via ADSI Edit "
         "if the checkbox isn't available, e.g. for gMSA accounts). "
         "This has no meaningful compatibility downside for a genuinely "
@@ -53,6 +65,8 @@ PLUGIN = {
          "url": "https://pingcastle.com/PingCastleFiles/ad_hc_rules_list.html"},
         {"title": "DISA Active Directory Domain STIG V-243470: Delegation of privileged accounts must be prohibited",
          "url": "https://cyber.trackr.live/stig/Active_Directory_Domain/3/7#V-243470"},
+        {"title": "MITRE ATT&CK T1558: Steal or Forge Kerberos Tickets",
+         "url": "https://attack.mitre.org/techniques/T1558/"},
     ],
     "description": (
         "A privileged account (same broadened definition used "

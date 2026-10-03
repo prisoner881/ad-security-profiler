@@ -1,7 +1,7 @@
 """
 Plugin 1024: SPN-Bearing User Account Does Not Support AES Kerberos Encryption
 
-Distinct from the existing DES checks (1011/1019): this flags an account
+Distinct from the existing DES checks (1038/1019): this flags an account
 that supports NEITHER DES NOR AES for Kerberos, meaning it falls back to
 RC4 -- weaker than AES and directly tied to the NTLM hash, making a
 Kerberoasted ticket for this account crackable using NTLM-hash-cracking
@@ -20,13 +20,24 @@ Protected-group membership, control of or ownership of a Tier 0 object
 (domain root, AdminSDHolder, DCs, CAs, ...), DCSync, and membership in a
 group holding any of those still count. detail gains privilege_sources
 (the view's reasons, sorted); summary wording is unchanged.
+
+[v1.5] Absorbs plugin 1039 (Service Account (SPN-Bearing) Does Not
+Support AES Encryption), now retired with superseded_by=1024. 1039 used
+the identical filter at a flat 'low', so every account was reported
+twice. Carried over from it: the MS-KILE and PingCastle S-AesNotEnabled
+references, the remediation note that the password must be reset once
+after enabling AES (the AES keys are only derived at the next password
+change) plus the gMSA note, and the pwd_last_set detail key (a
+pwd_last_set older than the AES change means AES keys still do not
+exist). Filter, summary and severity are unchanged, so existing 1024
+findings do not churn.
 """
 
 PLUGIN = {
     "plugin_id": 1024,
     "category": "User Accounts",
     "name": "SPN-Bearing User Account Does Not Support AES Kerberos Encryption",
-    "version": "1.4",
+    "version": "1.5",
     "revision_date": "2026-10-03",
     "remediation": (
         "Enable AES128 and/or AES256 support on this account (Account "
@@ -37,13 +48,22 @@ PLUGIN = {
         "thoroughly before removing RC4 support entirely -- some older "
         "clients may depend on it -- but enabling AES alongside RC4 is "
         "a safe first step with no compatibility risk, and is a "
-        "prerequisite for eventually disabling RC4 domain-wide."
+        "prerequisite for eventually disabling RC4 domain-wide. After "
+        "enabling AES, reset the account's password once: AES keys are "
+        "only derived at the next password change, so flipping the "
+        "attribute alone does not create them. For gMSA accounts, edit "
+        "msDS-SupportedEncryptionTypes directly, since gMSAs don't "
+        "expose this via the standard account UI."
     ),
     "control_id": "KERB-201",
     "framework_tags": ["DISA-STIG"],
     "references": [
         {"title": "Microsoft: Network security -- Configure encryption types allowed for Kerberos",
          "url": "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/network-security-configure-encryption-types-allowed-for-kerberos"},
+        {"title": "Microsoft [MS-KILE]: msDS-SupportedEncryptionTypes bit flags",
+         "url": "https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-kile/6cfc7b50-11ed-4b4d-846d-6f08f0812919"},
+        {"title": "PingCastle: Old authentication protocols rules -- S-AesNotEnabled",
+         "url": "https://pingcastle.com/PingCastleFiles/ad_hc_rules_list.html"},
     ],
     "description": (
         "msDS-SupportedEncryptionTypes bits 0x8 (AES128-CTS-HMAC-SHA1-96) "
@@ -94,6 +114,7 @@ PLUGIN = {
                 'user_principal_name', u.user_principal_name,
                 'supported_encryption_types', u.supported_encryption_types,
                 'service_principal_names', u.service_principal_names,
+                'pwd_last_set', u.pwd_last_set,
                 'privilege_sources', pc.privilege_sources
             ) AS detail
         FROM ad_user u

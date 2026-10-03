@@ -4,7 +4,7 @@ Plugin 1019: DES-Only Kerberos Encryption Enforced (USE_DES_KEY_ONLY)
 USE_DES_KEY_ONLY (0x200000) is the older, Windows 2000/2003-era UAC
 mechanism for restricting an account to DES exclusively -- distinct from
 (and independent of) the newer msDS-SupportedEncryptionTypes attribute
-checked by plugin 1011. Worse than 1011's finding: this doesn't just
+checked by plugin 1038 (formerly 1011). Worse than that finding: this doesn't just
 permit DES alongside other types, it forces DES and only DES.
 """
 
@@ -12,8 +12,8 @@ PLUGIN = {
     "plugin_id": 1019,
     "category": "User Accounts",
     "name": "User Account Restricted to DES-Only Kerberos Encryption",
-    "version": "1.2",
-    "revision_date": "2026-07-15",
+    "version": "1.3",
+    "revision_date": "2026-10-03",
     "remediation": (
     'Remove the USE_DES_KEY_ONLY UAC flag entirely -- this is a legacy Windows '
     '2000/2003-era mechanism with essentially no modern legitimate use case. '
@@ -32,8 +32,8 @@ PLUGIN = {
         "The USE_DES_KEY_ONLY UAC bit (0x200000) is the older, Windows "
         "2000/2003-era mechanism for restricting an account to DES "
         "exclusively -- independent of, and potentially conflicting with, "
-        "the newer msDS-SupportedEncryptionTypes attribute (plugin 1011). "
-        "Worse than plugin 1011's finding specifically because this "
+        "the newer msDS-SupportedEncryptionTypes attribute (plugin 1038). "
+        "Worse than plugin 1038's finding specifically because this "
         "forces DES-only rather than merely permitting DES alongside "
         "stronger types."
     ),

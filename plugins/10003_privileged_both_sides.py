@@ -25,8 +25,8 @@ PLUGIN = {
     "plugin_id": 10003,
     "category": "Hybrid Identity",
     "name": "Account Holds Both Domain Admin and Global Administrator Privileges",
-    "version": "1.1",
-    "revision_date": "2026-09-02",
+    "version": "1.2",
+    "revision_date": "2026-10-03",
     "remediation": (
         "Confirm this dual privilege is genuinely necessary rather than "
         "incidental (e.g. an account that was made Global Administrator "
@@ -38,7 +38,7 @@ PLUGIN = {
         "strongest available protections to this specific account on "
         "both sides: phishing-resistant MFA in Entra, Protected Users "
         "group membership and smartcard-required logon on-prem (see "
-        "plugins 1012/1015), and treat any anomaly on this account with "
+        "plugins 1012/1040), and treat any anomaly on this account with "
         "elevated urgency given the combined blast radius."
     ),
     "control_id": "HYBRID-003",
