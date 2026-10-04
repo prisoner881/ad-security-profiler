@@ -17,14 +17,23 @@ not a stealth-membership anomaly. PingCastle's own remediation text
 actually says "513 or 514 for users"; v1.0 noted that in its docstring
 but failed to actually encode 514 as an acceptable value in the query
 itself.
+
+[v1.4] Excludes 498 (Enterprise Read-only DCs), 516 (Domain Controllers)
+and 521 (Read-only DCs) too, which plugin 1016 now reports, so they are
+not reported twice. Key Admins (526) and Enterprise Key Admins (527) are
+privileged global/universal groups that 1016 does not cover; they are
+reported here at 'high' instead of 'low' (they can write
+msDS-KeyCredentialLink on every account -- shadow credentials). 544 stays
+excluded but cannot occur: a primary group must be a global or
+universal group, and BUILTIN\\Administrators is domain-local.
 """
 
 PLUGIN = {
     "plugin_id": 1023,
     "category": "User Accounts",
     "name": "User Primary Group ID Set to a Non-Default, Non-Privileged Value",
-    "version": "1.3",
-    "revision_date": "2026-07-15",
+    "version": "1.4",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Unless strongly justified, change the primary group back to "
         "its default (Domain Users, RID 513) via Active Directory Users "
@@ -61,9 +70,12 @@ PLUGIN = {
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
-            'low' AS fd_severity,
+            CASE WHEN u.primary_group_id IN (526, 527) THEN 'high' ELSE 'low' END AS fd_severity,
             'User Account ' || COALESCE(u.user_principal_name, u.sam_account_name)
-                || ' has an unusual primaryGroupID (' || u.primary_group_id || ')' AS summary,
+                || ' has an unusual primaryGroupID (' || u.primary_group_id
+                || CASE u.primary_group_id WHEN 526 THEN ', Key Admins'
+                                           WHEN 527 THEN ', Enterprise Key Admins' ELSE '' END
+                || ')' AS summary,
             jsonb_build_object(
                 'sam_account_name', u.sam_account_name,
                 'user_principal_name', u.user_principal_name,
@@ -74,6 +86,7 @@ PLUGIN = {
           AND u.client_id = %(client_id)s
           AND u.primary_group_id IS NOT NULL
           AND u.primary_group_id NOT IN (513, 514)
-          AND u.primary_group_id NOT IN (512, 518, 519, 520, 544)
+          -- Privileged RIDs reported by plugin 1016 ([v1.4] + 498/516/521).
+          AND u.primary_group_id NOT IN (498, 512, 516, 518, 519, 520, 521, 544)
     """,
 }

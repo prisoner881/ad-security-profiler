@@ -1,9 +1,9 @@
 """
 Plugin 1024: SPN-Bearing User Account Does Not Support AES Kerberos Encryption
 
-Distinct from the existing DES checks (1038/1019): this flags an account
-that supports NEITHER DES NOR AES for Kerberos, meaning it falls back to
-RC4 -- weaker than AES and directly tied to the NTLM hash, making a
+Distinct from the existing DES check (1038): this flags an account
+with neither AES bit set for Kerberos (DES bits are not examined), meaning
+its service tickets fall back to RC4 -- weaker than AES and directly tied to the NTLM hash, making a
 Kerberoasted ticket for this account crackable using NTLM-hash-cracking
 techniques and tooling. Bit values (0x8 AES128, 0x10 AES256) confirmed
 directly against Microsoft's own MS-KILE protocol specification. Scoped
@@ -31,14 +31,21 @@ change) plus the gMSA note, and the pwd_last_set detail key (a
 pwd_last_set older than the AES change means AES keys still do not
 exist). Filter, summary and severity are unchanged, so existing 1024
 findings do not churn.
+
+[v1.6] Severity escalation and the "Privileged " summary prefix now come
+from v_privileged_principal only. adminCount=1 is never cleared when an
+account leaves a protected group (plugin 1025 reports such stale
+markers), so it escalated former admins to 'high'; admin_count is now
+reported in detail instead. Dropped the gMSA remediation note: gMSAs are
+collected as computer objects and are outside this user-scoped check.
 """
 
 PLUGIN = {
     "plugin_id": 1024,
     "category": "User Accounts",
     "name": "SPN-Bearing User Account Does Not Support AES Kerberos Encryption",
-    "version": "1.5",
-    "revision_date": "2026-10-03",
+    "version": "1.6",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Enable AES128 and/or AES256 support on this account (Account "
         "tab in ADUC: \"This account supports Kerberos AES 128/256 bit "
@@ -51,9 +58,7 @@ PLUGIN = {
         "prerequisite for eventually disabling RC4 domain-wide. After "
         "enabling AES, reset the account's password once: AES keys are "
         "only derived at the next password change, so flipping the "
-        "attribute alone does not create them. For gMSA accounts, edit "
-        "msDS-SupportedEncryptionTypes directly, since gMSAs don't "
-        "expose this via the standard account UI."
+        "attribute alone does not create them."
     ),
     "control_id": "KERB-201",
     "framework_tags": ["DISA-STIG"],
@@ -105,8 +110,8 @@ PLUGIN = {
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
-            CASE WHEN u.admin_count = 1 OR pc.object_guid IS NOT NULL THEN 'high' ELSE 'medium' END AS fd_severity,
-            (CASE WHEN u.admin_count = 1 OR pc.object_guid IS NOT NULL THEN 'Privileged ' ELSE '' END)
+            CASE WHEN pc.object_guid IS NOT NULL THEN 'high' ELSE 'medium' END AS fd_severity,
+            (CASE WHEN pc.object_guid IS NOT NULL THEN 'Privileged ' ELSE '' END)
                 || 'User Account ' || COALESCE(u.user_principal_name, u.sam_account_name)
                 || ' has an SPN but does not support AES Kerberos encryption' AS summary,
             jsonb_build_object(
@@ -115,6 +120,7 @@ PLUGIN = {
                 'supported_encryption_types', u.supported_encryption_types,
                 'service_principal_names', u.service_principal_names,
                 'pwd_last_set', u.pwd_last_set,
+                'admin_count', u.admin_count,
                 'privilege_sources', pc.privilege_sources
             ) AS detail
         FROM ad_user u

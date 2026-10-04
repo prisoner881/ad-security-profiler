@@ -12,14 +12,21 @@ day) rather than a day count computed from now(). The count differed on
 every run, so an unchanged finding was recorded as 'changed' on every
 audit; the date only moves when the underlying attribute does. Severity
 and inclusion thresholds are unchanged.
+
+[v1.4] An account with no lastLogonTimestamp and no pwdLastSet (pwdLastSet
+0, e.g. a pre-staged account created with "must change password") is now
+judged by whenCreated instead of never being reported. Disabled accounts
+are kept but rated one step lower (info for a member, low for a DC) and
+marked in the summary: a disabled account is already out of use, which is
+how PingCastle and most tools treat inactive computers.
 """
 
 PLUGIN = {
     "plugin_id": 2006,
     "category": "Computer Accounts",
     "name": "Dormant Computer Account",
-    "version": "1.3",
-    "revision_date": "2026-10-03",
+    "version": "1.4",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Confirm whether the machine still physically exists and is in "
         "active use. If decommissioned, disable and eventually remove the "
@@ -41,7 +48,11 @@ PLUGIN = {
         "guidance more broadly. A dormant domain controller specifically "
         "would be highly unusual and escalated accordingly -- a DC that "
         "hasn't authenticated in this window likely indicates a bigger "
-        "operational problem than simple staleness."
+        "operational problem than simple staleness. Inactivity is "
+        "lastLogonTimestamp older than 90 days or, for an account that "
+        "never logged on, pwdLastSet (or whenCreated when pwdLastSet is "
+        "0) older than 90 days. Disabled accounts are rated one step "
+        "lower (info / low for a DC) and marked in the summary."
     ),
     "base_severity": "low",
     "query": """
@@ -52,20 +63,29 @@ PLUGIN = {
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
-            CASE WHEN c.is_domain_controller THEN 'high' ELSE 'low' END AS fd_severity,
+            CASE
+                WHEN c.is_domain_controller AND c.is_enabled IS NOT FALSE THEN 'high'
+                WHEN c.is_domain_controller THEN 'low'
+                WHEN c.is_enabled IS NOT FALSE THEN 'low'
+                ELSE 'info'
+            END AS fd_severity,
             (CASE WHEN c.is_domain_controller THEN 'Domain Controller ' ELSE '' END)
-                || 'Computer Account ' || c.sam_account_name
+                || 'Computer Account ' || COALESCE(c.sam_account_name, c.object_guid::text)
                 || CASE
                      WHEN c.last_logon_timestamp IS NULL THEN ' has never logged on'
                      ELSE ' has not logged on since '
                           || to_char(c.last_logon_timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD')
-                   END AS summary,
+                   END
+                || CASE WHEN c.is_enabled IS FALSE
+                        THEN ' (account is disabled)' ELSE '' END AS summary,
             jsonb_build_object(
                 'sam_account_name', c.sam_account_name,
                 'dns_hostname', c.dns_hostname,
                 'last_logon_timestamp', c.last_logon_timestamp,
                 'operating_system', c.operating_system,
                 'is_enabled', c.is_enabled,
+                'pwd_last_set', c.pwd_last_set,
+                'when_created', c.when_created,
                 'is_domain_controller', c.is_domain_controller
             ) AS detail
         FROM ad_computer c
@@ -73,8 +93,8 @@ PLUGIN = {
           AND c.client_id = %(client_id)s
           AND (
                 (c.last_logon_timestamp IS NOT NULL AND c.last_logon_timestamp < now() - interval '90 days')
-                OR (c.last_logon_timestamp IS NULL AND c.pwd_last_set IS NOT NULL
-                    AND c.pwd_last_set < now() - interval '90 days')
+                OR (c.last_logon_timestamp IS NULL
+                    AND COALESCE(c.pwd_last_set, c.when_created) < now() - interval '90 days')
               )
     """,
 }

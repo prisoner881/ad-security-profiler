@@ -15,14 +15,22 @@ lacks DFSR's replication integrity and diagnostic improvements.
 Collected as a single, targeted read (adprofiler.py v0.5.4), the same
 pattern already used for AdminSDHolder and NTAuthCertificates -- one
 well-known object, not part of bulk collection.
+
+[v1.1] A NULL msDFSR-Flags is no longer reported as a confirmed FRS
+domain. The collector also leaves the value NULL when the BASE read of
+DFSR-GlobalSettings fails (access denied, referral, timeout) or the
+attribute cannot be read, so NULL now yields a 'warn' ("could not be
+confirmed") instead of a 'fail'; only an explicit msDFSR-Flags value
+other than 48 (0 Start, 16 Prepared, 32 Redirected) fails. The summary
+is also NULL-safe (dns_root may be NULL) and uses the DNS name.
 """
 
 PLUGIN = {
     "plugin_id": 4018,
     "category": "Domain",
     "name": "SYSVOL Still Replicated via Deprecated FRS, Not DFSR",
-    "version": "1.0",
-    "revision_date": "2026-07-31",
+    "version": "1.1",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Migrate SYSVOL replication from FRS to DFS Replication using "
         "`dfsrmig /CreateGlobalObjects`, followed by `dfsrmig "
@@ -46,27 +54,42 @@ PLUGIN = {
         "deprecated File Replication Service rather than DFS "
         "Replication, per msDFSR-Flags on the domain's own "
         "DFSR-GlobalSettings object (48 = fully migrated; any other "
-        "value, including the object being entirely absent, means FRS "
-        "is still involved)."
+        "value means FRS is still involved). When msDFSR-Flags could not "
+        "be read at all -- the object is absent (migration never "
+        "attempted) or the read failed -- the finding is raised as a "
+        "warning to verify with `dfsrmig /GetGlobalState`."
     ),
     "base_severity": "medium",
     "query": """
         SELECT
-            'fail' AS status,
+            -- [v1.1] NULL = absent OR unreadable: warn, not fail.
+            CASE WHEN d.dfsr_migration_flags IS NULL THEN 'warn' ELSE 'fail' END AS status,
             d.object_guid,
             NULL AS stig_severity,
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
             'medium' AS fd_severity,
-            'Domain ' || d.dns_root || ' has not completed SYSVOL migration to DFSR ('
-                || CASE
-                     WHEN d.dfsr_migration_flags IS NULL THEN 'DFSR-GlobalSettings not found -- migration never attempted'
-                     ELSE 'msDFSR-Flags=' || d.dfsr_migration_flags || ', expected 48'
-                   END || ')' AS summary,
+            CASE
+              WHEN d.dfsr_migration_flags IS NULL THEN
+                'Domain ' || COALESCE(d.dns_root, d.object_guid::text)
+                || ': SYSVOL migration to DFSR could not be confirmed (msDFSR-Flags on '
+                || 'DFSR-GlobalSettings not found or not readable -- migration never attempted, '
+                || 'or the object could not be read)'
+              ELSE
+                'Domain ' || COALESCE(d.dns_root, d.object_guid::text)
+                || ' has not completed SYSVOL migration to DFSR (msDFSR-Flags='
+                || d.dfsr_migration_flags || ', expected 48)'
+            END AS summary,
             jsonb_build_object(
                 'dns_root', d.dns_root,
-                'dfsr_migration_flags', d.dfsr_migration_flags
+                'dfsr_migration_flags', d.dfsr_migration_flags,
+                'migration_state', CASE d.dfsr_migration_flags
+                    WHEN 0 THEN 'start'
+                    WHEN 16 THEN 'prepared'
+                    WHEN 32 THEN 'redirected'
+                    WHEN 48 THEN 'eliminated'
+                    ELSE NULL END
             ) AS detail
         FROM ad_domain d
         WHERE d.client_id = %(client_id)s

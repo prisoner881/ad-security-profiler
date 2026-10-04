@@ -20,14 +20,28 @@ that newly-registered target -- no ACL change, no approval, nothing
 else needs to happen. This is exactly as viable whether the ghost SPN
 is leftover from a decommissioned server nobody cleaned up after, or
 was deliberately pre-staged.
+
+[v1.1] One row per delegating account. The query used to emit one row
+per unresolved SPN while keying the finding on the account's GUID, so an
+account with two or more ghost SPNs -- the normal case, since KCD lists
+usually carry both the NetBIOS and FQDN forms -- produced duplicate
+identities and the whole plugin errored. The SPNs are now aggregated:
+the summary lists them sorted (unchanged wording for a single SPN) and
+detail.target_spns carries the list. Since collector v0.5.15 targets
+resolve through the default sPNMappings HOST alias set (cifs/x is
+answered by HOST/x), so the former flood of false "ghosts" for valid
+cifs/http/... targets is gone. krbtgt/<DOMAIN> entries are excluded:
+krbtgt is never a registered SPN, so such an entry is not a ghost but
+delegation to the KDC itself, reported by plugin 1035. Deleted source
+objects are excluded.
 """
 
 PLUGIN = {
     "plugin_id": 2034,
     "category": "Computer Accounts",
     "name": "Constrained Delegation Configured to a Non-Existent (\"Ghost\") SPN",
-    "version": "1.0",
-    "revision_date": "2026-07-31",
+    "version": "1.1",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Remove the dangling entry from msDS-AllowedToDelegateTo "
         "(Attribute Editor tab in ADUC, or `Set-ADComputer -Identity "
@@ -56,25 +70,39 @@ PLUGIN = {
     ),
     "base_severity": "medium",
     "query": """
+        WITH ghost AS (
+            SELECT DISTINCT u.source_guid, u.target_spn
+            FROM unresolved_delegation_target_edge u
+            WHERE u.client_id = %(client_id)s
+              AND u.valid_to IS NULL
+              -- krbtgt/<DOMAIN> is never a registered SPN: delegation to the KDC (plugin 1035)
+              AND u.target_spn NOT ILIKE 'krbtgt/%%'
+        )
         SELECT
             'fail' AS status,
-            u.source_guid AS object_guid,
+            g.source_guid AS object_guid,
             NULL AS stig_severity,
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
             'medium' AS fd_severity,
-            'Account ' || COALESCE(do2.sam_account_name, u.source_guid::text)
-                || ' has constrained delegation configured to a non-existent SPN: "'
-                || u.target_spn || '"' AS summary,
+            'Account ' || COALESCE(do2.sam_account_name, g.source_guid::text)
+                || ' has constrained delegation configured to '
+                || CASE WHEN count(*) = 1 THEN 'a non-existent SPN: '
+                        ELSE count(*) || ' non-existent SPNs: ' END
+                || string_agg('"' || g.target_spn || '"', ', ' ORDER BY lower(g.target_spn), g.target_spn)
+                AS summary,
             jsonb_build_object(
                 'sam_account_name', do2.sam_account_name,
                 'object_class', do2.object_class,
-                'target_spn', u.target_spn
+                'target_spns', jsonb_agg(g.target_spn ORDER BY lower(g.target_spn), g.target_spn)
             ) AS detail
-        FROM unresolved_delegation_target_edge u
-        JOIN directory_object do2 ON do2.object_guid = u.source_guid AND do2.client_id = u.client_id
-        WHERE u.client_id = %(client_id)s
-          AND u.valid_to IS NULL
+        FROM ghost g
+        JOIN directory_object do2
+          ON do2.object_guid = g.source_guid
+         AND do2.client_id = %(client_id)s
+         AND NOT do2.is_deleted
+        GROUP BY g.source_guid, do2.sam_account_name, do2.object_class
+        ORDER BY g.source_guid
     """,
 }

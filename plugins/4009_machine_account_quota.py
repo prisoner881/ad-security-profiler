@@ -13,14 +13,20 @@ research for this plugin.
 If unset in AD, LDAP simply won't return this attribute at all, meaning
 this project's own collected value will be NULL -- treated here as 10
 (the documented default), not skipped, via COALESCE.
+
+[v1.3] The detail now notes that the quota is only usable by principals
+holding SeMachineAccountPrivilege ("Add workstations to domain", granted
+to Authenticated Users by the Default Domain Controllers Policy). GPO
+content is not collected, so a domain that has removed that grant is
+still reported; the note tells the reader to check it.
 """
 
 PLUGIN = {
     "plugin_id": 4009,
     "category": "Domain",
     "name": "Machine Account Quota Allows Unprivileged Users to Join Computers to the Domain",
-    "version": "1.2",
-    "revision_date": "2026-09-02",
+    "version": "1.3",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Set ms-DS-MachineAccountQuota to 0 "
         "(`Set-ADDomain -Identity <domain> -Replace "
@@ -55,7 +61,12 @@ PLUGIN = {
         "weight of evidence -- six independent sources including "
         "Microsoft's own community support forum, which directly and "
         "unambiguously confirms 0 is the hardening fix, not a "
-        "regression."
+        "regression. The quota only applies to principals that hold "
+        "SeMachineAccountPrivilege (\"Add workstations to domain\", "
+        "Authenticated Users by default in the Default Domain "
+        "Controllers Policy); GPO content is not collected, so check "
+        "that assignment if this finding appears on a domain that has "
+        "already removed it."
     ),
     "base_severity": "medium",
     "query": """
@@ -74,7 +85,10 @@ PLUGIN = {
             jsonb_build_object(
                 'dns_root', d.dns_root,
                 'machine_account_quota', COALESCE(d.machine_account_quota, 10),
-                'was_unset_in_ad', d.machine_account_quota IS NULL
+                'was_unset_in_ad', d.machine_account_quota IS NULL,
+                'note', 'Exploitable only by principals granted SeMachineAccountPrivilege '
+                        '("Add workstations to domain"; Authenticated Users by default in the '
+                        'Default Domain Controllers Policy). Not verified: GPO content is not collected.'
             ) AS detail
         FROM ad_domain d
         WHERE d.valid_to IS NULL

@@ -25,14 +25,20 @@ reported every one of its accounts a second time. Its Microsoft
 encryption-types reference and its "target value 24 (AES128+AES256)"
 remediation note are carried over; the query, summary and severity are
 unchanged, so existing 1038 findings do not churn.
+
+[v1.2] Disabled accounts are rated 'low' instead of 'high' (they cannot
+obtain or be issued tickets until re-enabled; the merge with 1011, which
+looked at enabled users only, had widened scope to long-disabled legacy
+computer objects at full severity). The DES list in the summary is
+aggregated in an explicit order.
 """
 
 PLUGIN = {
     "plugin_id": 1038,
     "category": "User Accounts",
     "name": "Account Configured to Allow DES Kerberos Encryption",
-    "version": "1.1",
-    "revision_date": "2026-10-03",
+    "version": "1.2",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Remove DES support: clear bits 0x1 and 0x2 from "
         "msDS-SupportedEncryptionTypes (e.g. via `Set-ADAccountControl` "
@@ -90,15 +96,15 @@ PLUGIN = {
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
-            'high' AS fd_severity,
+            CASE WHEN d.is_enabled IS FALSE THEN 'low' ELSE 'high' END AS fd_severity,  -- [v1.2]
             (CASE WHEN d.object_class = 'computer' THEN 'Computer ' ELSE 'User ' END)
-                || 'Account ' || COALESCE(d.user_principal_name, d.sam_account_name)
+                || 'Account ' || COALESCE(d.user_principal_name, d.sam_account_name, d.object_guid::text)
                 || ' permits DES Kerberos encryption ('
-                || (SELECT string_agg(x, ', ') FROM (VALUES
-                        (CASE WHEN (COALESCE(d.supported_encryption_types, 0) & 1) != 0 THEN 'DES-CBC-CRC' END),
-                        (CASE WHEN (COALESCE(d.supported_encryption_types, 0) & 2) != 0 THEN 'DES-CBC-MD5' END),
-                        (CASE WHEN (COALESCE(d.user_account_control, 0) & 2097152) != 0 THEN 'USE_DES_KEY_ONLY flag' END)
-                    ) AS v(x) WHERE x IS NOT NULL)
+                || (SELECT string_agg(x, ', ' ORDER BY n) FROM (VALUES
+                        (1, CASE WHEN (COALESCE(d.supported_encryption_types, 0) & 1) != 0 THEN 'DES-CBC-CRC' END),
+                        (2, CASE WHEN (COALESCE(d.supported_encryption_types, 0) & 2) != 0 THEN 'DES-CBC-MD5' END),
+                        (3, CASE WHEN (COALESCE(d.user_account_control, 0) & 2097152) != 0 THEN 'USE_DES_KEY_ONLY flag' END)
+                    ) AS v(n, x) WHERE x IS NOT NULL)
                 || ')' AS summary,
             jsonb_build_object(
                 'sam_account_name', d.sam_account_name,

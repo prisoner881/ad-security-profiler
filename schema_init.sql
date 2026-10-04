@@ -3482,6 +3482,31 @@ COMMENT ON COLUMN ad_dns_zone.allow_update IS
 CREATE INDEX idx_ad_dns_zone_open ON ad_dns_zone (client_id, object_guid) WHERE valid_to IS NULL;
 
 -- ============================================================================
+-- v36 ADDITIONS (columns; the v_privileged_principal refinement is applied in
+-- place in the v34 section below). See schema_migration_v36.sql.
+-- ============================================================================
+
+ALTER TABLE ad_intel.ad_computer
+    ADD COLUMN IF NOT EXISTS is_read_only_dc boolean DEFAULT false NOT NULL,
+    ADD COLUMN IF NOT EXISTS user_principal_name text;
+
+ALTER TABLE ad_intel.ad_cert_template
+    ADD COLUMN IF NOT EXISTS ra_signature_count integer,
+    ADD COLUMN IF NOT EXISTS template_oid text;
+
+ALTER TABLE ad_intel.ad_cert_oid
+    ADD COLUMN IF NOT EXISTS policy_oid text,
+    ADD COLUMN IF NOT EXISTS display_name text;
+
+ALTER TABLE ad_intel.group_member_edge
+    ADD COLUMN IF NOT EXISTS is_primary_group boolean DEFAULT false NOT NULL;
+
+COMMENT ON COLUMN ad_intel.group_member_edge.is_primary_group IS
+    'TRUE when the membership comes from the member''s primaryGroupID (e.g. '
+    'Domain Users for users), which AD never lists in the group''s member '
+    'attribute. Such edges are also is_direct. (schema v36)';
+
+-- ============================================================================
 -- v34 ADDITIONS -- acl_edge inherit-only flags; shared Tier 0 definition of
 -- "privileged" (v_tier0_object, v_privileged_principal). Identical to
 -- schema_migration_v34.sql, which explains the reasoning.
@@ -3569,7 +3594,24 @@ CREATE OR REPLACE VIEW ad_intel.v_privileged_principal AS
             ON t.object_guid = a.object_guid AND t.client_id = a.client_id
          WHERE a.valid_to IS NULL
            AND a.ace_type = 'allow'
-           AND a.inherit_only IS NOT TRUE
+           AND (
+                 a.inherit_only IS NOT TRUE
+                 -- [v36] An inherit-only ACE on the domain root or an OU
+                 -- above a DC, inherited by computer objects (or by every
+                 -- class), lands on the DC computer objects below it --
+                 -- unless they don't inherit. SDProp turns inheritance off
+                 -- on AdminSDHolder-protected objects (adminCount = 1), so
+                 -- this counts as Tier 0 control exactly when some DC in
+                 -- this collection is NOT protected. Decided from each
+                 -- environment's own data rather than assumed either way.
+                 OR (t.tier0_reason IN ('domain_root', 'domain_controller_ou')
+                     AND (a.inherited_object_type_guid IS NULL
+                          OR a.inherited_object_type_guid = 'bf967a86-0de6-11d0-a285-00aa003049e2')
+                     AND EXISTS (SELECT 1 FROM ad_intel.ad_computer dc
+                                  WHERE dc.client_id = a.client_id AND dc.valid_to IS NULL
+                                    AND dc.is_domain_controller
+                                    AND dc.admin_count IS DISTINCT FROM 1))
+               )
            AND (
                  -- AD stores generic rights already mapped to specific ones,
                  -- so GenericAll appears as 0xF01FF and GenericWrite as
@@ -3661,7 +3703,7 @@ CREATE TABLE schema_migration_history (
 -- pretense of having stepped through intermediate versions that were
 -- never actually separately applied to this database.
 INSERT INTO schema_migration_history (version_number, description) VALUES
-    (35, 'Fresh install via schema_init.sql, consolidated through v35');
+    (36, 'Fresh install via schema_init.sql, consolidated through v36');
 
 -- ============================================================================
 -- PARTITIONED TABLE REGISTRY + INITIAL PARTITION CREATION

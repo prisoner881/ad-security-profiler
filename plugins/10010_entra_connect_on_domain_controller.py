@@ -58,14 +58,26 @@ follow the installer's format (for example, an administrator overwrote it),
 or when the named host cannot be matched to a collected computer object --
 the last case usually meaning the sync server is not domain-joined to this
 domain, which is itself fine.
+
+[v1.1] The ADSyncMSA% name branch was removed: managed service accounts are
+collected into ad_computer, never ad_user, so it could never match.
+Liveness: uninstalling Entra Connect (or migrating it off the DC via
+staging mode, as the remediation advises) leaves the old MSOL_/AAD_ account
+and its description behind. A host is now reported at full severity
+(fail, high/critical) only when at least one of its sync accounts is
+enabled and has logged on within 30 days of the audited run
+(lastLogonTimestamp, which lags up to ~14 days). When every matching
+account is disabled or dormant the finding is a medium warn worded
+"possibly orphaned". Replication rights are confirmed with the real DCSync
+test (v_privileged_principal 'dcsync' / 'dcsync_via_group').
 """
 
 PLUGIN = {
     "plugin_id": 10010,
     "category": "Hybrid Identity",
     "name": "Entra Connect Synchronization Server Is a Domain Controller",
-    "version": "1.0",
-    "revision_date": "2026-09-29",
+    "version": "1.1",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Move Entra Connect off the domain controller onto a dedicated, "
         "hardened member server that is administered as a Tier 0 asset. "
@@ -116,11 +128,20 @@ PLUGIN = {
         "local administrators are effectively domain administrators and any "
         "local privilege escalation in the sync software becomes a domain "
         "compromise. Complements plugin 10009, which reports the same "
-        "account's credential hygiene rather than its placement."
+        "account's credential hygiene rather than its placement. When "
+        "every matching sync account is disabled or has not logged on "
+        "within 30 days, the installation may already have been moved "
+        "or removed and the finding is a medium warn (possibly orphaned "
+        "account) instead."
     ),
     "base_severity": "high",
     "query": """
-        WITH sync_account AS (
+        WITH ref AS (
+            SELECT COALESCE((SELECT completed_at FROM sync_run
+                              WHERE run_id = %(run_id)s AND client_id = %(client_id)s),
+                            now()) AS ref_time
+        ),
+        sync_account AS (
             SELECT u.object_guid,
                    u.sam_account_name,
                    u.description,
@@ -141,24 +162,19 @@ PLUGIN = {
               AND (
                     u.sam_account_name LIKE 'MSOL\\_%%'
                  OR u.sam_account_name LIKE 'AAD\\_%%'
-                 OR u.sam_account_name LIKE 'ADSyncMSA%%'
                  OR u.description ILIKE '%%Azure AD Connect%%'
+                 OR u.description ILIKE '%%Azure Active Directory Connect%%'
                  OR u.description ILIKE '%%Entra Connect%%'
                  OR u.description ILIKE '%%Synchronization Service%%'
               )
         ),
         replication_holder AS (
-            SELECT DISTINCT a.trustee_sid
-            FROM acl_edge a
-            JOIN ad_domain d
-              ON d.object_guid = a.object_guid
-             AND d.client_id = a.client_id
-             AND d.valid_to IS NULL
-            WHERE a.client_id = %(client_id)s
-              AND a.valid_to IS NULL
-              AND a.ace_type = 'allow'
-              AND a.object_type_guid IN ('1131f6aa-9c07-11d1-f79f-00c04fc2dcd2',
-                                          '1131f6ad-9c07-11d1-f79f-00c04fc2dcd2')
+            -- [v1.1] Real DCSync (both rights / All Extended Rights /
+            -- GenericAll, direct or via a group), per v_privileged_principal.
+            SELECT DISTINCT pp.object_guid
+            FROM v_privileged_principal pp
+            WHERE pp.client_id = %(client_id)s
+              AND pp.privilege_source IN ('dcsync', 'dcsync_via_group')
         ),
         resolved AS (
             SELECT sa.*,
@@ -168,8 +184,11 @@ PLUGIN = {
                    c.operating_system,
                    c.is_domain_controller,
                    cdo.dn_current AS host_dn,
-                   (rh.trustee_sid IS NOT NULL) AS replication_confirmed
+                   (rh.object_guid IS NOT NULL) AS replication_confirmed,
+                   (sa.is_enabled IS TRUE
+                    AND sa.last_logon_timestamp >= ref.ref_time - interval '30 days') AS is_live
             FROM sync_account sa
+            CROSS JOIN ref
             JOIN ad_computer c
               ON c.client_id = %(client_id)s
              AND c.valid_to IS NULL
@@ -180,7 +199,7 @@ PLUGIN = {
              )
             JOIN directory_object cdo
               ON cdo.object_guid = c.object_guid AND cdo.client_id = c.client_id
-            LEFT JOIN replication_holder rh ON rh.trustee_sid = sa.object_sid
+            LEFT JOIN replication_holder rh ON rh.object_guid = sa.object_guid
             WHERE sa.sync_host IS NOT NULL
         ),
         agg AS (
@@ -200,6 +219,7 @@ PLUGIN = {
                    min(r.sync_host) AS sync_host,
                    count(*) AS sync_account_count,
                    bool_or(r.replication_confirmed) AS any_replication_confirmed,
+                   bool_or(r.is_live) AS any_live,
                    jsonb_agg(jsonb_build_object(
                        'sync_account', r.sam_account_name,
                        'sync_account_dn', r.dn_current,
@@ -208,6 +228,7 @@ PLUGIN = {
                        'last_logon_timestamp', r.last_logon_timestamp,
                        'replication_rights_confirmed_on_domain_root',
                            r.replication_confirmed,
+                       'recently_active', r.is_live,
                        'description', r.description
                    ) ORDER BY r.sam_account_name) AS sync_accounts
             FROM resolved r
@@ -215,15 +236,17 @@ PLUGIN = {
             GROUP BY r.host_guid
         )
         SELECT
-            'fail' AS status,
+            CASE WHEN a.any_live THEN 'fail' ELSE 'warn' END AS status,
             a.host_guid AS object_guid,
             NULL AS stig_severity,
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
-            CASE WHEN a.any_replication_confirmed THEN 'critical' ELSE 'high' END
-                AS fd_severity,
-            'Domain controller "' || COALESCE(a.host_sam, a.sync_host)
+            CASE WHEN NOT a.any_live THEN 'medium'
+                 WHEN a.any_replication_confirmed THEN 'critical'
+                 ELSE 'high' END AS fd_severity,
+            CASE WHEN a.any_live
+            THEN 'Domain controller "' || COALESCE(a.host_sam, a.sync_host)
                 || '" is running Entra Connect ('
                 || a.sync_account_count || ' synchronization account(s): '
                 || (SELECT string_agg(x.value ->> 'sync_account', ', '
@@ -235,7 +258,18 @@ PLUGIN = {
                 || CASE WHEN a.any_replication_confirmed
                         THEN ', and those replication rights are confirmed on '
                              'the domain root'
-                        ELSE '' END AS summary,
+                        ELSE '' END
+            ELSE 'Domain controller "' || COALESCE(a.host_sam, a.sync_host)
+                || '" is named as the Entra Connect host by '
+                || a.sync_account_count || ' disabled or dormant synchronization account(s) ('
+                || (SELECT string_agg(x.value ->> 'sync_account', ', '
+                                      ORDER BY x.value ->> 'sync_account')
+                    FROM jsonb_array_elements(a.sync_accounts) AS x)
+                || ') -- possibly an orphaned account from a moved or removed installation'
+                || CASE WHEN a.any_replication_confirmed
+                        THEN ' that still holds directory replication rights'
+                        ELSE '' END
+            END AS summary,
             jsonb_build_object(
                 'sync_host_account', a.host_sam,
                 'sync_host_dn', a.host_dn,
@@ -245,6 +279,7 @@ PLUGIN = {
                 'sync_host_is_domain_controller', true,
                 'sync_account_count', a.sync_account_count,
                 'any_replication_rights_confirmed', a.any_replication_confirmed,
+                'any_sync_account_recently_active', a.any_live,
                 'sync_accounts', a.sync_accounts,
                 'related_plugins', jsonb_build_array(10009, 5001)
             ) AS detail

@@ -10,17 +10,29 @@ larger the attack surface for privilege escalation, since each one is
 an independent path an attacker could compromise to reach Tier-0
 access. Confirmed against Purple Knight's own equivalent check and
 threshold (50).
+
+[v1.1] Counts enabled privileged *user accounts* rather than every
+admin_count=1 user and group. v1.0 included ~12 built-in protected
+groups (which are not accounts), krbtgt, disabled accounts and orphaned
+ex-admins whose sticky adminCount was never cleared, while missing users
+privileged by other means. The population is now enabled users found in
+v_privileged_principal (effective, nested and primary-group members of
+protected groups, plus Tier-0 ACL control, ownership and DCSync holders,
+directly or via a group), excluding krbtgt (RID 502) -- the same
+"enabled admin users" basis PingCastle uses for P-AdminNum. Each
+collected domain is evaluated on its own, so the wording now says
+"Domain" instead of "Forest".
 """
 
 PLUGIN = {
     "plugin_id": 4017,
     "category": "Domain",
-    "name": "Forest Contains an Excessive Number of Privileged Accounts",
-    "version": "1.0",
-    "revision_date": "2026-07-18",
+    "name": "Domain Contains an Excessive Number of Privileged Accounts",
+    "version": "1.1",
+    "revision_date": "2026-10-04",
     "remediation": (
-        "Review the full list of privileged users and groups (every "
-        "object with admin_count=1) and identify which ones genuinely "
+        "Review the list of enabled privileged user accounts (listed in "
+        "the finding detail) and identify which ones genuinely "
         "need standing privileged access versus which could move to a "
         "just-in-time or time-limited privileged access model instead. "
         "A large, flat population of always-on privileged accounts is "
@@ -31,11 +43,18 @@ PLUGIN = {
     ),
     "control_id": "PRIV-401",
     "framework_tags": [],
-    "references": [],
+    "references": [
+        {"title": "PingCastle: Privileged accounts -- P-AdminNum",
+         "url": "https://pingcastle.com/PingCastleFiles/ad_hc_rules_list.html"},
+        {"title": "Microsoft: Reducing the Active Directory attack surface",
+         "url": "https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/plan/security-best-practices/reducing-the-active-directory-attack-surface"},
+    ],
     "description": (
-        "Counts every user and group carrying the AdminSDHolder "
-        "protection marker (admin_count=1) domain-wide. Considered in "
-        "aggregate: the more privileged accounts and groups exist, the "
+        "Counts enabled user accounts that hold privilege in the domain "
+        "-- effective (nested or primary-group) members of protected "
+        "groups, or holders of Tier-0 ACL control, ownership or DCSync "
+        "rights, directly or via a group -- excluding krbtgt. "
+        "Considered in aggregate: the more privileged accounts exist, the "
         "larger the attack surface for privilege escalation, since "
         "each one is an independent path to Tier-0 access. Confirmed "
         "against Purple Knight's own equivalent check and threshold "
@@ -43,6 +62,29 @@ PLUGIN = {
     ),
     "base_severity": "medium",
     "query": """
+        WITH priv_user AS (
+            -- [v1.1] Enabled users with effective privilege (not the
+            -- sticky admin_count marker); groups and krbtgt excluded.
+            SELECT DISTINCT u.object_guid,
+                   COALESCE(u.sam_account_name, o.dn_current) AS name
+            FROM v_privileged_principal pp
+            JOIN ad_user u
+              ON u.object_guid = pp.object_guid
+             AND u.client_id = pp.client_id
+             AND u.valid_to IS NULL
+            JOIN directory_object o
+              ON o.object_guid = u.object_guid
+             AND o.client_id = u.client_id
+             AND NOT o.is_deleted
+            WHERE pp.client_id = %(client_id)s
+              AND u.is_enabled IS NOT FALSE
+              AND COALESCE(o.object_sid, '') NOT LIKE '%%-502'
+        ),
+        agg AS (
+            SELECT count(*) AS n,
+                   jsonb_agg(name ORDER BY lower(name), name) AS names
+            FROM priv_user
+        )
         SELECT
             'warn' AS status,
             d.object_guid,
@@ -51,24 +93,17 @@ PLUGIN = {
             NULL AS tool_severity,
             NULL AS tool_reference,
             'medium' AS fd_severity,
-            'Forest has ' || (
-                (SELECT count(*) FROM ad_user u WHERE u.valid_to IS NULL AND u.client_id = %(client_id)s AND u.admin_count = 1)
-                +
-                (SELECT count(*) FROM ad_group g WHERE g.valid_to IS NULL AND g.client_id = %(client_id)s AND g.admin_count = 1)
-            ) || ' privileged (admin_count=1) user(s) and group(s), exceeding the 50-account threshold' AS summary,
+            'Domain ' || COALESCE(d.dns_root, d.object_guid::text) || ' has '
+                || agg.n || ' enabled privileged user account(s), exceeding the 50-account threshold' AS summary,
             jsonb_build_object(
-                'privileged_account_and_group_count',
-                (SELECT count(*) FROM ad_user u WHERE u.valid_to IS NULL AND u.client_id = %(client_id)s AND u.admin_count = 1)
-                +
-                (SELECT count(*) FROM ad_group g WHERE g.valid_to IS NULL AND g.client_id = %(client_id)s AND g.admin_count = 1)
+                'enabled_privileged_user_count', agg.n,
+                'threshold', 50,
+                'privileged_users', agg.names
             ) AS detail
         FROM ad_domain d
+        CROSS JOIN agg
         WHERE d.valid_to IS NULL
           AND d.client_id = %(client_id)s
-          AND (
-                (SELECT count(*) FROM ad_user u WHERE u.valid_to IS NULL AND u.client_id = %(client_id)s AND u.admin_count = 1)
-                +
-                (SELECT count(*) FROM ad_group g WHERE g.valid_to IS NULL AND g.client_id = %(client_id)s AND g.admin_count = 1)
-              ) > 50
+          AND agg.n > 50
     """,
 }

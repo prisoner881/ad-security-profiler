@@ -49,14 +49,34 @@ names only GenericAll when it is held, since it subsumes the rest.
 Inherit-only ACEs are deliberately still counted: an ACE on a PKI
 container that flows down to every template or CA object under it is the
 ESC5 risk.
+
+[v1.4] Trustees that are already Tier 0 are no longer reported: the
+built-in Administrator (RID 500), Domain Controllers (516), Schema Admins
+(518), Enterprise Domain Controllers (S-1-5-9), AdminSDHolder-protected
+groups and anything privileged per v_privileged_principal for a reason
+other than control of a PKI object (that view counts PKI objects as Tier
+0, so it is filtered to avoid hiding every finding). This removes the default
+false positive on every CA host computer object, whose class
+defaultSecurityDescriptor grants Account Operators (S-1-5-32-548, a
+protected group) full control. The object's owner (implicit WriteDacl) is
+now reported when directory_object.owner_sid is populated for it (the
+PKI containers always; the CA computer object when it is adminCount=1).
+Rows are aggregated per (object, trustee) first so a trustee with
+several ACEs is listed once; the CA-computer join is client-scoped and
+deleted trustees are ignored. AIA, CDP, Certification Authorities, KRA
+and OID containers are still out of scope (not collected). Correction to
+the ESC7 remark above: ManageCA / ManageCertificates are not AD
+control-access rights at all -- they live in the CA's registry security
+descriptor, so ESC7 cannot be seen over LDAP (see plugin 6008 v1.4, now
+re-scoped to ESC5 on the CA's AD object).
 """
 
 PLUGIN = {
     "plugin_id": 6007,
     "category": "Certificate Services",
     "name": "PKI Infrastructure Object ACL Misconfiguration Matches ESC5",
-    "version": "1.3",
-    "revision_date": "2026-10-03",
+    "version": "1.4",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Confirm whether this grant is a deliberate PKI administration "
         "delegation or leftover/overly broad. These objects live in "
@@ -80,14 +100,18 @@ PLUGIN = {
          "url": "https://bloodhound.specterops.io/resources/edges/write-dacl"},
     ],
     "description": (
-        "A non-admin principal holds GenericAll, GenericWrite, "
-        "WriteDacl, or WriteOwner on one of the PKI infrastructure "
+        "A non-admin principal owns, or holds GenericAll, GenericWrite, "
+        "WriteDacl, or WriteOwner on, one of the PKI infrastructure "
         "objects the whole certificate ecosystem depends on: the "
         "Public Key Services, Certificate Templates, or Enrollment "
         "Services containers, the NTAuthCertificates object, or a "
         "CA's own AD computer object. Control over any of these is "
-        "equivalent to controlling the CA. Excludes the same baseline "
-        "well-known holders used elsewhere in this project."
+        "equivalent to controlling the CA. Excludes Domain Admins, "
+        "Enterprise Admins, Administrators, SYSTEM, the built-in "
+        "Administrator, AdminSDHolder-protected groups (e.g. Account "
+        "Operators' default control of computer objects) and any "
+        "principal already privileged per v_privileged_principal for a "
+        "reason other than control of a PKI object."
     ),
     "base_severity": "critical",
     "query": """
@@ -131,6 +155,7 @@ PLUGIN = {
             SELECT comp.object_guid, 'CA computer object (' || comp.dns_hostname || ')' AS label
             FROM ad_enrollment_service es
             JOIN ad_computer comp ON lower(comp.dns_hostname) = lower(es.dns_hostname)
+                                   AND comp.client_id = es.client_id   -- [v1.4]
                                    AND comp.valid_to IS NULL
             WHERE es.client_id = %(client_id)s AND es.valid_to IS NULL
         ),
@@ -140,7 +165,8 @@ PLUGIN = {
                    (((a.access_mask & 32) <> 0 AND a.object_type_guid IS NULL)
                        OR (a.access_mask & 1073741824) <> 0) AS is_generic_write,
                    (a.access_mask & 262144) != 0 AS is_write_dacl,
-                   (a.access_mask & 524288) != 0 AS is_write_owner
+                   (a.access_mask & 524288) != 0 AS is_write_owner,
+                   false AS is_owner
             FROM acl_edge a
             JOIN pki_objects po ON po.object_guid = a.object_guid
             WHERE a.client_id = %(client_id)s
@@ -151,25 +177,58 @@ PLUGIN = {
                     OR (a.access_mask & 983551) = 983551                    -- GenericAll, as stored
                     OR ((a.access_mask & 32) <> 0 AND a.object_type_guid IS NULL)  -- GenericWrite, as stored
                   )
+            UNION ALL
+            -- [v1.4] The owner can always rewrite the DACL (implicit WriteDacl).
+            SELECT po.object_guid, po.label, odo.owner_sid, 0, false, false, false, false, true
+            FROM pki_objects po
+            JOIN directory_object odo ON odo.object_guid = po.object_guid AND odo.client_id = %(client_id)s
+            WHERE odo.owner_sid IS NOT NULL
         ),
+        -- [v1.4] One row per (object, trustee), Tier 0 trustees excluded:
+        -- well-known admin SIDs (incl. RID 500), AdminSDHolder-protected
+        -- groups (Account Operators' default GenericAll on computer
+        -- objects) and anything in v_privileged_principal.
         unexpected_holders AS (
-            SELECT da.pki_guid, da.label,
+            SELECT da.pki_guid, max(da.label) AS label,
                    COALESCE(trustee_do.sam_account_name, da.trustee_sid) AS trustee_label,
                    trustee_do.object_sid AS trustee_sid,
                    trustee_do.object_class AS trustee_object_class,
-                   da.access_mask,
+                   bit_or(da.access_mask) AS access_mask,
                    (SELECT string_agg(x, ', ') FROM (VALUES
-                        (CASE WHEN da.is_generic_all THEN 'GenericAll' END),
-                        (CASE WHEN da.is_generic_write AND NOT da.is_generic_all THEN 'GenericWrite' END),
-                        (CASE WHEN da.is_write_dacl AND NOT da.is_generic_all THEN 'WriteDacl' END),
-                        (CASE WHEN da.is_write_owner AND NOT da.is_generic_all THEN 'WriteOwner' END)
+                        (CASE WHEN bool_or(da.is_owner) THEN 'Owner' END),
+                        (CASE WHEN bool_or(da.is_generic_all) THEN 'GenericAll' END),
+                        (CASE WHEN bool_or(da.is_generic_write) AND NOT bool_or(da.is_generic_all) THEN 'GenericWrite' END),
+                        (CASE WHEN bool_or(da.is_write_dacl) AND NOT bool_or(da.is_generic_all) THEN 'WriteDacl' END),
+                        (CASE WHEN bool_or(da.is_write_owner) AND NOT bool_or(da.is_generic_all) THEN 'WriteOwner' END)
                     ) AS v(x) WHERE x IS NOT NULL) AS rights_label
             FROM dangerous_aces da
             JOIN directory_object trustee_do
                 ON trustee_do.object_sid = da.trustee_sid AND trustee_do.client_id = %(client_id)s
+               AND NOT trustee_do.is_deleted
             WHERE NOT EXISTS (
                 SELECT 1 FROM expected_holders eh WHERE eh.object_guid = trustee_do.object_guid
             )
+              AND NOT (trustee_do.object_sid LIKE '%%-500' OR trustee_do.object_sid LIKE '%%-516'
+                       OR trustee_do.object_sid LIKE '%%-518' OR trustee_do.object_sid = 'S-1-5-9')
+              AND NOT EXISTS (SELECT 1 FROM ad_group pg
+                              WHERE pg.object_guid = trustee_do.object_guid AND pg.client_id = trustee_do.client_id
+                                AND pg.valid_to IS NULL AND pg.is_protected_group)
+              -- Privileged per v_privileged_principal for a reason OTHER than
+              -- control of a PKI object: v_tier0_object counts the CAs, CA
+              -- hosts, NTAuth store and PKI containers as Tier 0, so a holder
+              -- of exactly the rights reported here is "privileged" by that
+              -- view -- using it unfiltered would hide every finding.
+              AND NOT EXISTS (SELECT 1 FROM v_privileged_principal vp
+                              WHERE vp.client_id = trustee_do.client_id
+                                AND vp.object_guid = trustee_do.object_guid
+                                AND (vp.privilege_source = 'protected_group_member'
+                                     OR NOT EXISTS (SELECT 1 FROM v_tier0_object t0
+                                                    WHERE t0.client_id = vp.client_id
+                                                      AND t0.object_guid = vp.via_object_guid
+                                                      AND t0.tier0_reason IN ('enterprise_ca', 'enterprise_ca_host',
+                                                                              'ntauth_store', 'pki_container'))))
+            GROUP BY da.pki_guid, trustee_do.object_guid, trustee_do.sam_account_name,
+                     da.trustee_sid, trustee_do.object_sid, trustee_do.object_class
         ),
         -- [fix, caught via a real production crash at large scale (3
         -- CAs, multiple PKI objects) that this project's own small
@@ -179,14 +238,14 @@ PLUGIN = {
         -- Aggregated here instead, same pattern as plugin 9001's fix.
         aggregated AS (
             SELECT pki_guid, max(label) AS label,
-                   array_agg(trustee_label || ' (' || rights_label || ')' ORDER BY trustee_label) AS holder_summaries,
+                   array_agg(trustee_label || ' (' || rights_label || ')' ORDER BY trustee_label, trustee_sid) AS holder_summaries,
                    jsonb_agg(jsonb_build_object(
                        'trustee_sid', trustee_sid,
                        'trustee_sam_account_name', trustee_label,
                        'trustee_object_class', trustee_object_class,
                        'access_mask', access_mask,
                        'rights', rights_label
-                   ) ORDER BY trustee_label) AS holder_details,
+                   ) ORDER BY trustee_label, trustee_sid) AS holder_details,
                    count(*) AS holder_count
             FROM unexpected_holders
             GROUP BY pki_guid

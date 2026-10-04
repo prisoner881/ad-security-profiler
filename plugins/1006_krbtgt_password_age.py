@@ -13,14 +13,20 @@ on every audit; the date only moves when the underlying attribute does.
 Severity and inclusion thresholds are unchanged. The day count is still
 reported in detail (password_age_days), which is not part of the
 finding's identity because object_guid is always set for this plugin.
+
+[v1.6] The domain krbtgt account is now identified by RID 502 (objectSid
+ending -502) instead of the sAMAccountName 'krbtgt' alone, and read-only
+DC krbtgt accounts (krbtgt_<number>, one per RODC, signing that RODC's
+tickets) are also covered. Summary for the domain krbtgt is unchanged;
+RODC krbtgt accounts read "RODC krbtgt account <name> ...".
 """
 
 PLUGIN = {
     "plugin_id": 1006,
     "category": "User Accounts",
     "name": "krbtgt Account Password Has Not Been Rotated Recently",
-    "version": "1.5",
-    "revision_date": "2026-10-03",
+    "version": "1.6",
+    "revision_date": "2026-10-04",
     "remediation": (
     'Reset the krbtgt password twice, waiting at least 10 hours between resets '
     "(confirmed directly against Microsoft's own AD Forest Recovery guidance; "
@@ -55,7 +61,10 @@ PLUGIN = {
         "(cryptographic exposure of the ticket-signing key), so no "
         "disabled-account severity adjustment applies here the way it "
         "does elsewhere; this account's disabled state is permanent and "
-        "normal, not a mitigation being evaluated."
+        "normal, not a mitigation being evaluated. Covers the domain "
+        "krbtgt account (RID 502) and each read-only DC's krbtgt_<number> "
+        "account (reset by resetting it directly or by re-creating the "
+        "RODC's account)."
     ),
     "base_severity": "medium",
     "query": """
@@ -67,17 +76,27 @@ PLUGIN = {
             NULL AS tool_severity,
             NULL AS tool_reference,
             'medium' AS fd_severity,
-            'krbtgt account password has not been changed since '
+            (CASE WHEN o.object_sid LIKE '%%-502' THEN 'krbtgt account'
+                  ELSE 'RODC krbtgt account ' || COALESCE(u.sam_account_name, u.object_guid::text)
+             END)
+                || ' password has not been changed since '
                 || to_char(u.pwd_last_set AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS summary,
             jsonb_build_object(
                 'sam_account_name', u.sam_account_name,
+                'object_sid', o.object_sid,
+                'is_rodc_krbtgt', o.object_sid IS DISTINCT FROM NULL AND o.object_sid NOT LIKE '%%-502',
                 'pwd_last_set', u.pwd_last_set,
                 'password_age_days', EXTRACT(DAY FROM now() - u.pwd_last_set)::int
             ) AS detail
         FROM ad_user u
+        JOIN directory_object o
+            ON o.object_guid = u.object_guid AND o.client_id = u.client_id
         WHERE u.valid_to IS NULL
           AND u.client_id = %(client_id)s
-          AND u.sam_account_name = 'krbtgt'
+          -- [v1.6] domain krbtgt by RID 502; RODC krbtgt_<number> by name
+          -- (their RIDs are ordinary).
+          AND (o.object_sid LIKE '%%-502'
+               OR u.sam_account_name ~ '^krbtgt_[0-9]+$')
           AND u.pwd_last_set IS NOT NULL
           AND u.pwd_last_set < now() - interval '180 days'
     """,

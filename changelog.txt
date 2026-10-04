@@ -9,6 +9,43 @@ the script's own docstring now keeps a one-line summary per entry, this
 file keeps the complete detail (root causes, what was verified, why a
 decision was made a particular way) for anyone who wants it.
 
+    0.5.15 - Requires schema v36 (schema_migration_v36.sql); run once with
+            --full-rescan afterwards so existing objects get the new
+            columns. Collector fixes found by the per-plugin review:
+            (1) RODCs counted as domain controllers. is_domain_controller
+            was SERVER_TRUST_ACCOUNT only; RODCs carry
+            PARTIAL_SECRETS_ACCOUNT instead and were treated as ordinary
+            computers (flagged for their default delegation and primary
+            group, skipped by DC checks). New ad_computer.is_read_only_dc.
+            (2) Primary-group membership recorded. primaryGroupID is never
+            listed in a group's member attribute, so Domain Users looked
+            empty, an FGPP applied to it covered nobody, and an account
+            whose primary group was privileged wasn't a member anywhere
+            membership is evaluated. Added to group_member_edge with
+            is_primary_group = TRUE. (3) ad_interval_to_seconds() keeps 0 as
+            0 for minPwdAge, lockoutDuration and the observation window (0
+            means "no limit" only for maxPwdAge); "minimum password age is
+            zero" could never be detected. (4) dNSProperty's
+            DSPROPERTY_ZONE_ALLOW_UPDATE is read as a single byte; requiring
+            four bytes made it NULL for every zone. (5) ad_domain.dns_root
+            holds the DNS name, not the DN. (6) Newly collected:
+            msPKI-RA-Signature and msPKI-Cert-Template-OID on templates,
+            msPKI-Cert-Template-OID/displayName on issuance policies (ESC13
+            matching), userPrincipalName on computers/gMSAs,
+            msDS-AllowedToActOnBehalfOfOtherIdentity on users (RBCD on
+            krbtgt). (7) Owners of every adminCount=1 user, group and
+            computer are read. (8) Constrained-delegation target SPNs
+            resolve through the default HOST alias set, as the KDC does, so
+            cifs/<host> on a computer registering only HOST/<host> is no
+            longer a "ghost" SPN. (9) Deny ACEs in an RBCD descriptor are
+            no longer recorded as delegation trustees. v_privileged_principal
+            now also counts an inherit-only ACE on the domain root (or an
+            OU above a DC) reaching computer objects as Tier 0 control
+            whenever some DC is not AdminSDHolder-protected. Trust objects
+            now also collect msDS-SupportedEncryptionTypes (plugin 7003).
+            Owners of certificate templates and CA objects are now stored
+            (their security descriptors were already read; the owner was
+            discarded).
     0.5.14 - Requires schema v35 (schema_migration_v35.sql, which only
             widens control_evidence_fact.change_status for adaudit.py).
             (1) Edge payload changes are now versioned. sync_edges()

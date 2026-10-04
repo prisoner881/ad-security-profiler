@@ -16,16 +16,23 @@ groups, DnsAdmins is NOT protected by AdminSDHolder/SDProp -- its ACL
 is not automatically reset to the protected-object template, so
 control over the group itself, not just membership in it, is a
 separate and equally real path worth investigating (though confirming
-that requires the group's own enrollment ACL, which is not yet
-collected by this project -- see this finding's description).
+that requires the group object's own ACL, which is not collected by this
+project -- see this finding's description).
+
+[v1.2] DnsAdmins has no fixed RID, so it is still found by name, but now
+case-insensitively or by its default description ("DNS Administrators
+Group"), which survives a rename. detail.effective_member_accounts lists
+the enabled users/computers holding the membership directly, through
+nested groups or through primaryGroupID; direct members fall back to SID.
+Corrected the "enrollment ACL" wording (an AD CS term).
 """
 
 PLUGIN = {
     "plugin_id": 3013,
     "category": "Groups",
     "name": "DnsAdmins Group Has Members",
-    "version": "1.1",
-    "revision_date": "2026-09-02",
+    "version": "1.2",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Review every member listed in this finding's evidence and "
         "confirm each one genuinely needs DNS administration rights. "
@@ -58,8 +65,9 @@ PLUGIN = {
         "SDProp the way Domain Admins and Enterprise Admins are, so "
         "control over the group object itself (not just membership) is "
         "a separate risk this finding cannot directly assess, since it "
-        "would require the group's own enrollment ACL -- not yet "
-        "collected by this project."
+        "would require the group object's own ACL -- not collected by "
+        "this project. DnsAdmins has no well-known RID; it is matched by "
+        "name (case-insensitive) or by its default description."
     ),
     "base_severity": "high",
     "query": """
@@ -73,18 +81,36 @@ PLUGIN = {
             'high' AS fd_severity,
             'DnsAdmins group has ' || g.member_count_direct || ' direct member(s)' AS summary,
             jsonb_build_object(
+                'sam_account_name', g.sam_account_name,
                 'member_count_direct', g.member_count_direct,
                 'members', (
-                    SELECT array_agg(mdo.sam_account_name ORDER BY mdo.sam_account_name)
+                    SELECT array_agg(COALESCE(mdo.sam_account_name, mdo.object_sid, mdo.object_guid::text)
+                                     ORDER BY COALESCE(mdo.sam_account_name, mdo.object_sid, mdo.object_guid::text))
                     FROM group_member_edge gme
                     JOIN directory_object mdo ON mdo.object_guid = gme.member_guid AND mdo.client_id = gme.client_id
                     WHERE gme.group_guid = g.object_guid AND gme.client_id = g.client_id AND gme.valid_to IS NULL
+                ),
+                'effective_member_accounts', (
+                    SELECT array_agg(n ORDER BY n) FROM (
+                        SELECT DISTINCT COALESCE(mdo.sam_account_name, mdo.object_sid, mdo.object_guid::text) AS n
+                        FROM v_effective_group_membership vem
+                        JOIN directory_object mdo
+                            ON mdo.object_guid = vem.member_guid AND mdo.client_id = vem.client_id
+                        LEFT JOIN ad_user u
+                            ON u.object_guid = vem.member_guid AND u.client_id = vem.client_id AND u.valid_to IS NULL
+                        LEFT JOIN ad_computer c
+                            ON c.object_guid = vem.member_guid AND c.client_id = vem.client_id AND c.valid_to IS NULL
+                        WHERE vem.group_guid = g.object_guid AND vem.client_id = g.client_id
+                          AND NOT mdo.is_deleted
+                          AND (u.is_enabled IS TRUE OR c.is_enabled IS TRUE)
+                    ) em
                 )
             ) AS detail
         FROM ad_group g
         WHERE g.valid_to IS NULL
           AND g.client_id = %(client_id)s
-          AND g.sam_account_name = 'DnsAdmins'
+          AND (lower(g.sam_account_name) = 'dnsadmins'
+               OR g.description = 'DNS Administrators Group')
           AND COALESCE(g.member_count_direct, 0) > 0
     """,
 }

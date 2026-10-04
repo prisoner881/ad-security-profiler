@@ -27,14 +27,29 @@ reported by 5003 until adprofiler.py's next run backfills the flag.
 One row per trustee: a trustee holding several such ACEs (different
 rights, or different object classes) gets one finding listing all of
 them, so the finding identity (the trustee's object_guid) is unique.
+
+[v1.1] Corrected the severity rationale above. SDProp protects only
+objects with adminCount = 1, and DC computer objects normally don't
+carry it -- their DACL inherits from the domain root through
+OU=Domain Controllers. A grant that reaches computer objects (all
+descendant classes, or the computer class) therefore reaches the DCs,
+and GenericAll/GenericWrite/WriteDacl/WriteOwner on a DC computer object
+(RBCD, shadow credentials) is domain compromise. Such a finding is now
+critical whenever some DC in the collection has adminCount other than 1
+(the same test v_privileged_principal applies since schema v36); it
+stays high otherwise, and for grants scoped to other classes.
+Collector caveat: adprofiler.py merges ACEs that differ only in
+inherited_object_type_guid into one edge with that column NULL, so two
+class-scoped delegations with the same mask can be reported as "all
+descendant objects" (and rated as reaching computers).
 """
 
 PLUGIN = {
     "plugin_id": 5010,
     "category": "ACLs",
     "name": "Broad Rights Over Descendant Objects Delegated at the Domain Root",
-    "version": "1.0",
-    "revision_date": "2026-10-03",
+    "version": "1.1",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Confirm the delegation is intended and scoped as narrowly as it "
         "can be. Prefer delegating on the specific OU(s) holding the "
@@ -55,11 +70,14 @@ PLUGIN = {
     "description": (
         "Flags GenericAll, GenericWrite, WriteDacl and WriteOwner granted "
         "at the domain root as inherit-only, i.e. over all descendant "
-        "objects (or all descendants of one class) domain-wide. Excludes "
-        "the well-known expected holders (Domain Admins, Enterprise "
-        "Admins, Administrators, SYSTEM)."
+        "objects (or all descendants of one class) domain-wide. Critical "
+        "when the grant reaches computer objects and some domain "
+        "controller's computer object is not AdminSDHolder-protected "
+        "(adminCount <> 1), so it inherits the grant; high otherwise. "
+        "Excludes the well-known expected holders (Domain Admins, "
+        "Enterprise Admins, Administrators, SYSTEM)."
     ),
-    "base_severity": "high",
+    "base_severity": "critical",
     "query": """
         WITH expected_holders AS (
             SELECT do2.object_guid
@@ -87,7 +105,10 @@ PLUGIN = {
                        WHEN 'bf967aa5-0de6-11d0-a285-00aa003049e2' THEN 'Organizational Unit'
                        WHEN '7b8b558a-93a5-4af7-adca-c017e67f1057' THEN 'Group Managed Service Account'
                        ELSE NULL
-                   END AS class_name
+                   END AS class_name,
+                   -- [v1.1] reaches computer objects (and so DC computer objects)
+                   (a.inherited_object_type_guid IS NULL
+                    OR a.inherited_object_type_guid = 'bf967a86-0de6-11d0-a285-00aa003049e2') AS reaches_computers
             FROM acl_edge a
             JOIN ad_domain d
                 ON d.object_guid = a.object_guid AND d.client_id = a.client_id
@@ -116,6 +137,19 @@ PLUGIN = {
                        ELSE 'all descendant objects of class ' || da.inherited_object_type_guid
                    END AS scope_label
             FROM descendant_aces da
+        ),
+        -- [v1.1] SDProp only shields DC computer objects that are
+        -- AdminSDHolder-protected (adminCount = 1). If any DC isn't, its
+        -- computer object inherits these ACEs: RBCD / shadow credentials
+        -- on a DC is domain compromise. Same test v_privileged_principal
+        -- uses for inherit-only root ACEs (schema v36).
+        unprotected_dc AS (
+            SELECT EXISTS (
+                SELECT 1 FROM ad_computer dc
+                WHERE dc.client_id = %(client_id)s AND dc.valid_to IS NULL
+                  AND dc.is_domain_controller
+                  AND dc.admin_count IS DISTINCT FROM 1
+            ) AS present
         )
         SELECT
             'fail' AS status,
@@ -124,7 +158,8 @@ PLUGIN = {
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
-            'high' AS fd_severity,
+            CASE WHEN bool_or(l.reaches_computers) AND bool_or(ud.present)
+                 THEN 'critical' ELSE 'high' END AS fd_severity,
             'Principal ' || COALESCE(do2.sam_account_name, l.trustee_sid)
                 || ' holds, via the domain root, '
                 || string_agg(DISTINCT l.rights_label || ' over ' || l.scope_label, '; '
@@ -139,9 +174,12 @@ PLUGIN = {
                     'applies_to', l.scope_label,
                     'inherited_object_type_guid', l.inherited_object_type_guid,
                     'access_mask', l.access_mask
-                ))
+                )),
+                'reaches_computer_objects', bool_or(l.reaches_computers),
+                'unprotected_domain_controller_present', bool_or(ud.present)
             ) AS detail
         FROM labelled l
+        CROSS JOIN unprotected_dc ud
         JOIN directory_object do2
             ON do2.object_sid = l.trustee_sid AND do2.client_id = %(client_id)s
            AND NOT do2.is_deleted

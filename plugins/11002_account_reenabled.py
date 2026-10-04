@@ -47,14 +47,21 @@ have been written by a run after it (directory_object_version
 .run_id_valid_from). An account that did not exist at the previous run has
 no prior state and is not reported, so newly created enabled accounts never
 appear here; that remains the job of the new-account plugins.
+
+[v1.2] Privilege now also counts Tier 0 privilege that is not group
+membership (Tier 0 ACL control, DCSync, Tier 0 ownership, directly or via a
+group, per v_privileged_principal) -- such accounts are critical too. An
+account whose only marker is adminCount=1 (sticky: it stays set after the
+account leaves its protected groups) is now high rather than critical,
+with the summary wording unchanged. Computer accounts are out of scope.
 """
 
 PLUGIN = {
     "plugin_id": 11002,
     "category": "Change Detection",
     "name": "Account Re-Enabled Since Previous Collection Run",
-    "version": "1.1",
-    "revision_date": "2026-10-03",
+    "version": "1.2",
+    "revision_date": "2026-10-04",
     "remediation": (
         "For each account, establish who re-enabled it and why, and "
         "confirm it against a ticket or documented request before "
@@ -96,9 +103,10 @@ PLUGIN = {
         "disabled AD-synced account to reach the organization's cloud "
         "tenant. Re-enabling accounts is also legitimate and common, "
         "so this is reported as a warning for reconciliation against "
-        "change records. Severity is raised when the account holds "
-        "privilege, and raised further when the account had been "
-        "dormant. Each re-enable is reported once, by the first run after "
+        "change records. Severity is critical when the account holds "
+        "Tier 0 privilege (privileged group membership or "
+        "v_privileged_principal), high when it only carries the sticky "
+        "adminCount=1 marker or had been dormant. Each re-enable is reported once, by the first run after "
         "the previous successful collection that observes it; accounts "
         "created since that collection are not reported. Suppressed on a "
         "client's first collection run."
@@ -138,6 +146,15 @@ PLUGIN = {
             JOIN privileged_roots pr ON pr.object_guid = vem.group_guid
             WHERE vem.client_id = %(client_id)s
             GROUP BY vem.member_guid
+        ),
+        tier0_other AS (
+            -- [v1.2] Tier 0 privilege other than protected-group membership.
+            SELECT pp.object_guid,
+                   array_agg(DISTINCT pp.privilege_source ORDER BY pp.privilege_source) AS sources
+            FROM v_privileged_principal pp
+            WHERE pp.client_id = %(client_id)s
+              AND pp.privilege_source <> 'protected_group_member'
+            GROUP BY pp.object_guid
         ),
         transitions AS (
             SELECT u.object_guid, u.client_id, u.sam_account_name,
@@ -195,7 +212,8 @@ PLUGIN = {
             NULL AS tool_severity,
             NULL AS tool_reference,
             CASE
-                WHEN pm.via_groups IS NOT NULL OR t.admin_count = 1 THEN 'critical'
+                WHEN pm.via_groups IS NOT NULL OR t0.sources IS NOT NULL THEN 'critical'
+                WHEN t.admin_count = 1 THEN 'high'
                 WHEN t.last_logon_timestamp IS NULL
                      OR t.last_logon_timestamp < now() - interval '180 days' THEN 'high'
                 ELSE 'medium'
@@ -206,6 +224,9 @@ PLUGIN = {
                        WHEN pm.via_groups IS NOT NULL
                            THEN ' and is an effective member of '
                                 || array_to_string(pm.via_groups, ', ')
+                       WHEN t0.sources IS NOT NULL
+                           THEN ' and holds Tier 0 privilege ('
+                                || array_to_string(t0.sources, ', ') || ')'
                        WHEN t.admin_count = 1
                            THEN ' and carries the AdminSDHolder protection marker'
                        ELSE ''
@@ -221,6 +242,7 @@ PLUGIN = {
                 'baseline_run_id', t.baseline_run_id,
                 'admin_count', t.admin_count,
                 'privileged_via_groups', pm.via_groups,
+                'tier0_privilege_sources', t0.sources,
                 'service_principal_names', t.service_principal_names,
                 'pwd_last_set', t.pwd_last_set,
                 'last_logon_timestamp', t.last_logon_timestamp,
@@ -234,5 +256,6 @@ PLUGIN = {
         JOIN directory_object do2
             ON do2.object_guid = t.object_guid AND do2.client_id = t.client_id
         LEFT JOIN privileged_members pm ON pm.member_guid = t.object_guid
+        LEFT JOIN tier0_other t0 ON t0.object_guid = t.object_guid
     """,
 }

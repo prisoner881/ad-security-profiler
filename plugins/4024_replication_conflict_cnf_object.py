@@ -18,16 +18,22 @@ universally collected for every object -- no new collector work
 needed. This catches the well-documented, most common conflict
 signature; a minority of conflicts instead surface as a duplicate
 sAMAccountName or a $DUPLICATE-<hex RID> value with no CNF: marker at
-all, which this plugin does not attempt to detect -- a known,
-documented gap rather than a silent one.
+all, which plugin 4016 detects instead.
+
+[v1.1] The CNF: marker is now matched only in the object's own RDN (the
+text before the first unescaped comma). v1.0 matched it anywhere in the
+DN, so every healthy child of a conflict-renamed OU/container was
+reported as a conflict object too. Responsibilities with plugin 4016 are
+now split: 4024 reports CNF:-renamed RDNs, 4016 reports $DUPLICATE-
+sAMAccountNames, so no object is reported twice.
 """
 
 PLUGIN = {
     "plugin_id": 4024,
     "category": "Domain",
     "name": "Replication Conflict (CNF:) Object Present",
-    "version": "1.0",
-    "revision_date": "2026-08-05",
+    "version": "1.1",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Investigate why the conflict occurred -- most commonly two "
         "DCs creating/renaming an object with the same name in the "
@@ -52,7 +58,8 @@ PLUGIN = {
          "url": "https://learn.microsoft.com/en-us/answers/questions/101494/all-about-active-directory-cnf-object-finding-vali"},
     ],
     "description": (
-        "An object's distinguished name contains a 'CNF:<GUID>' "
+        "An object's relative distinguished name (its own name, not "
+        "a parent container's) contains a 'CNF:<GUID>' "
         "conflict-resolution marker, meaning two domain controllers "
         "created or renamed an object to the same name in the same "
         "container before replicating with each other. AD's own "
@@ -81,7 +88,11 @@ PLUGIN = {
             ) AS detail
         FROM directory_object do2
         WHERE do2.client_id = %(client_id)s
-          AND do2.dn_current LIKE '%%CNF:%%'
+          -- [v1.1] Anchor to the RDN: CNF: must appear before the first
+          -- unescaped comma, so children of a CNF-renamed container are
+          -- not reported. (Backslash escapes such as "\\," and "\\0A"
+          -- are consumed as a pair.)
+          AND do2.dn_current ~ '^([^,\\\\]|\\\\.)*CNF:'
           AND NOT COALESCE(do2.is_deleted, false)
     """,
 }

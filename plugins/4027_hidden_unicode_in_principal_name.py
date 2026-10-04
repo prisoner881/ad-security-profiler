@@ -54,14 +54,32 @@ The character list below is a well-established starting set, not the complete
 before being treated as exhaustive, since the domain controller's handling
 varies by character and by attribute. A finding here is reliable; an absence
 of findings is good evidence but not proof.
+
+[v1.1] Four corrections. (1) The distinguishedName branch now tests
+only the object's own RDN, not the full DN: v1.0 reported every
+descendant of an OU/container with an odd character in its name as
+well. (2) "critical" now requires an invisible (non-whitespace)
+character inside a UPN or SPN itself; v1.0 combined an invisible
+character anywhere (e.g. the DN) with a mere no-break space in the UPN.
+(3) U+200C ZWNJ, U+200E LRM, U+200F RLM and U+061C ALM are ordinary
+orthographic marks in Persian, Kurdish, Hebrew and Arabic text; when
+they occur in a value that contains Hebrew/Arabic-script letters, or
+only in the RDN, they are reported at medium (class "script_mark")
+rather than high. (4) The code-point list now also covers U+034F
+COMBINING GRAPHEME JOINER, U+17B4/17B5 Khmer inherent vowels, variation
+selectors U+FE00-FE0F and U+E0100-E01EF, tag characters U+E0000-E007F
+and musical-symbol formatting characters U+1D173-1D17A; the regex
+character classes are now generated from the single code-point table so
+they cannot drift apart. Computer (and gMSA) userPrincipalName values,
+collected since schema v36, are checked too.
 """
 
 PLUGIN = {
     "plugin_id": 4027,
     "category": "Domain",
     "name": "Hidden Unicode Characters in a Principal Name",
-    "version": "1.0",
-    "revision_date": "2026-09-29",
+    "version": "1.1",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Treat any high-severity hit as suspicious until explained. An "
         "invisible character in a logon name, distinguished name, UPN or SPN "
@@ -111,13 +129,15 @@ PLUGIN = {
         "Detection is performed against the collected values in the database "
         "rather than over LDAP, because the domain controller's own string "
         "comparison ignores many of these characters and cannot filter for "
-        "them reliably. Unusual whitespace is reported separately at lower "
-        "severity. Accented, CJK and other legitimate non-ASCII name "
-        "characters are not flagged."
+        "them reliably. Unusual whitespace, and directional/joiner marks "
+        "that occur in genuine right-to-left or Persian-script names, are "
+        "reported separately at lower severity. Only the object's own RDN "
+        "is examined for distinguishedName. Accented, CJK and other "
+        "legitimate non-ASCII name characters are not flagged."
     ),
     "base_severity": "high",
     "query": """
-        WITH cp (code, cp_name, cp_class) AS (
+        WITH cp_single (code, cp_name, cp_class) AS (
             VALUES
             -- Zero-width and formatting characters: no legitimate use.
             (   173, 'U+00AD SOFT HYPHEN',                    'invisible'),
@@ -170,7 +190,35 @@ PLUGIN = {
             (  8202, 'U+200A HAIR SPACE',                     'odd_space'),
             (  8239, 'U+202F NARROW NO-BREAK SPACE',          'odd_space'),
             (  8287, 'U+205F MEDIUM MATHEMATICAL SPACE',      'odd_space'),
-            ( 12288, 'U+3000 IDEOGRAPHIC SPACE',              'odd_space')
+            ( 12288, 'U+3000 IDEOGRAPHIC SPACE',              'odd_space'),
+            -- [v1.1] Further invisible / default-ignorable characters.
+            (   847, 'U+034F COMBINING GRAPHEME JOINER',      'invisible'),
+            (  6068, 'U+17B4 KHMER VOWEL INHERENT AQ',        'invisible'),
+            (  6069, 'U+17B5 KHMER VOWEL INHERENT AA',        'invisible')
+        ),
+        -- [v1.1] Ranges: variation selectors, tag characters and the
+        -- musical-symbol formatting characters.
+        cp AS (
+            SELECT * FROM cp_single
+            UNION ALL
+            SELECT g, 'U+' || upper(to_hex(g)) || ' VARIATION SELECTOR', 'invisible'
+            FROM generate_series(65024, 65039) g
+            UNION ALL
+            SELECT g, 'U+' || upper(to_hex(g)) || ' VARIATION SELECTOR SUPPLEMENT', 'invisible'
+            FROM generate_series(917760, 917999) g
+            UNION ALL
+            SELECT g, 'U+' || upper(to_hex(g)) || ' TAG CHARACTER', 'invisible'
+            FROM generate_series(917504, 917631) g
+            UNION ALL
+            SELECT g, 'U+' || upper(to_hex(g)) || ' MUSICAL SYMBOL FORMATTING', 'invisible'
+            FROM generate_series(119155, 119162) g
+        ),
+        -- [v1.1] Character classes generated from the table (none of the
+        -- listed characters is special inside a bracket expression).
+        pat AS (
+            SELECT '[' || string_agg(chr(code), '') || ']' AS any_cp,
+                   '[' || string_agg(chr(code), '') FILTER (WHERE cp_class <> 'odd_space') || ']' AS strip_cp
+            FROM cp
         ),
         target AS (
             SELECT do2.object_guid, do2.object_class, do2.dn_current,
@@ -182,8 +230,11 @@ PLUGIN = {
               AND NOT do2.is_deleted
               AND do2.sam_account_name IS NOT NULL
             UNION ALL
+            -- [v1.1] Own RDN only (text before the first unescaped comma),
+            -- so a character in a parent OU is not reported on every child.
             SELECT do2.object_guid, do2.object_class, do2.dn_current,
-                   do2.sam_account_name, 'distinguishedName', do2.dn_current
+                   do2.sam_account_name, 'distinguishedName',
+                   substring(do2.dn_current from '^(([^,\\\\]|\\\\.)*)')
             FROM directory_object do2
             WHERE do2.client_id = %(client_id)s
               AND NOT do2.is_deleted
@@ -193,15 +244,28 @@ PLUGIN = {
             FROM ad_user u
             JOIN directory_object do2
               ON do2.object_guid = u.object_guid AND do2.client_id = u.client_id
+             AND NOT do2.is_deleted
             WHERE u.client_id = %(client_id)s
               AND u.valid_to IS NULL
               AND u.user_principal_name IS NOT NULL
+            UNION ALL
+            -- [v1.1] computer / gMSA UPNs (collected since schema v36)
+            SELECT do2.object_guid, do2.object_class, do2.dn_current,
+                   do2.sam_account_name, 'userPrincipalName', c.user_principal_name
+            FROM ad_computer c
+            JOIN directory_object do2
+              ON do2.object_guid = c.object_guid AND do2.client_id = c.client_id
+             AND NOT do2.is_deleted
+            WHERE c.client_id = %(client_id)s
+              AND c.valid_to IS NULL
+              AND c.user_principal_name IS NOT NULL
             UNION ALL
             SELECT do2.object_guid, do2.object_class, do2.dn_current,
                    do2.sam_account_name, 'servicePrincipalName', se.spn
             FROM spn_edge se
             JOIN directory_object do2
               ON do2.object_guid = se.object_guid AND do2.client_id = se.client_id
+             AND NOT do2.is_deleted
             WHERE se.client_id = %(client_id)s
               AND se.valid_to IS NULL
               AND se.spn IS NOT NULL
@@ -209,17 +273,22 @@ PLUGIN = {
         -- Cheap pre-filter so the per-code-point breakdown only runs on the
         -- handful of values that actually contain something.
         flagged AS (
-            SELECT * FROM target
-            WHERE val ~ (U&'[\\00AD\\00A0\\061C\\115F\\1160\\180E\\200B\\200C\\200D'
-                            '\\200E\\200F\\2000\\2001\\2002\\2003\\2004\\2005\\2006'
-                            '\\2007\\2008\\2009\\200A\\2028\\2029\\202A\\202B\\202C'
-                            '\\202D\\202E\\202F\\205F\\2060\\2061\\2062\\2063\\2064'
-                            '\\2066\\2067\\2068\\2069\\3000\\3164\\FEFF\\FFA0\\FFF9'
-                            '\\FFFA\\FFFB]')
+            SELECT t.* FROM target t
+            WHERE t.val ~ (SELECT any_cp FROM pat)
         ),
         hit AS (
             SELECT f.object_guid, f.object_class, f.dn_current, f.obj_label,
-                   f.attribute, f.val, cp.code, cp.cp_name, cp.cp_class,
+                   f.attribute, f.val, cp.code, cp.cp_name,
+                   -- [v1.1] ZWNJ / LRM / RLM / ALM are orthographic marks in
+                   -- Hebrew, Arabic and Persian-script text: medium when the
+                   -- value contains such letters, or when only in the RDN.
+                   CASE
+                       WHEN cp.code IN (1564, 8204, 8206, 8207)
+                        AND (f.attribute = 'distinguishedName'
+                             OR f.val ~ U&'[\\0590-\\08FF\\FB1D-\\FDFF\\FE70-\\FEFC]')
+                       THEN 'script_mark'
+                       ELSE cp.cp_class
+                   END AS cp_class,
                    strpos(f.val, chr(cp.code)) AS char_offset
             FROM flagged f
             JOIN cp ON strpos(f.val, chr(cp.code)) > 0
@@ -229,9 +298,12 @@ PLUGIN = {
                    min(object_class::text) AS object_class,
                    min(dn_current) AS dn_current,
                    min(obj_label) AS obj_label,
-                   bool_or(cp_class <> 'odd_space') AS has_invisible,
-                   bool_or(attribute IN ('userPrincipalName',
-                                         'servicePrincipalName')) AS affects_auth_name,
+                   bool_or(cp_class NOT IN ('odd_space', 'script_mark')) AS has_invisible,
+                   bool_or(cp_class = 'script_mark') AS has_script_mark,
+                   -- [v1.1] per-hit: an invisible character IN a UPN/SPN
+                   bool_or(cp_class NOT IN ('odd_space', 'script_mark')
+                           AND attribute IN ('userPrincipalName',
+                                             'servicePrincipalName')) AS affects_auth_name,
                    count(*) AS hit_count,
                    jsonb_agg(DISTINCT jsonb_build_object(
                        'attribute', attribute,
@@ -239,23 +311,9 @@ PLUGIN = {
                        'class', cp_class,
                        'offset', char_offset,
                        'rendered',
-                           regexp_replace(
-                               val,
-                               U&'[\\00AD\\00A0\\061C\\115F\\1160\\180E\\200B\\200C'
-                                  '\\200D\\200E\\200F\\2000\\2001\\2002\\2003\\2004'
-                                  '\\2005\\2006\\2007\\2008\\2009\\200A\\2028\\2029'
-                                  '\\202A\\202B\\202C\\202D\\202E\\202F\\205F\\2060'
-                                  '\\2061\\2062\\2063\\2064\\2066\\2067\\2068\\2069'
-                                  '\\3000\\3164\\FEFF\\FFA0\\FFF9\\FFFA\\FFFB]',
-                               '<?>', 'g'),
+                           regexp_replace(val, (SELECT any_cp FROM pat), '<?>', 'g'),
                        'stripped',
-                           regexp_replace(
-                               val,
-                               U&'[\\00AD\\061C\\115F\\1160\\180E\\200B\\200C\\200D'
-                                  '\\200E\\200F\\2028\\2029\\202A\\202B\\202C\\202D'
-                                  '\\202E\\2060\\2061\\2062\\2063\\2064\\2066\\2067'
-                                  '\\2068\\2069\\3164\\FEFF\\FFA0\\FFF9\\FFFA\\FFFB]',
-                               '', 'g')
+                           regexp_replace(val, (SELECT strip_cp FROM pat), '', 'g')
                    )) AS occurrences
             FROM hit
             GROUP BY object_guid
@@ -268,13 +326,16 @@ PLUGIN = {
             NULL AS tool_severity,
             NULL AS tool_reference,
             CASE
-                WHEN a.has_invisible AND a.affects_auth_name THEN 'critical'
+                WHEN a.affects_auth_name THEN 'critical'
                 WHEN a.has_invisible THEN 'high'
                 ELSE 'medium'
             END AS fd_severity,
             CASE WHEN a.has_invisible
                  THEN 'Object "' || COALESCE(a.obj_label, a.dn_current)
                       || '" contains invisible Unicode characters in '
+                 WHEN a.has_script_mark
+                 THEN 'Object "' || COALESCE(a.obj_label, a.dn_current)
+                      || '" contains directional or joiner marks (common in right-to-left or Persian-script names) in '
                  ELSE 'Object "' || COALESCE(a.obj_label, a.dn_current)
                       || '" contains unusual whitespace characters in '
             END
@@ -282,7 +343,7 @@ PLUGIN = {
                     FROM jsonb_array_elements(a.occurrences) AS o)
                 || ' -- the name renders identically to a legitimate one in '
                    'native tooling'
-                || CASE WHEN a.affects_auth_name AND a.has_invisible
+                || CASE WHEN a.affects_auth_name
                         THEN ', and an authentication name is affected '
                              '(see CVE-2026-25177 / CVE-2026-27912)'
                         ELSE '' END AS summary,
@@ -291,6 +352,7 @@ PLUGIN = {
                 'distinguished_name', a.dn_current,
                 'object_class', a.object_class,
                 'contains_invisible_characters', a.has_invisible,
+                'contains_script_marks', a.has_script_mark,
                 'affects_authentication_name', a.affects_auth_name,
                 'occurrence_count', a.hit_count,
                 'occurrences', a.occurrences,

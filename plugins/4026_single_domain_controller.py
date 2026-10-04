@@ -20,14 +20,24 @@ accordingly: PASS/FAIL here is about the count itself, and the
 STIG's specific applicability condition (does moderate/high
 Availability categorization apply here) is left for the reviewer to
 resolve using the reported count as their evidence.
+
+[v1.1] Counts writable DCs only. Since schema v36 is_domain_controller
+also covers read-only DCs, which would have hidden a single writable DC
+behind an RODC (an RODC is no substitute for a second writable DC).
+Also no longer counts stale DC objects: a writable DC counts as active
+when it is enabled and its lastLogonTimestamp is within 30 days of the
+collection run (lastLogonTimestamp lags up to ~14 days). The finding is
+raised when there is exactly one writable DC object, or when there are
+several but only one is active (e.g. a decommissioned DC whose metadata
+was never cleaned up). The detail lists the DCs.
 """
 
 PLUGIN = {
     "plugin_id": 4026,
     "category": "Domain",
     "name": "Domain Is Supported by Only One Domain Controller",
-    "version": "1.0",
-    "revision_date": "2026-08-12",
+    "version": "1.1",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Deploy at least one additional domain controller for this "
         "domain. A single domain controller is a single point of "
@@ -50,17 +60,40 @@ PLUGIN = {
         "with a moderate or high Availability categorization must be "
         "supported by more than one domain controller. This project "
         "has no visibility into a domain's formal RMF categorization, "
-        "so this is reported whenever only one DC exists, regardless "
+        "so this is reported whenever only one writable DC exists (or "
+        "only one is active -- enabled and logged on within 30 days; "
+        "read-only DCs are not counted), regardless "
         "of category -- a single DC is a real resilience risk on its "
         "own merits, and the categorization question is left for the "
         "reviewer to resolve using this finding as evidence."
     ),
     "base_severity": "medium",
     "query": """
-        WITH dc_count AS (
-            SELECT count(*) AS n
+        WITH run AS (
+            SELECT COALESCE(sr.completed_at, sr.started_at) AS run_ts
+            FROM sync_run sr
+            WHERE sr.client_id = %(client_id)s AND sr.run_id = %(run_id)s
+        ),
+        wdc AS (
+            -- [v1.1] writable DCs only (RODCs excluded); active = enabled
+            -- and lastLogonTimestamp within 30 days of the run.
+            SELECT c.object_guid,
+                   COALESCE(c.dns_hostname, c.sam_account_name, c.object_guid::text) AS name,
+                   (c.is_enabled IS NOT FALSE
+                    AND c.last_logon_timestamp IS NOT NULL
+                    AND c.last_logon_timestamp >= (SELECT run_ts FROM run) - interval '30 days') AS is_active
             FROM ad_computer c
-            WHERE c.client_id = %(client_id)s AND c.valid_to IS NULL AND c.is_domain_controller
+            WHERE c.client_id = %(client_id)s
+              AND c.valid_to IS NULL
+              AND c.is_domain_controller
+              AND NOT c.is_read_only_dc
+        ),
+        dc_count AS (
+            SELECT count(*) AS n,
+                   count(*) FILTER (WHERE is_active) AS n_active,
+                   COALESCE(jsonb_agg(jsonb_build_object('name', name, 'active', is_active)
+                                      ORDER BY lower(name), name), '[]'::jsonb) AS dcs
+            FROM wdc
         )
         SELECT
             'warn' AS status,
@@ -73,11 +106,16 @@ PLUGIN = {
             'medium' AS fd_severity,
             'Domain ' || COALESCE(d.dns_root, '(this domain)')
                 || ' is supported by only one domain controller' AS summary,
-            jsonb_build_object('dns_root', d.dns_root, 'domain_controller_count', dc.n) AS detail
+            jsonb_build_object(
+                'dns_root', d.dns_root,
+                'domain_controller_count', dc.n,
+                'active_domain_controller_count', dc.n_active,
+                'writable_domain_controllers', dc.dcs
+            ) AS detail
         FROM ad_domain d
         CROSS JOIN dc_count dc
         WHERE d.valid_to IS NULL
           AND d.client_id = %(client_id)s
-          AND dc.n = 1
+          AND (dc.n = 1 OR dc.n_active = 1)
     """,
 }

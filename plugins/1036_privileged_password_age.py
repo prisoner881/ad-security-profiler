@@ -39,14 +39,23 @@ Protected-group membership, control of or ownership of a Tier 0 object
 (domain root, AdminSDHolder, DCs, CAs, ...), DCSync, and membership in a
 group holding any of those still count. detail gains privilege_sources
 (the view's reasons, sorted); summary wording is unchanged.
+
+[v1.3] "Privileged" is v_privileged_principal only: adminCount=1 is
+never cleared when an account leaves a protected group (plugin 1025
+reports those stale markers), so former admins were reported as
+privileged. admin_count stays in detail. pwdLastSet = 0 ("must change
+password at next logon") reaches the database as 1601-01-01 (ldap3
+converts it before the collector sees it) and was reported as "not
+rotated since 1601-01-01"; such accounts are now skipped -- the old
+password cannot be used to log on until it is changed.
 """
 
 PLUGIN = {
     "plugin_id": 1036,
     "category": "User Accounts",
     "name": "Privileged Account Password Has Not Rotated in Over 3 Years",
-    "version": "1.2",
-    "revision_date": "2026-10-03",
+    "version": "1.3",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Rotate this account's password now, regardless of whether its "
         "expiration policy currently permits it to remain unchanged. A "
@@ -115,8 +124,10 @@ PLUGIN = {
         LEFT JOIN privileged_check pc ON pc.object_guid = u.object_guid
         WHERE u.client_id = %(client_id)s
           AND u.valid_to IS NULL
-          AND (u.admin_count = 1 OR pc.object_guid IS NOT NULL)
+          AND pc.object_guid IS NOT NULL   -- [v1.3] not stale adminCount
           AND u.pwd_last_set IS NOT NULL
+          -- [v1.3] pwdLastSet = 0 arrives as the FILETIME epoch 1601-01-01.
+          AND u.pwd_last_set > TIMESTAMPTZ '1601-01-02 00:00:00+00'
           AND u.pwd_last_set < now() - INTERVAL '1095 days'
           AND u.is_enabled
     """,

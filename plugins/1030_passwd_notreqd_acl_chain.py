@@ -24,14 +24,23 @@ WriteDacl/WriteOwner (raw bits are still matched too). Inherit-only ACEs
 the object they are stored on, only on its descendants. Also requires
 the trustee to actually hold DCSync or a dangerous right: any allow ACE
 on those objects used to produce a finding.
+
+[v1.3] "DCSync" now matches v_privileged_principal: CONTROL_ACCESS on
+the domain root itself with BOTH Get-Changes and Get-Changes-All, or All
+Extended Rights / GenericAll. v1.2 counted either replication right on
+its own, and on AdminSDHolder too (where replication rights mean
+nothing), and missed All Extended Rights. Severity is 'critical' for
+DCSync, GenericAll, WriteDacl or WriteOwner and 'high' when the only
+right is GenericWrite (writes attributes, not the ACL), as in 1027/1029.
+The ad_domain test is client-scoped and the redundant DISTINCT is gone.
 """
 
 PLUGIN = {
     "plugin_id": 1030,
     "category": "User Accounts",
     "name": "Password-Not-Required User Account Directly Holds DCSync or Dangerous ACL Rights",
-    "version": "1.2",
-    "revision_date": "2026-10-03",
+    "version": "1.3",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Verify immediately whether this account currently has a blank "
         "password (attempt authentication with an empty password in a "
@@ -57,42 +66,70 @@ PLUGIN = {
         "will accept an empty password) AND directly holds either "
         "DCSync replication rights or dangerous rights (GenericAll/"
         "GenericWrite/WriteDacl/WriteOwner) on the domain root or "
-        "AdminSDHolder. If the password is genuinely blank, this "
+        "AdminSDHolder (GenericWrite alone, which cannot rewrite the "
+        "ACL, is rated high instead of critical). If the password is genuinely blank, this "
         "requires no cracking, no offline attack, and no prior access "
         "of any kind -- arguably the lowest-effort complete path to "
         "domain compromise this project can detect."
     ),
     "base_severity": "critical",
     "query": """
-        WITH acl_holders AS (
-            SELECT DISTINCT do2.object_guid,
-                   bool_or(a.object_type_guid IN ('1131f6aa-9c07-11d1-f79f-00c04fc2dcd2',
-                                                   '1131f6ad-9c07-11d1-f79f-00c04fc2dcd2')) AS has_dcsync,
-                   bool_or((a.access_mask & (268435456 | 1073741824 | 262144 | 524288)) != 0
-                           OR (a.access_mask & 983551) = 983551                    -- GenericAll, as stored
-                           OR ((a.access_mask & 32) <> 0 AND a.object_type_guid IS NULL)  -- GenericWrite, as stored
-                           ) AS has_dangerous
+        WITH secured_ace AS (
+            SELECT a.trustee_sid, a.access_mask, a.object_type_guid,
+                   EXISTS (SELECT 1 FROM ad_domain d
+                            WHERE d.object_guid = a.object_guid AND d.client_id = a.client_id
+                              AND d.valid_to IS NULL) AS is_domain_root
             FROM acl_edge a
             JOIN directory_object secured
                 ON secured.object_guid = a.object_guid AND secured.client_id = a.client_id
-            JOIN directory_object do2 ON do2.object_sid = a.trustee_sid AND do2.client_id = a.client_id
             WHERE a.client_id = %(client_id)s
               AND a.valid_to IS NULL
               AND a.ace_type = 'allow'
               AND a.inherit_only IS NOT TRUE   -- [v1.2] inherit-only: grants nothing on this object
               AND (
-                    secured.dn_current ILIKE 'CN=AdminSDHolder,%%'
-                    OR EXISTS (SELECT 1 FROM ad_domain d WHERE d.object_guid = secured.object_guid AND d.valid_to IS NULL)
+                    secured.dn_current ILIKE 'CN=AdminSDHolder,CN=System,%%'
+                    OR EXISTS (SELECT 1 FROM ad_domain d
+                                WHERE d.object_guid = secured.object_guid
+                                  AND d.client_id = secured.client_id AND d.valid_to IS NULL)
                   )
-            GROUP BY do2.object_guid
+        ),
+        acl_flags AS (
+            SELECT sa.trustee_sid,
+                   -- [v1.3] DCSync exactly as v_privileged_principal defines
+                   -- it: on the domain root only, CONTROL_ACCESS (0x100) with
+                   -- BOTH Get-Changes and Get-Changes-All, or All Extended
+                   -- Rights (null object type; GenericAll includes it).
+                   (bool_or(sa.is_domain_root AND (sa.access_mask & 256) <> 0
+                            AND sa.object_type_guid IS NULL)
+                    OR (bool_or(sa.is_domain_root AND (sa.access_mask & 256) <> 0
+                                AND sa.object_type_guid = '1131f6aa-9c07-11d1-f79f-00c04fc2dcd2')
+                        AND bool_or(sa.is_domain_root AND (sa.access_mask & 256) <> 0
+                                    AND sa.object_type_guid = '1131f6ad-9c07-11d1-f79f-00c04fc2dcd2')))
+                       AS has_dcsync,
+                   -- Rights that let the holder rewrite the ACL.
+                   bool_or((sa.access_mask & (268435456 | 262144 | 524288)) <> 0
+                           OR (sa.access_mask & 983551) = 983551) AS has_acl_rewrite,
+                   bool_or((sa.access_mask & (268435456 | 1073741824 | 262144 | 524288)) != 0
+                           OR (sa.access_mask & 983551) = 983551                    -- GenericAll, as stored
+                           OR ((sa.access_mask & 32) <> 0 AND sa.object_type_guid IS NULL)  -- GenericWrite, as stored
+                           ) AS has_dangerous
+            FROM secured_ace sa
+            GROUP BY sa.trustee_sid
+        ),
+        acl_holders AS (
+            SELECT do2.object_guid,
+                   bool_or(f.has_dcsync) AS has_dcsync,
+                   bool_or(f.has_acl_rewrite) AS has_acl_rewrite,
+                   bool_or(f.has_dangerous) AS has_dangerous
+            FROM acl_flags f
+            JOIN directory_object do2
+                ON do2.object_sid = f.trustee_sid AND do2.client_id = %(client_id)s
+               AND NOT do2.is_deleted
             -- [v1.2] Only trustees that hold one of the two; before, any
             -- allow ACE at all on the domain root/AdminSDHolder (e.g. a
             -- read grant) produced a finding labelled 'dangerous ACL rights'.
-            HAVING bool_or(a.object_type_guid IN ('1131f6aa-9c07-11d1-f79f-00c04fc2dcd2',
-                                                   '1131f6ad-9c07-11d1-f79f-00c04fc2dcd2'))
-                OR bool_or((a.access_mask & (268435456 | 1073741824 | 262144 | 524288)) != 0
-                           OR (a.access_mask & 983551) = 983551
-                           OR ((a.access_mask & 32) <> 0 AND a.object_type_guid IS NULL))
+            WHERE f.has_dcsync OR f.has_dangerous
+            GROUP BY do2.object_guid
         )
         SELECT
             'fail' AS status,
@@ -101,7 +138,8 @@ PLUGIN = {
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
-            'critical' AS fd_severity,
+            -- [v1.3] GenericWrite alone (no DCSync, no ACL rewrite): 'high'.
+            CASE WHEN ah.has_dcsync OR ah.has_acl_rewrite THEN 'critical' ELSE 'high' END AS fd_severity,
             'User Account ' || COALESCE(u.user_principal_name, u.sam_account_name)
                 || ' does not require a password (PASSWD_NOTREQD) AND directly holds '
                 || (CASE WHEN ah.has_dcsync AND ah.has_dangerous THEN 'DCSync rights and dangerous ACL rights'
@@ -111,7 +149,8 @@ PLUGIN = {
             jsonb_build_object(
                 'sam_account_name', u.sam_account_name,
                 'has_dcsync', ah.has_dcsync,
-                'has_dangerous', ah.has_dangerous
+                'has_dangerous', ah.has_dangerous,
+                'has_acl_rewrite', ah.has_acl_rewrite
             ) AS detail
         FROM ad_user u
         JOIN acl_holders ah ON ah.object_guid = u.object_guid

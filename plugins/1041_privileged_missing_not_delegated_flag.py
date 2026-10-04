@@ -38,14 +38,23 @@ not privileged (plugin 1025 reports the stale marker). Carried over:
 the `Set-ADAccountControl -AccountNotDelegated $true` remediation and
 the MITRE ATT&CK T1558 reference. Query, summary and severity are
 unchanged, so existing 1041 findings do not churn.
+
+[v1.4] An account that is an effective (nested) member of Protected
+Users (RID 525), or carries the direct memberOf flag, already cannot be
+delegated (KDC-enforced, 2012 R2+ DCs), so "can be delegated" was false
+for it. It is still reported -- the STIG asks for the flag itself, and
+the protection disappears if the account leaves the group -- but at
+'low' and worded "lacks the NOT_DELEGATED flag (delegation currently
+blocked only by Protected Users membership)". detail gains
+protected_users_member.
 """
 
 PLUGIN = {
     "plugin_id": 1041,
     "category": "User Accounts",
     "name": "Privileged Account Missing the \"Cannot Be Delegated\" Protection Flag",
-    "version": "1.3",
-    "revision_date": "2026-10-03",
+    "version": "1.4",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Set the flag: check \"This account is sensitive and cannot be "
         "delegated\" on the account's Account tab, or run "
@@ -95,6 +104,15 @@ PLUGIN = {
             FROM v_privileged_principal
             WHERE client_id = %(client_id)s
             GROUP BY object_guid
+        ),
+        protected_users_members AS (
+            -- [v1.4] Same test as plugin 1040: effective membership in
+            -- Protected Users (RID 525).
+            SELECT DISTINCT vem.member_guid AS object_guid
+            FROM v_effective_group_membership vem
+            JOIN directory_object pu ON pu.object_guid = vem.group_guid AND pu.client_id = vem.client_id
+            WHERE vem.client_id = %(client_id)s
+              AND pu.object_sid LIKE '%%-525'
         )
         SELECT
             'warn' AS status,
@@ -103,19 +121,25 @@ PLUGIN = {
             'DISA Active Directory Domain STIG V-243470' AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
-            'medium' AS fd_severity,
+            CASE WHEN pum.object_guid IS NOT NULL OR u.protected_users_member THEN 'low'
+                 ELSE 'medium' END AS fd_severity,
             'Privileged User Account ' || COALESCE(u.user_principal_name, u.sam_account_name)
-                || ' can be delegated (NOT_DELEGATED flag not set)' AS summary,
+                || CASE WHEN pum.object_guid IS NOT NULL OR u.protected_users_member
+                        THEN ' lacks the NOT_DELEGATED flag (delegation currently blocked only by '
+                             'Protected Users membership)'
+                        ELSE ' can be delegated (NOT_DELEGATED flag not set)' END AS summary,
             jsonb_build_object(
                 'sam_account_name', u.sam_account_name,
                 'user_principal_name', u.user_principal_name,
                 'admin_count', u.admin_count,
                 'is_enabled', u.is_enabled,
-                'privilege_sources', pc.privilege_sources
+                'privilege_sources', pc.privilege_sources,
+                'protected_users_member', (pum.object_guid IS NOT NULL OR u.protected_users_member)
             ) AS detail
         FROM ad_user u
         JOIN directory_object udo ON udo.object_guid = u.object_guid AND udo.client_id = u.client_id
         JOIN privileged_check pc ON pc.object_guid = u.object_guid
+        LEFT JOIN protected_users_members pum ON pum.object_guid = u.object_guid
         WHERE u.client_id = %(client_id)s
           AND u.valid_to IS NULL
           AND u.is_enabled

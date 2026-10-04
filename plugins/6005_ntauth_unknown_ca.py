@@ -14,7 +14,7 @@ data) is one of two things: an orphaned entry left behind when a CA
 was decommissioned without the corresponding cleanup step (a real,
 well-documented gap -- uninstalling a CA only removes its
 pKIEnrollmentService object, not its NTAuthCertificates entry, per
-Microsoft's own guidance), or a "Golden Certificate"-class forgery:
+Microsoft's own guidance), or a rogue CA certificate:
 a certificate planted here specifically to be trusted for domain
 authentication without ever having been issued by a real, functioning
 CA in this forest.
@@ -25,14 +25,24 @@ own [MS-WCCE] specification confirms a pKIEnrollmentService object's
 cn is authoritatively set to the (sanitized) CN of its own CA
 certificate's Subject field -- the same value real Enterprise CAs
 themselves rely on to match certificate templates to the correct CA.
+
+[v1.2] The match now ignores case and also decodes the sanitized
+enrollment-service cn (characters such as # or & are stored as !0023 /
+!0026), so CAs whose names contain such characters are no longer false
+positives. A certificate without a subject CN gets its own reason
+instead of a NULL one that was silently dropped from the summary (the
+count and the listed reasons now always agree). "Golden Certificate"
+(a forged certificate signed with a stolen CA key) was the wrong term
+for a rogue CA certificate planted in NTAuth; the text now says rogue CA
+certificate.
 """
 
 PLUGIN = {
     "plugin_id": 6005,
     "category": "Certificate Services",
     "name": "Certificate Trusted for Domain Logon Traces to No Known Enterprise CA",
-    "version": "1.1",
-    "revision_date": "2026-07-31",
+    "version": "1.2",
+    "revision_date": "2026-10-04",
     "remediation": (
         "First confirm whether this is a currently-used third-party or "
         "cross-forest CA deliberately imported into NTAuthCertificates "
@@ -62,14 +72,14 @@ PLUGIN = {
         "a domain controller checks this list when validating a "
         "certificate-based authentication attempt. A certificate here "
         "that doesn't trace back to a currently-known Enterprise CA "
-        "(cross-referenced by subject CN against ad_enrollment_service, "
-        "a reliable match per Microsoft's own [MS-WCCE] specification) "
+        "(cross-referenced, case-insensitively, by subject CN against the "
+        "decoded ad_enrollment_service name, a reliable match per Microsoft's own [MS-WCCE] specification) "
         "is either an orphaned entry from a decommissioned CA that was "
         "never cleaned up (uninstalling a CA only removes its "
         "enrollment service object, not this entry -- a well-documented "
-        "gap), or a 'Golden Certificate'-class forgery planted to be "
-        "trusted for domain authentication without ever having been a "
-        "real, functioning CA. Also flags any entry that fails to parse "
+        "gap), or a rogue CA certificate planted to be trusted for "
+        "domain authentication without ever having been a real, "
+        "functioning CA in this forest. Also flags any entry that fails to parse "
         "as a valid X.509 certificate at all -- a malformed trusted "
         "entry is itself worth surfacing."
     ),
@@ -80,8 +90,19 @@ PLUGIN = {
             FROM ad_ntauth_store n, jsonb_array_elements(n.certificates) AS cert(value)
             WHERE n.valid_to IS NULL AND n.client_id = %(client_id)s
         ),
+        -- [v1.2] The enrollment service cn is the SANITIZED CA name
+        -- ([MS-WCCE]: disallowed characters become !xxxx, 4 hex digits),
+        -- so it is decoded before comparing, and the comparison ignores
+        -- case (AD names are case-insensitive).
         known_ca_names AS (
-            SELECT DISTINCT es.ca_name
+            SELECT DISTINCT lower(es.ca_name) AS ca_name_lower,
+                   lower((SELECT string_agg(
+                                CASE WHEN m.part[1] ~ '^![0-9A-Fa-f]{4}$'
+                                     THEN chr(('x' || lpad(substr(m.part[1], 2), 8, '0'))::bit(32)::int)
+                                     ELSE m.part[1] END,
+                                '' ORDER BY m.n)
+                          FROM regexp_matches(es.ca_name, '![0-9A-Fa-f]{4}|[^!]+|!', 'g')
+                               WITH ORDINALITY AS m(part, n))) AS ca_name_decoded_lower
             FROM ad_enrollment_service es
             WHERE es.valid_to IS NULL AND es.client_id = %(client_id)s AND es.ca_name IS NOT NULL
         ),
@@ -90,13 +111,16 @@ PLUGIN = {
                    CASE
                        WHEN nc.cert_json->>'parse_error' IS NOT NULL THEN
                            'failed to parse as valid X.509 (' || (nc.cert_json->>'parse_error') || ')'
+                       WHEN nc.cert_json->>'subject_cn' IS NULL THEN
+                           'certificate with no subject CN traces to no known Enterprise CA'
                        ELSE
                            'subject "' || (nc.cert_json->>'subject_cn') || '" traces to no known Enterprise CA'
                    END AS reason
             FROM ntauth_certs nc
             WHERE nc.cert_json->>'parse_error' IS NOT NULL
                OR NOT EXISTS (
-                    SELECT 1 FROM known_ca_names kcn WHERE kcn.ca_name = nc.cert_json->>'subject_cn'
+                    SELECT 1 FROM known_ca_names kcn
+                    WHERE lower(nc.cert_json->>'subject_cn') IN (kcn.ca_name_lower, kcn.ca_name_decoded_lower)
                   )
         ),
         -- [fix, caught via a real production crash on a related plugin

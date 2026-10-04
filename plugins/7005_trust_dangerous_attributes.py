@@ -6,9 +6,9 @@ Microsoft's own [MS-ADTS] specification, the same source already
 verified for plugins 7001/7002):
 
 - TRUST_ATTRIBUTE_CROSS_ORGANIZATION_ENABLE_TGT_DELEGATION (0x00000800):
-  forces Kerberos tickets granted under this trust to be trusted for
-  delegation, when the trust's default posture would otherwise block
-  it. Delegation across an organizational trust boundary widens what
+  permits TGTs of the trusted side's users to be forwarded across this
+  trust to services trusted for unconstrained delegation, which the
+  trust's default posture (since the July 2019 updates) blocks. Delegation across an organizational trust boundary widens what
   a compromise on the trusted side can reach on this side.
 - TRUST_ATTRIBUTE_PIM_TRUST (0x00000400): marks a cross-forest trust
   as a Privileged Identity Management (bastion forest) trust for SID-
@@ -17,14 +17,21 @@ verified for plugins 7001/7002):
   in a specific way -- it is only meaningful, and only evaluated, in
   combination with TREAT_AS_EXTERNAL (plugin 7002), so it belongs in
   this project's set of things worth confirming were set on purpose.
+
+[v1.1] Severity split: high when ENABLE_TGT_DELEGATION (0x800) is set --
+it re-opens the cross-forest unconstrained-delegation / printer-bug
+compromise path that the July 2019 updates closed -- and medium when only
+PIM_TRUST (0x400) is set. Wording corrected: the bit permits TGT
+forwarding to unconstrained-delegation services across the trust; it does
+not make every ticket "trusted for delegation".
 """
 
 PLUGIN = {
     "plugin_id": 7005,
     "category": "Trusts",
     "name": "Trust Has a Dangerous Attribute Set (TGT Delegation or PIM Trust)",
-    "version": "1.0",
-    "revision_date": "2026-07-18",
+    "version": "1.1",
+    "revision_date": "2026-10-04",
     "remediation": (
         "For TGT delegation: confirm this trust genuinely needs "
         "Kerberos delegation to cross the organizational boundary --  "
@@ -44,17 +51,19 @@ PLUGIN = {
     "description": (
         "Checks two trustAttributes bits confirmed against Microsoft's "
         "own [MS-ADTS] specification: TRUST_ATTRIBUTE_CROSS_"
-        "ORGANIZATION_ENABLE_TGT_DELEGATION (0x00000800), which forces "
-        "Kerberos tickets to be trusted for delegation across an "
-        "organizational trust boundary that would otherwise block it; "
+        "ORGANIZATION_ENABLE_TGT_DELEGATION (0x00000800), which lets "
+        "TGTs be forwarded across the trust to services trusted for "
+        "unconstrained delegation -- blocked by default since the July "
+        "2019 updates, and re-opening the cross-forest unconstrained-"
+        "delegation / printer-bug compromise path (rated high); "
         "and TRUST_ATTRIBUTE_PIM_TRUST (0x00000400), which marks a "
         "cross-forest trust as a Privileged Identity Management "
         "(bastion forest) trust -- a legitimate configuration in an "
         "ESAE/bastion architecture, but one worth confirming was set "
         "on purpose rather than left over from a decommissioned or "
-        "misconfigured setup."
+        "misconfigured setup (rated medium when set alone)."
     ),
-    "base_severity": "medium",
+    "base_severity": "high",
     "query": """
         SELECT
             'warn' AS status,
@@ -63,7 +72,9 @@ PLUGIN = {
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
-            'medium' AS fd_severity,
+            -- [v1.1] high for TGT delegation, medium for PIM trust alone
+            CASE WHEN (COALESCE(t.trust_attributes, 0) & 2048) != 0
+                 THEN 'high' ELSE 'medium' END AS fd_severity,
             'Trust with "' || COALESCE(t.trust_partner, '(unknown)') || '" has '
                 || (SELECT string_agg(x, ' and ') FROM (VALUES
                         (CASE WHEN (COALESCE(t.trust_attributes, 0) & 2048) != 0 THEN 'TGT delegation enabled' END),

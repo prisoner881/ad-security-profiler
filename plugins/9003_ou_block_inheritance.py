@@ -17,14 +17,21 @@ in the hierarchy without anyone reviewing this specific OU realizing
 it. Worth an explicit inventory of where this is set, the same "worth
 knowing about, not automatically wrong" framing already used for
 plugin 7004 (disabled trust relationships still present).
+
+[v1.1] The detail now also lists blocked_inherited_gpos: the enabled,
+non-enforced GPO links on the domain object and on every ancestor OU
+(containers whose DN is a suffix of this OU's DN), i.e. the GPOs this OU
+no longer receives because of the block -- which makes the finding
+actionable. Summary unchanged (ou_name COALESCEd to the DN for safety).
+Site-linked GPOs are not collected and so not listed.
 """
 
 PLUGIN = {
     "plugin_id": 9003,
     "category": "Organizational Units",
     "name": "Organizational Unit Blocks Group Policy Inheritance",
-    "version": "1.0",
-    "revision_date": "2026-07-18",
+    "version": "1.1",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Confirm this was a deliberate choice and that no security-"
         "relevant GPO (password policy, audit settings, security "
@@ -52,7 +59,9 @@ PLUGIN = {
         "a vulnerability -- legitimate uses exist -- but it can "
         "silently defeat security-relevant GPOs applied higher in the "
         "hierarchy without anyone reviewing this specific OU realizing "
-        "it. Worth an explicit inventory of where it's set, the same "
+        "it. The finding lists the inherited, non-enforced GPO links "
+        "(domain and parent OUs) that the block stops from applying. "
+        "Worth an explicit inventory of where it's set, the same "
         "framing already used for plugin 7004 (disabled trusts still "
         "present)."
     ),
@@ -66,7 +75,8 @@ PLUGIN = {
             NULL AS tool_severity,
             NULL AS tool_reference,
             'low' AS fd_severity,
-            'OU "' || o.ou_name || '" has Group Policy inheritance blocked' AS summary,
+            'OU "' || COALESCE(o.ou_name, od.dn_current, o.object_guid::text)
+                || '" has Group Policy inheritance blocked' AS summary,
             jsonb_build_object(
                 'ou_name', o.ou_name,
                 'linked_gpos_on_this_ou', (
@@ -75,9 +85,29 @@ PLUGIN = {
                     JOIN ad_gpo g ON g.object_guid = gle.gpo_guid AND g.client_id = gle.client_id AND g.valid_to IS NULL
                     WHERE gle.container_guid = o.object_guid AND gle.client_id = %(client_id)s
                       AND gle.valid_to IS NULL AND gle.link_enabled
+                ),
+                -- [v1.1] enabled, non-enforced links on ancestors (domain or
+                -- parent OUs) that the block stops from applying here
+                'blocked_inherited_gpos', (
+                    SELECT jsonb_agg(DISTINCT jsonb_build_object(
+                               'gpo', COALESCE(g.display_name, 'unnamed'),
+                               'linked_at', cdo.dn_current))
+                    FROM gpo_link_edge gle
+                    JOIN directory_object cdo
+                      ON cdo.object_guid = gle.container_guid AND cdo.client_id = gle.client_id
+                     AND NOT cdo.is_deleted
+                    JOIN ad_gpo g ON g.object_guid = gle.gpo_guid AND g.client_id = gle.client_id AND g.valid_to IS NULL
+                    WHERE gle.client_id = %(client_id)s
+                      AND gle.valid_to IS NULL
+                      AND gle.link_enabled
+                      AND NOT gle.link_enforced
+                      AND gle.container_guid <> o.object_guid
+                      AND right(lower(od.dn_current), length(cdo.dn_current) + 1)
+                          = ',' || lower(cdo.dn_current)
                 )
             ) AS detail
         FROM ad_ou o
+        LEFT JOIN directory_object od ON od.object_guid = o.object_guid AND od.client_id = o.client_id
         WHERE o.valid_to IS NULL
           AND o.client_id = %(client_id)s
           AND o.block_inheritance

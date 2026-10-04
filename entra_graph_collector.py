@@ -2,9 +2,15 @@
 """
 entra_graph_collector.py -- Microsoft Entra ID / Graph API Email Collector
 
-VERSION: 0.4.2
+VERSION: 0.5.1
 
 CHANGELOG:
+    0.5.1 - DANGEROUS_GRAPH_PERMISSIONS extended with six more Graph
+            application permissions that lead directly to tenant takeover
+            (Policy.ReadWrite.PermissionGrant,
+            UserAuthenticationMethod.ReadWrite.All,
+            RoleAssignmentSchedule/RoleEligibilitySchedule.ReadWrite.Directory,
+            Group.ReadWrite.All, GroupMember.ReadWrite.All).
     0.5.0 - Every Graph and token request now retries 429 (honouring
             Retry-After), transient 5xx, and network errors/timeouts with
             exponential backoff, and refreshes the access token once on
@@ -130,7 +136,7 @@ PG_DBNAME = "adprofiler"
 PG_USER = None
 PG_PASSWORD = None
 
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 
 # [v0.5.0] Retry policy shared by every Graph/token request (see
 # _send_with_retry()). 429 and transient 5xx responses, plus network
@@ -204,6 +210,16 @@ DANGEROUS_GRAPH_PERMISSIONS = {
     "RoleManagement.ReadWrite.Directory",
     "Directory.ReadWrite.All",
     "EntitlementManagement.ReadWrite.All",
+    # [v0.5.1] Further application permissions that are each a direct path to
+    # Global Administrator or to taking over privileged accounts (consent
+    # grants, MFA method resets, PIM role assignment/eligibility, membership
+    # of role-assignable groups). Raised by the per-plugin review of 10007.
+    "Policy.ReadWrite.PermissionGrant",
+    "UserAuthenticationMethod.ReadWrite.All",
+    "RoleAssignmentSchedule.ReadWrite.Directory",
+    "RoleEligibilitySchedule.ReadWrite.Directory",
+    "Group.ReadWrite.All",
+    "GroupMember.ReadWrite.All",
 }
 
 

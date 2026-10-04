@@ -26,6 +26,15 @@ entries (X.400, SIP), from either source, are excluded, since those
 aren't email addresses. If entra_graph_collector.py has never been run
 for this client, the LEFT JOIN simply contributes nothing and this
 plugin behaves exactly as it did in v1.0.
+
+[v1.2] Email addresses are deduplicated case-insensitively (an address
+from mail and the same one from proxyAddresses in different casing was
+listed twice); one spelling per address is kept, chosen deterministically.
+Entra addresses are gathered by a correlated subquery over every Entra
+user mapped to the account instead of a LEFT JOIN, so an on-prem GUID
+matched by more than one Entra row can no longer list the user twice.
+Adds an is_enabled column. (The Entra match is via on_prem_object_guid,
+which entra_graph_collector.py resolves from the on-prem SID.)
 """
 
 PLUGIN = {
@@ -33,11 +42,11 @@ PLUGIN = {
     "plugin_type": "inventory",
     "category": "Inventory",
     "name": "User Inventory",
-    "version": "1.1",
-    "revision_date": "2026-07-18",
+    "version": "1.2",
+    "revision_date": "2026-10-04",
     "description": (
         "Snapshot listing of every user account: username (both "
-        "sAMAccountName and userPrincipalName), last logon timestamp, "
+        "sAMAccountName and userPrincipalName), enabled state, last logon timestamp, "
         "last password change, object creation date, and every email "
         "address associated with the account -- combining on-prem "
         "mail/proxyAddresses with Microsoft Graph data where available "
@@ -52,23 +61,36 @@ PLUGIN = {
             u.pwd_last_set,
             u.when_created,
             (
-                SELECT array_agg(DISTINCT addr ORDER BY addr)
+                -- [v1.2] case-insensitive dedupe, one deterministic spelling kept
+                SELECT array_agg(addr ORDER BY lower(addr), addr)
                 FROM (
-                    SELECT u.mail AS addr WHERE u.mail IS NOT NULL
-                    UNION
-                    SELECT substring(pa FROM 6) AS addr
-                    FROM unnest(COALESCE(u.proxy_addresses, ARRAY[]::TEXT[])) AS pa
-                    WHERE pa ILIKE 'smtp:%%'
-                    UNION
-                    SELECT eu.mail AS addr WHERE eu.mail IS NOT NULL
-                    UNION
-                    SELECT substring(pa FROM 6) AS addr
-                    FROM unnest(COALESCE(eu.proxy_addresses, ARRAY[]::TEXT[])) AS pa
-                    WHERE pa ILIKE 'smtp:%%'
-                ) combined
-            ) AS email_addresses
+                    SELECT DISTINCT ON (lower(addr)) addr
+                    FROM (
+                        SELECT u.mail AS addr WHERE u.mail IS NOT NULL
+                        UNION
+                        SELECT substring(pa FROM 6) AS addr
+                        FROM unnest(COALESCE(u.proxy_addresses, ARRAY[]::TEXT[])) AS pa
+                        WHERE pa ILIKE 'smtp:%%'
+                        UNION
+                        SELECT eu.mail AS addr
+                        FROM entra_user eu
+                        WHERE eu.on_prem_object_guid = u.object_guid
+                          AND eu.client_id = u.client_id
+                          AND eu.mail IS NOT NULL
+                        UNION
+                        SELECT substring(pa FROM 6) AS addr
+                        FROM entra_user eu
+                        CROSS JOIN LATERAL unnest(COALESCE(eu.proxy_addresses, ARRAY[]::TEXT[])) AS pa
+                        WHERE eu.on_prem_object_guid = u.object_guid
+                          AND eu.client_id = u.client_id
+                          AND pa ILIKE 'smtp:%%'
+                    ) combined
+                    WHERE addr <> ''
+                    ORDER BY lower(addr), addr
+                ) deduped
+            ) AS email_addresses,
+            u.is_enabled
         FROM ad_user u
-        LEFT JOIN entra_user eu ON eu.on_prem_object_guid = u.object_guid AND eu.client_id = u.client_id
         WHERE u.valid_to IS NULL
           AND u.client_id = %(client_id)s
         ORDER BY u.sam_account_name

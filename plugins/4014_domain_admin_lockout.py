@@ -10,14 +10,21 @@ account lockout policy regardless of domain configuration" -- true for
 interactive/console logon, which is hardcoded and this setting can't
 change, but network-logon lockout specifically CAN be enabled via this
 bit, and by default it is not.
+
+[v1.2] Fires only when the setting can matter: account lockout must be
+enabled (lockout_threshold > 0 -- with lockout disabled this bit has no
+effect and plugin 4003 already reports the real problem), and the
+built-in Administrator (RID 500, matched by SID) must not be known to
+be disabled. If the RID 500 account was not collected, the finding is
+still reported.
 """
 
 PLUGIN = {
     "plugin_id": 4014,
     "category": "Domain",
     "name": "Domain Does Not Allow Administrator Account Lockout for Network Logons",
-    "version": "1.1",
-    "revision_date": "2026-07-15",
+    "version": "1.2",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Enable DOMAIN_LOCKOUT_ADMINS (pwdProperties bit 0x8) to allow "
         "the built-in Administrator account to be locked out for "
@@ -50,7 +57,9 @@ PLUGIN = {
         "reading alongside plugin 1004's finding, if present, rather "
         "than in isolation -- this is the one lever available to "
         "partially mitigate that account's otherwise-unconditional "
-        "lockout immunity."
+        "lockout immunity. Reported only when account lockout is "
+        "enabled and the built-in Administrator is not disabled; "
+        "otherwise the bit has no practical effect."
     ),
     "base_severity": "low",
     "query": """
@@ -71,5 +80,19 @@ PLUGIN = {
         WHERE d.valid_to IS NULL
           AND d.client_id = %(client_id)s
           AND NOT COALESCE(d.pwd_allows_admin_lockout, FALSE)
+          -- [v1.2] Meaningless while lockout is disabled (plugin 4003).
+          AND d.lockout_threshold > 0
+          -- [v1.2] Moot when the built-in Administrator is disabled.
+          AND NOT EXISTS (
+              SELECT 1
+              FROM directory_object dom
+              JOIN directory_object adm ON adm.client_id = dom.client_id
+                                       AND adm.object_sid = dom.object_sid || '-500'
+                                       AND NOT adm.is_deleted
+              JOIN ad_user u ON u.object_guid = adm.object_guid AND u.client_id = adm.client_id
+                            AND u.valid_to IS NULL
+              WHERE dom.object_guid = d.object_guid AND dom.client_id = d.client_id
+                AND u.is_enabled IS FALSE
+          )
     """,
 }

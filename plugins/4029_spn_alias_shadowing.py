@@ -79,14 +79,28 @@ object_guid, which collides with the evidence table's one-open-version-
 per-identity constraint -- the same failure mode that broke plugin 10002
 before v0.7.1. The offending account is also the unit of remediation, so
 aggregating matches how the finding is actually acted on.
+
+[v1.2] Two refinements. (1) http, www and w3svc are reported again when
+the shadowed host is a domain controller: HTTP/<host> is also the SPN of
+WinRM / PowerShell remoting, which runs under the host's own identity,
+and no application-pool justification applies to a DC, so HTTP/<DC> on
+another account shadows WinRM on a Tier-0 host (critical). (2) When
+every shadowed host is a disabled computer account, the finding is
+rated medium: that is usually a retired server's stale object whose
+name a replacement now legitimately serves, i.e. a stale-object cleanup
+rather than live shadowing; the detail records each shadowed host's
+enabled state and lastLogonTimestamp. Known limitation: sPNMappings is
+not collected, so the default alias set (identical to the collector's
+HOST_SPN_ALIASES) is assumed; forests that customise sPNMappings are
+evaluated against the default list.
 """
 
 PLUGIN = {
     "plugin_id": 4029,
     "category": "Domain",
     "name": "Explicit Service Principal Name Shadowing a HOST-Mapped Alias",
-    "version": "1.1",
-    "revision_date": "2026-10-03",
+    "version": "1.2",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Establish how the conflicting SPN came to exist before removing "
         "it. This finding is limited to service classes the host operating "
@@ -98,7 +112,10 @@ PLUGIN = {
         "host is failing Kerberos authentication while it remains. "
         "Note that HTTP/<webserver> registered on an application-pool "
         "service account or gMSA is the correct, documented set-up and is "
-        "deliberately not reported. "
+        "deliberately not reported -- except on a domain controller, where "
+        "HTTP/<DC> belongs to WinRM running as the DC itself. If every "
+        "shadowed host is a disabled (retired) computer, remove or clean up "
+        "that stale computer object instead. "
         "Unless it is confirmed as debris predating the 2021 uniqueness "
         "checks, treat it as an incident. Remove "
         "it with setspn -D <spn> <account>, then determine how it was created: "
@@ -139,13 +156,16 @@ PLUGIN = {
         "www and w3svc are excluded, because registering HTTP/<host> on a "
         "dedicated service account is the documented configuration for a "
         "web application running under that account and is resolved "
-        "correctly by the KDC. Exact duplicate SPNs are reported by plugin "
+        "correctly by the KDC -- except where the shadowed host is a domain "
+        "controller (HTTP/<DC> is WinRM under the DC's own identity). "
+        "Findings where every shadowed host is a disabled computer account "
+        "are rated medium (stale object). Exact duplicate SPNs are reported by plugin "
         "4028. The conflicting SPN is indistinguishable from a legitimate "
         "one in native management tools."
     ),
     "base_severity": "high",
     "query": """
-        WITH mapped_class (cls) AS (
+        WITH mapped_class_os (cls) AS (
             -- Default sPNMappings HOST alias set (MS-ADA3 section 2.276),
             -- restricted to services implemented by the host OS itself.
             -- 'host' itself is excluded: HOST/x on two accounts is a plain
@@ -168,6 +188,13 @@ PLUGIN = {
             -- before the HOST alias, so tickets go to the account that runs
             -- the application. Only classes the OS itself serves under the
             -- host's own identity are a genuine shadowing defect.
+        ),
+        mapped_class (cls, web_only_for_dc) AS (
+            SELECT cls, false FROM mapped_class_os
+            UNION ALL
+            -- [v1.2] ...except on a domain controller, where HTTP/<DC> is
+            -- WinRM / PowerShell remoting running as the DC itself.
+            SELECT v.cls, true FROM (VALUES ('http'),('www'),('w3svc')) v(cls)
         ),
         parsed AS (
             -- Alias uniqueness compares the WHOLE remainder after the service
@@ -199,6 +226,12 @@ PLUGIN = {
             JOIN host_spn h
               ON h.remainder = e.remainder
              AND h.object_guid <> e.object_guid
+            LEFT JOIN ad_computer hdc
+              ON hdc.object_guid = h.object_guid
+             AND hdc.client_id = %(client_id)s
+             AND hdc.valid_to IS NULL
+            WHERE NOT mc.web_only_for_dc
+               OR COALESCE(hdc.is_domain_controller, false)
         ),
         agg AS (
             -- One row per offending account. An account can shadow several
@@ -210,6 +243,8 @@ PLUGIN = {
             SELECT c.offender_guid,
                    count(*) AS conflict_count,
                    bool_or(COALESCE(hc.is_domain_controller, false)) AS shadows_dc,
+                   -- [v1.2] every shadowed host is a disabled computer
+                   bool_and(hc.is_enabled IS FALSE) AS all_hosts_disabled,
                    min(c.shadowed_name) AS first_shadowed_name,
                    jsonb_agg(jsonb_build_object(
                        'explicit_spn', c.explicit_spn,
@@ -220,8 +255,10 @@ PLUGIN = {
                        'shadowed_account_dn', hdo.dn_current,
                        'shadowed_host_is_domain_controller',
                            COALESCE(hc.is_domain_controller, false),
-                       'shadowed_host_os', hc.operating_system
-                   ) ORDER BY c.explicit_spn) AS conflicts
+                       'shadowed_host_os', hc.operating_system,
+                       'shadowed_host_enabled', hc.is_enabled,
+                       'shadowed_host_last_logon', hc.last_logon_timestamp
+                   ) ORDER BY c.explicit_spn, c.host_spn) AS conflicts
             FROM conflict c
             JOIN directory_object hdo
               ON hdo.object_guid = c.host_guid AND hdo.client_id = %(client_id)s
@@ -243,6 +280,8 @@ PLUGIN = {
             -- escalates severity on its own.
             CASE
                 WHEN a.shadows_dc THEN 'critical'
+                -- [v1.2] retired (disabled) hosts only: stale object
+                WHEN a.all_hosts_disabled THEN 'medium'
                 ELSE 'high'
             END AS fd_severity,
             'Account "' || COALESCE(odo.sam_account_name, a.offender_guid::text)

@@ -26,14 +26,24 @@ auditing and a good fit for this category.
 Any new RBCD edge is reported. Severity is critical where the target is
 a domain controller, since that configuration is a direct path to
 domain compromise and has no legitimate use in ordinary operations.
+
+[v1.2] Review found no defect. Since collector schema v36,
+msDS-AllowedToActOnBehalfOfOtherIdentity is also collected on user
+objects, so RBCD can now target krbtgt (RID 502) -- a known persistence
+technique: a principal allowed to delegate to krbtgt can obtain a TGT for
+any user via S4U2Self/S4U2Proxy. Such a target is now critical, like a
+domain controller. Note the snapshot limit: RBCD set and cleared again
+between two collection runs is not observed here. Trustee SIDs that do not
+resolve to a collected object (foreign or deleted principals) are dropped
+by the collector and therefore not reported.
 """
 
 PLUGIN = {
     "plugin_id": 11005,
     "category": "Change Detection",
     "name": "Resource-Based Constrained Delegation Newly Configured",
-    "version": "1.1",
-    "revision_date": "2026-10-03",
+    "version": "1.2",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Establish whether the delegation was configured deliberately. "
         "RBCD has legitimate uses, but they are specific and "
@@ -77,10 +87,11 @@ PLUGIN = {
         "impersonate arbitrary users to that host -- including a "
         "domain controller. CISA's AA26-237A red team assessment used "
         "this exact sequence against a DC to reach DCSync and the "
-        "krbtgt hash. Because the attribute can be written and "
-        "cleared quickly, change detection catches configurations "
-        "that a point-in-time audit would miss. Severity is critical "
-        "where the delegation target is a domain controller. "
+        "krbtgt hash. Change detection surfaces a configuration in "
+        "the first run that observes it (one set and cleared again "
+        "between two runs is not seen). Severity is critical where "
+        "the delegation target is a domain controller or the krbtgt "
+        "account. "
         "Suppressed on a client's first collection run."
     ),
     "base_severity": "high",
@@ -120,7 +131,8 @@ PLUGIN = {
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
-            CASE WHEN tc.is_domain_controller THEN 'critical' ELSE 'high' END
+            CASE WHEN tc.is_domain_controller OR tdo.object_sid LIKE '%%-502'
+                 THEN 'critical' ELSE 'high' END
                 AS fd_severity,
             'Resource-based constrained delegation was newly configured allowing '
                 || CASE WHEN count(*) > 1
@@ -134,6 +146,9 @@ PLUGIN = {
                 || CASE WHEN tc.is_domain_controller
                         THEN ' -- the target is a DOMAIN CONTROLLER, which is a direct '
                              'path to DCSync and full domain compromise'
+                        WHEN tdo.object_sid LIKE '%%-502'
+                        THEN ' -- the target is the KRBTGT account, which lets the '
+                             'trustee obtain a ticket-granting ticket for any user'
                         ELSE '' END AS summary,
             jsonb_build_object(
                 'delegation_count', count(*),
@@ -160,7 +175,7 @@ PLUGIN = {
            AND tc.valid_to IS NULL
         CROSS JOIN prior_run pr
         WHERE pr.have_prior
-        GROUP BY nr.target_guid, tdo.sam_account_name, tdo.dn_current,
+        GROUP BY nr.target_guid, tdo.sam_account_name, tdo.dn_current, tdo.object_sid,
                  tc.is_domain_controller, tc.operating_system
     """,
 }

@@ -13,14 +13,20 @@ restore a deleted privileged object (a former Domain Admin account
 that was supposedly removed, for instance) largely as it existed
 before deletion -- a documented persistence and privilege-escalation
 technique.
+
+[v1.1] Only allow ACEs that apply to the domain root itself
+(inherit_only IS NOT TRUE) and carry the CONTROL_ACCESS bit (0x100) are
+counted, and results are grouped per trustee so two edges for the same
+right (different masks) can't produce duplicate finding identities.
+Deleted trustee objects are ignored.
 """
 
 PLUGIN = {
     "plugin_id": 5008,
     "category": "ACLs",
     "name": "Unexpected Principal Holds Reanimate-Tombstones Rights on the Domain Root",
-    "version": "1.0",
-    "revision_date": "2026-07-18",
+    "version": "1.1",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Remove the Reanimate-Tombstones grant from the principal shown "
         "in this finding's evidence unless there is a specific, "
@@ -65,14 +71,25 @@ PLUGIN = {
                 'sam_account_name', do2.sam_account_name,
                 'object_class', do2.object_class
             ) AS detail
-        FROM acl_edge a
-        JOIN ad_domain d ON d.object_guid = a.object_guid AND d.valid_to IS NULL
-        JOIN directory_object do2 ON do2.object_sid = a.trustee_sid AND do2.client_id = a.client_id
-        WHERE a.client_id = %(client_id)s
-          AND a.valid_to IS NULL
-          AND a.ace_type = 'allow'
-          AND a.object_type_guid = '45ec5156-db7e-47bb-b53f-dbeb2d03c40f'
-          AND NOT (
+        FROM (
+            -- [v1.1] One row per trustee; only allow ACEs that apply to
+            -- the domain root itself (inherit_only IS NOT TRUE) and carry
+            -- the CONTROL_ACCESS bit (0x100) grant the extended right.
+            SELECT a.trustee_sid
+            FROM acl_edge a
+            JOIN ad_domain d ON d.object_guid = a.object_guid AND d.client_id = a.client_id
+             AND d.valid_to IS NULL
+            WHERE a.client_id = %(client_id)s
+              AND a.valid_to IS NULL
+              AND a.ace_type = 'allow'
+              AND a.inherit_only IS NOT TRUE
+              AND (a.access_mask & 256) <> 0
+              AND a.object_type_guid = '45ec5156-db7e-47bb-b53f-dbeb2d03c40f'
+            GROUP BY a.trustee_sid
+        ) a
+        JOIN directory_object do2 ON do2.object_sid = a.trustee_sid AND do2.client_id = %(client_id)s
+         AND NOT do2.is_deleted
+        WHERE NOT (
                 do2.object_sid LIKE '%%-512' OR do2.object_sid LIKE '%%-519'
                 OR do2.object_sid LIKE '%%-518' OR do2.object_sid = 'S-1-5-32-544'
                 OR do2.object_sid = 'S-1-5-18'

@@ -9,14 +9,23 @@ less security-conscious era of the domain's history. These machines are
 disproportionately likely to have other exploitable weaknesses on top of
 the delegation setting itself, making them an efficient target: easy to
 compromise, and highly valuable once compromised.
+
+[v1.3] Disabled accounts are no longer rated like enabled ones: a
+disabled computer cannot obtain or receive Kerberos tickets, so its
+unconstrained delegation is not exploitable until someone re-enables it.
+Such rows are now 'warn'/medium with "(account disabled)" appended to the
+summary (enabled accounts stay 'fail'/critical, summary unchanged), and
+detail carries is_enabled. The unsupported-OS list no longer matches
+Windows 10 Enterprise LTSC (2019/2021 and IoT LTSC are still in support)
+and now includes Windows 2000 and Windows NT. Summary is NULL-safe.
 """
 
 PLUGIN = {
     "plugin_id": 2024,
     "category": "Computer Accounts",
     "name": "Computer With Unconstrained Delegation Is Also Unsupported or Dormant",
-    "version": "1.2",
-    "revision_date": "2026-07-17",
+    "version": "1.3",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Prioritize for remediation or decommissioning over an ordinary "
         "unconstrained-delegation finding -- this specific machine "
@@ -26,7 +35,9 @@ PLUGIN = {
         "unconstrained delegation (see plugin 2001's remediation). If "
         "dormant and unsupported, decommissioning is very likely the "
         "right answer rather than trying to fix both issues on an "
-        "abandoned asset."
+        "abandoned asset. A disabled account (reported at medium) is "
+        "not exploitable while disabled, but clear its delegation flag "
+        "or delete it rather than leave it to be re-enabled."
     ),
     "control_id": "CHAIN-202",
     "framework_tags": [],
@@ -48,28 +59,31 @@ PLUGIN = {
     "base_severity": "critical",
     "query": """
         SELECT
-            'fail' AS status,
+            CASE WHEN c.is_enabled IS FALSE THEN 'warn' ELSE 'fail' END AS status,
             c.object_guid,
             NULL AS stig_severity,
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
-            'critical' AS fd_severity,
-            'Computer Account ' || c.sam_account_name
+            CASE WHEN c.is_enabled IS FALSE THEN 'medium' ELSE 'critical' END AS fd_severity,
+            'Computer Account ' || COALESCE(c.sam_account_name, c.object_guid::text)
                 || ' has unconstrained Kerberos delegation enabled AND is independently weak: '
                 || (SELECT string_agg(x, ', ') FROM (VALUES
-                        (CASE WHEN c.operating_system ILIKE '%%windows 10%%' OR c.operating_system ILIKE '%%server 2012%%'
+                        (CASE WHEN (c.operating_system ILIKE '%%windows 10%%' AND c.operating_system NOT ILIKE '%%LTSC%%') OR c.operating_system ILIKE '%%server 2012%%'
                               OR c.operating_system ILIKE '%%server 2008%%' OR c.operating_system ILIKE '%%server 2003%%'
                               OR c.operating_system ILIKE '%%windows 7%%' OR c.operating_system ILIKE '%%windows 8%%'
                               OR c.operating_system ILIKE '%%windows xp%%' OR c.operating_system ILIKE '%%windows vista%%'
+                              OR c.operating_system ILIKE '%%windows 2000%%' OR c.operating_system ILIKE '%%windows nt%%'
                               THEN 'unsupported OS (' || c.operating_system || ')' END),
                         (CASE WHEN c.last_logon_timestamp IS NULL OR c.last_logon_timestamp < now() - interval '90 days'
                               THEN 'dormant' END)
-                    ) AS v(x) WHERE x IS NOT NULL) AS summary,
+                    ) AS v(x) WHERE x IS NOT NULL)
+                || (CASE WHEN c.is_enabled IS FALSE THEN ' (account disabled)' ELSE '' END) AS summary,
             jsonb_build_object(
                 'sam_account_name', c.sam_account_name,
                 'operating_system', c.operating_system,
-                'last_logon_timestamp', c.last_logon_timestamp
+                'last_logon_timestamp', c.last_logon_timestamp,
+                'is_enabled', c.is_enabled
             ) AS detail
         FROM ad_computer c
         WHERE c.valid_to IS NULL
@@ -77,10 +91,11 @@ PLUGIN = {
           AND c.unconstrained_delegation
           AND NOT c.is_domain_controller
           AND (
-                c.operating_system ILIKE '%%windows 10%%' OR c.operating_system ILIKE '%%server 2012%%'
+                (c.operating_system ILIKE '%%windows 10%%' AND c.operating_system NOT ILIKE '%%LTSC%%') OR c.operating_system ILIKE '%%server 2012%%'
                 OR c.operating_system ILIKE '%%server 2008%%' OR c.operating_system ILIKE '%%server 2003%%'
                 OR c.operating_system ILIKE '%%windows 7%%' OR c.operating_system ILIKE '%%windows 8%%'
                 OR c.operating_system ILIKE '%%windows xp%%' OR c.operating_system ILIKE '%%windows vista%%'
+                OR c.operating_system ILIKE '%%windows 2000%%' OR c.operating_system ILIKE '%%windows nt%%'
                 OR c.last_logon_timestamp IS NULL OR c.last_logon_timestamp < now() - interval '90 days'
               )
     """,

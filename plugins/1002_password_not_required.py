@@ -16,14 +16,27 @@ Protected-group membership, control of or ownership of a Tier 0 object
 (domain root, AdminSDHolder, DCs, CAs, ...), DCSync, and membership in a
 group holding any of those still count. detail gains privilege_sources
 (the view's reasons, sorted); summary wording is unchanged.
+
+[v1.6] Interdomain trust accounts (UAC INTERDOMAIN_TRUST_ACCOUNT 0x0800,
+the TRUSTEDDOMAIN$ user objects AD creates for every trust with
+PASSWD_NOTREQD set by default, UAC 0x820) are excluded -- a default-config
+false positive on every domain with a trust, also excluded by PingCastle and
+BloodHound. The disabled built-in Guest account (RID 501, default UAC
+0x222) is excluded too; an ENABLED Guest is still reported (and is plugin
+1005's subject as well). The severity CASE now differentiates: high for
+an ordinary account, high for a privileged account or Tier 1 (unchanged
+outcome), critical for Tier 0 -- the former "ELSE 3" in both branches made
+the privilege test dead code; written out explicitly now. Plugin name no
+longer says "Enabled" (disabled accounts are reported, at reduced
+severity, by design).
 """
 
 PLUGIN = {
     "plugin_id": 1002,
     "category": "User Accounts",
-    "name": "Enabled User Account Does Not Require a Password",
-    "version": "1.5",
-    "revision_date": "2026-10-03",
+    "name": "User Account Does Not Require a Password",
+    "version": "1.6",
+    "revision_date": "2026-10-04",
     "remediation": (
     'Remove the PASSWD_NOTREQD flag (`Set-ADAccountControl -PasswordNotRequired '
     '$false` or the equivalent ADUC checkbox), then immediately force a '
@@ -43,7 +56,11 @@ PLUGIN = {
         "domain's password policy entirely -- not merely weakening it. "
         "No DISA AD STIG rule directly and solely covers this specific "
         "flag; BloodHound's own attack-path tooling checks for this exact "
-        "condition (enabled + passwordnotreqd) as a real attack surface item."
+        "condition (enabled + passwordnotreqd) as a real attack surface item. "
+        "Interdomain trust accounts (which AD creates with this flag) and "
+        "the disabled built-in Guest account are excluded as default "
+        "configuration; disabled accounts are otherwise reported at "
+        "reduced severity."
     ),
     "base_severity": "high",
     # Disabled accounts get a two-level severity downgrade (floored at
@@ -76,11 +93,11 @@ PLUGIN = {
             'BloodHound: attack-path query for enabled + PASSWD_NOTREQD accounts '
                 '(a blank-password-eligible account is directly requestable without '
                 'any credential guess)' AS tool_reference,
+            -- [v1.6] Base is already high (3); only Tier 0 raises it, so
+            -- the former privileged branch (3 vs 3) is folded away.
             CASE GREATEST(0,
-                GREATEST(
-                    CASE WHEN oc.tier = 0 THEN 4 WHEN oc.tier = 1 THEN 3 ELSE 3 END,
-                    CASE WHEN u.admin_count = 1 OR pc.object_guid IS NOT NULL THEN 3 ELSE 3 END
-                ) - (CASE WHEN u.is_enabled THEN 0 ELSE 2 END)
+                (CASE WHEN oc.tier = 0 THEN 4 ELSE 3 END)
+                - (CASE WHEN u.is_enabled THEN 0 ELSE 2 END)
             )
                 WHEN 4 THEN 'critical'
                 WHEN 3 THEN 'high'
@@ -118,5 +135,15 @@ PLUGIN = {
         WHERE u.valid_to IS NULL
           AND u.client_id = %(client_id)s
           AND (u.user_account_control & 32) != 0
+          -- [v1.6] Interdomain trust accounts (TRUSTEDDOMAIN$, UAC 0x820)
+          -- carry PASSWD_NOTREQD by default.
+          AND (u.user_account_control & 2048) = 0
+          -- [v1.6] The disabled built-in Guest (RID 501, default UAC 0x222)
+          -- is default configuration; an enabled Guest is still reported.
+          AND NOT (NOT COALESCE(u.is_enabled, false) AND EXISTS (
+                SELECT 1 FROM directory_object o
+                WHERE o.object_guid = u.object_guid
+                  AND o.client_id = u.client_id
+                  AND o.object_sid LIKE '%%-501'))
     """,
 }

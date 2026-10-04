@@ -28,14 +28,23 @@ domain-relative RID (RID 520, S-1-5-21-<domain>-520), while Incoming
 Forest Trust Builders is a BUILTIN alias (S-1-5-32-557) -- a different
 SID structure entirely, verified against Microsoft's own documentation
 before writing this query, not guessed at.
+
+[v1.1] One finding per member: a principal in both groups (or reaching
+both through nesting) produced two rows with the same identity, which
+made the evidence write fail for the whole plugin. Rows are now
+aggregated per member, the summary lists the sorted group names
+(unchanged wording for single-group members apart from the class label)
+and detail.privileged_groups is a sorted array. The summary labels the
+member by object class and falls back to its SID. SIDs are matched
+exactly (S-1-5-21-*-520, S-1-5-32-557).
 """
 
 PLUGIN = {
     "plugin_id": 3025,
     "category": "Groups",
     "name": "Group Policy Creator Owners or Incoming Forest Trust Builders Has Members",
-    "version": "1.0",
-    "revision_date": "2026-08-12",
+    "version": "1.1",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Confirm each member is documented with the ISSO as requiring "
         "this specific privilege. Remove any account whose need isn't "
@@ -63,25 +72,44 @@ PLUGIN = {
     ),
     "base_severity": "medium",
     "query": """
+        WITH matches AS (
+            SELECT mdo.object_guid, mdo.sam_account_name, mdo.object_sid, mdo.object_class,
+                   COALESCE(gdo.sam_account_name, gdo.object_sid) AS group_name
+            FROM v_effective_group_membership vem
+            JOIN directory_object gdo ON gdo.object_guid = vem.group_guid AND gdo.client_id = vem.client_id
+            JOIN directory_object mdo ON mdo.object_guid = vem.member_guid AND mdo.client_id = vem.client_id
+            WHERE vem.client_id = %(client_id)s
+              AND NOT mdo.is_deleted
+              AND (gdo.object_sid LIKE 'S-1-5-21-%%-520' OR gdo.object_sid = 'S-1-5-32-557')
+        ),
+        -- [v1.1] one row per member (identity = member's object_guid)
+        aggregated AS (
+            SELECT object_guid, sam_account_name, object_sid, object_class,
+                   array_agg(DISTINCT group_name ORDER BY group_name) AS group_names
+            FROM matches
+            GROUP BY object_guid, sam_account_name, object_sid, object_class
+        )
         SELECT
             'warn' AS status,
-            mdo.object_guid,
+            a.object_guid,
             'CAT_II' AS stig_severity,
             'DISA Active Directory Domain STIG V-243487' AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
             'medium' AS fd_severity,
-            'Account ' || COALESCE(mdo.sam_account_name, mdo.object_guid::text)
-                || ' is a member of "' || gdo.sam_account_name || '"' AS summary,
+            (CASE a.object_class::text
+                  WHEN 'group' THEN 'Group '
+                  WHEN 'computer' THEN 'Computer '
+                  WHEN 'foreign_security_principal' THEN 'Foreign principal '
+                  ELSE 'Account ' END)
+                || COALESCE(a.sam_account_name, a.object_sid, a.object_guid::text)
+                || ' is a member of "' || array_to_string(a.group_names, '", "') || '"' AS summary,
             jsonb_build_object(
-                'sam_account_name', mdo.sam_account_name,
-                'object_class', mdo.object_class,
-                'privileged_group', gdo.sam_account_name
+                'sam_account_name', a.sam_account_name,
+                'object_sid', a.object_sid,
+                'object_class', a.object_class,
+                'privileged_groups', to_jsonb(a.group_names)
             ) AS detail
-        FROM v_effective_group_membership vem
-        JOIN directory_object gdo ON gdo.object_guid = vem.group_guid AND gdo.client_id = vem.client_id
-        JOIN directory_object mdo ON mdo.object_guid = vem.member_guid AND mdo.client_id = vem.client_id
-        WHERE vem.client_id = %(client_id)s
-          AND (gdo.object_sid LIKE '%%-520' OR gdo.object_sid LIKE '%%-557')
+        FROM aggregated a
     """,
 }

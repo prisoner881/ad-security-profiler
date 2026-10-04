@@ -21,14 +21,18 @@ membership by more than the automation account actually performing
 that sync. Detected by RID, not name, for the same rename-resistance
 reason as plugin 3003 (Schema/Enterprise Admins): the RID cannot
 change even if the group is renamed.
+
+[v1.2] detail.members falls back to the member's SID (foreign security
+principals have no sAMAccountName and appeared as null); NULL-safe
+summary.
 """
 
 PLUGIN = {
     "plugin_id": 3022,
     "category": "Groups",
     "name": "Key Admins or Enterprise Key Admins Group Has Members",
-    "version": "1.1",
-    "revision_date": "2026-09-02",
+    "version": "1.2",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Review every member listed in this finding's evidence. The "
         "only common legitimate reason for standing membership is a "
@@ -71,7 +75,7 @@ PLUGIN = {
             NULL AS tool_severity,
             NULL AS tool_reference,
             'high' AS fd_severity,
-            'Group "' || g.sam_account_name || '" (RID '
+            'Group "' || COALESCE(g.sam_account_name, do2.object_sid, g.object_guid::text) || '" (RID '
                 || right(do2.object_sid, 3) || ') has ' || g.member_count_direct
                 || ' member(s)' AS summary,
             jsonb_build_object(
@@ -79,7 +83,8 @@ PLUGIN = {
                 'object_sid', do2.object_sid,
                 'member_count_direct', g.member_count_direct,
                 'members', (
-                    SELECT array_agg(mdo.sam_account_name ORDER BY mdo.sam_account_name)
+                    SELECT array_agg(COALESCE(mdo.sam_account_name, mdo.object_sid, mdo.object_guid::text)
+                                     ORDER BY COALESCE(mdo.sam_account_name, mdo.object_sid, mdo.object_guid::text))
                     FROM group_member_edge gme
                     JOIN directory_object mdo ON mdo.object_guid = gme.member_guid AND mdo.client_id = gme.client_id
                     WHERE gme.group_guid = g.object_guid AND gme.client_id = g.client_id AND gme.valid_to IS NULL

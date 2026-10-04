@@ -13,14 +13,20 @@ object. A computer owning both the domain root and AdminSDHolder produced
 two rows with the same object_guid and broke the one-open-version-per-
 identity constraint; both are now named in one summary (in a stable
 order) and listed in detail.object_dns, which replaces detail.object_dn.
+
+[v1.3] Unsupported-OS list aligned with plugins 2024/2025/2027: Windows
+10 Enterprise LTSC (2019/2021 and IoT LTSC are still in support) is no
+longer matched, Windows 2000 and Windows NT now are. The ad_domain test
+is client-scoped, deleted owner objects are excluded, and the owner's
+name in the summary is NULL-safe.
 """
 
 PLUGIN = {
     "plugin_id": 2028,
     "category": "Computer Accounts",
     "name": "Domain Root or AdminSDHolder Owned by an Unsupported or Dormant Computer",
-    "version": "1.2",
-    "revision_date": "2026-10-03",
+    "version": "1.3",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Take ownership back to a recognized default holder immediately "
         "(see plugin 5006's remediation) -- this is a higher-priority "
@@ -67,11 +73,12 @@ PLUGIN = {
             FROM directory_object target
             JOIN directory_object owner
                 ON owner.object_sid = target.owner_sid AND owner.client_id = target.client_id
+               AND NOT owner.is_deleted
             WHERE target.client_id = %(client_id)s
               AND target.owner_sid IS NOT NULL
               AND (
                     target.dn_current ILIKE 'CN=AdminSDHolder,%%'
-                    OR EXISTS (SELECT 1 FROM ad_domain d WHERE d.object_guid = target.object_guid AND d.valid_to IS NULL)
+                    OR EXISTS (SELECT 1 FROM ad_domain d WHERE d.object_guid = target.object_guid AND d.client_id = target.client_id AND d.valid_to IS NULL)
                   )
             GROUP BY owner.object_guid
         )
@@ -83,14 +90,15 @@ PLUGIN = {
             NULL AS tool_severity,
             NULL AS tool_reference,
             'critical' AS fd_severity,
-            'Computer Account ' || owner.sam_account_name
+            'Computer Account ' || COALESCE(owner.sam_account_name, owner.object_guid::text)
                 || ' owns ' || ow.owned_list
                 || ' and is independently weak: '
                 || (SELECT string_agg(x, ', ') FROM (VALUES
-                        (CASE WHEN owner.operating_system ILIKE '%%windows 10%%' OR owner.operating_system ILIKE '%%server 2012%%'
+                        (CASE WHEN (owner.operating_system ILIKE '%%windows 10%%' AND owner.operating_system NOT ILIKE '%%LTSC%%') OR owner.operating_system ILIKE '%%server 2012%%'
                               OR owner.operating_system ILIKE '%%server 2008%%' OR owner.operating_system ILIKE '%%server 2003%%'
                               OR owner.operating_system ILIKE '%%windows 7%%' OR owner.operating_system ILIKE '%%windows 8%%'
                               OR owner.operating_system ILIKE '%%windows xp%%' OR owner.operating_system ILIKE '%%windows vista%%'
+                              OR owner.operating_system ILIKE '%%windows 2000%%' OR owner.operating_system ILIKE '%%windows nt%%'
                               THEN 'unsupported OS (' || owner.operating_system || ')' END),
                         (CASE WHEN owner.last_logon_timestamp IS NULL OR owner.last_logon_timestamp < now() - interval '90 days'
                               THEN 'dormant' END)
@@ -107,10 +115,11 @@ PLUGIN = {
            AND owner.client_id = %(client_id)s
            AND owner.valid_to IS NULL
         WHERE (
-                owner.operating_system ILIKE '%%windows 10%%' OR owner.operating_system ILIKE '%%server 2012%%'
+                (owner.operating_system ILIKE '%%windows 10%%' AND owner.operating_system NOT ILIKE '%%LTSC%%') OR owner.operating_system ILIKE '%%server 2012%%'
                 OR owner.operating_system ILIKE '%%server 2008%%' OR owner.operating_system ILIKE '%%server 2003%%'
                 OR owner.operating_system ILIKE '%%windows 7%%' OR owner.operating_system ILIKE '%%windows 8%%'
                 OR owner.operating_system ILIKE '%%windows xp%%' OR owner.operating_system ILIKE '%%windows vista%%'
+                OR owner.operating_system ILIKE '%%windows 2000%%' OR owner.operating_system ILIKE '%%windows nt%%'
                 OR owner.last_logon_timestamp IS NULL OR owner.last_logon_timestamp < now() - interval '90 days'
               )
     """,

@@ -21,14 +21,26 @@ deliberately (strong, unique password; MFA; monitored sign-in
 activity) rather than left at whatever Entra's own defaults happen to
 be, since nothing about this project's on-prem hardening reaches it
 to compensate.
+
+[v1.1] Stable identity: object_guid is now the Entra user's object id
+(member_id) instead of NULL, so renaming or disabling the account no
+longer closes the finding and opens a new one. "Cloud-only" is now
+on_premises_security_identifier IS NULL (no onPremisesSecurityIdentifier
+at all) rather than on_prem_object_guid IS NULL, which was also NULL for
+synced users whose SID simply wasn't found in the collected domain (another
+domain/forest). Severity lowered to low (cloud-only privileged accounts are
+Microsoft's recommended pattern), and info when the account is disabled.
+Coverage note: only active, direct user assignments from /directoryRoles
+are collected -- PIM-eligible assignments and GA held through a
+role-assignable group are not visible (would need a collector change).
 """
 
 PLUGIN = {
     "plugin_id": 10002,
     "category": "Hybrid Identity",
     "name": "Cloud-Only Global Administrator (No On-Prem Account)",
-    "version": "1.0",
-    "revision_date": "2026-07-19",
+    "version": "1.1",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Confirm this account's security posture was set deliberately, "
         "not left at defaults: a strong, unique password not reused "
@@ -59,29 +71,34 @@ PLUGIN = {
         "its security posture was set deliberately rather than left at "
         "Entra's own defaults, since none of this project's on-prem "
         "hardening findings reach an account on-prem AD has never "
-        "heard of."
+        "heard of. Severity is low (info when the account is "
+        "disabled), since cloud-only privileged accounts are what "
+        "Microsoft recommends. Only active, direct user assignments are "
+        "visible: PIM-eligible assignments and Global Administrator held "
+        "through a role-assignable group are not collected."
     ),
-    "base_severity": "medium",
+    "base_severity": "low",
     "query": """
         SELECT
             'warn' AS status,
-            NULL::uuid AS object_guid,
+            rm.member_id AS object_guid,
             NULL AS stig_severity,
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
-            'medium' AS fd_severity,
-            'Global Administrator ' || COALESCE(rm.member_display_name, rm.member_upn)
+            CASE WHEN rm.account_enabled IS FALSE THEN 'info' ELSE 'low' END AS fd_severity,
+            'Global Administrator ' || COALESCE(rm.member_display_name, rm.member_upn, rm.member_id::text)
                 || ' has no corresponding on-prem AD account' AS summary,
             jsonb_build_object(
                 'member_display_name', rm.member_display_name,
                 'member_upn', rm.member_upn,
+                'member_id', rm.member_id,
                 'account_enabled', rm.account_enabled
             ) AS detail
         FROM entra_directory_role_member rm
         WHERE rm.client_id = %(client_id)s
           AND rm.role_template_id = '62e90394-69f5-4237-9190-012177145e10'
           AND rm.member_type = '#microsoft.graph.user'
-          AND rm.on_prem_object_guid IS NULL
+          AND rm.on_premises_security_identifier IS NULL
     """,
 }

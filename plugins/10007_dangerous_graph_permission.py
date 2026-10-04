@@ -23,14 +23,25 @@ of these permissions, is not "the app's data got accessed" -- it's a
 credential that can create new admin accounts, grant itself more
 permissions, or take over any other application in the tenant, with no
 MFA prompt or human approval anywhere in that chain.
+
+[v1.1] Stable, unique identity: object_guid is now
+md5(principal_id || permission_name)::uuid instead of NULL. With a NULL
+object_guid the identity was a hash of summary+detail, which contain only
+the display name, type and permission, so two service principals sharing a
+display name (re-registered or multi-tenant apps, "Copy of X") produced the
+same identity and the whole plugin errored on the unique index; a rename
+also closed and reopened the finding. principal_id is now in detail, rows
+are grouped per (principal, permission), and the summary is NULL-safe.
+The permission set itself is DANGEROUS_GRAPH_PERMISSIONS in
+entra_graph_collector.py (only those grants are stored).
 """
 
 PLUGIN = {
     "plugin_id": 10007,
     "category": "Hybrid Identity",
     "name": "Application Holds a Highly Privileged Microsoft Graph API Permission",
-    "version": "1.0",
-    "revision_date": "2026-07-19",
+    "version": "1.1",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Confirm this application genuinely needs this specific "
         "permission -- these are rarely the correct choice; Microsoft's "
@@ -68,21 +79,24 @@ PLUGIN = {
     "query": """
         SELECT
             'fail' AS status,
-            NULL::uuid AS object_guid,
+            md5(g.principal_id::text || ':' || g.permission_name)::uuid AS object_guid,
             NULL AS stig_severity,
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
             'critical' AS fd_severity,
-            COALESCE(g.principal_display_name, g.principal_id::text) || ' (' || g.principal_type
+            COALESCE(min(g.principal_display_name), g.principal_id::text)
+                || ' (' || COALESCE(min(g.principal_type), 'unknown type')
                 || ') holds the highly privileged Microsoft Graph permission "'
                 || g.permission_name || '"' AS summary,
             jsonb_build_object(
-                'principal_display_name', g.principal_display_name,
-                'principal_type', g.principal_type,
+                'principal_id', g.principal_id,
+                'principal_display_name', min(g.principal_display_name),
+                'principal_type', min(g.principal_type),
                 'permission_name', g.permission_name
             ) AS detail
         FROM entra_dangerous_permission_grant g
         WHERE g.client_id = %(client_id)s
+        GROUP BY g.principal_id, g.permission_name
     """,
 }

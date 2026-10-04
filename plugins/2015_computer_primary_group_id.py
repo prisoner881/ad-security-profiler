@@ -5,14 +5,25 @@ Same technique as user-account plugin 1016, applied to computer objects.
 The default for a computer object is 515 (Domain Computers); a
 privileged-group RID here means membership that won't appear in that
 group's own member list.
+
+[v1.3] Added the computer-specific cases: primaryGroupID 516 (Domain
+Controllers) on a computer that is not a writable DC -- the Domain
+Controllers group holds DCSync rights on the domain root, so this is a
+known DCSync persistence trick and is rated critical (it was only reported
+by 2017, at low); 521 (Read-only Domain Controllers) and 498 (Enterprise
+Read-only Domain Controllers) on a computer that is not a DC (high).
+Removed 544: BUILTIN Administrators (S-1-5-32-544) is a domain-local group and can never
+be a primary group (dead condition). Read-only DCs (whose default is 521)
+are told apart by ad_computer.is_read_only_dc (schema v36). Plugin 2017
+excludes exactly this set.
 """
 
 PLUGIN = {
     "plugin_id": 2015,
     "category": "Computer Accounts",
     "name": "Computer Primary Group ID Set to a Privileged Group",
-    "version": "1.2",
-    "revision_date": "2026-07-15",
+    "version": "1.3",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Investigate immediately -- this is a known attacker persistence "
         "technique, not a benign misconfiguration in most cases. "
@@ -30,10 +41,14 @@ PLUGIN = {
         "objects: group membership via primaryGroupID does not appear in "
         "the target group's own member list, so reviewing membership the "
         "normal way (via the group) would miss it entirely. The default "
-        "for a computer object is 515 (Domain Computers); this checks "
-        "the same commonly-abused sensitive RIDs as the user-account "
-        "equivalent (512 Domain Admins, 518 Schema Admins, 519 Enterprise "
-        "Admins, 520 Group Policy Creator Owners, 544 Administrators). "
+        "for a computer object is 515 (Domain Computers), 516 (Domain "
+        "Controllers) for a writable DC and 521 (Read-only Domain "
+        "Controllers) for an RODC. Flags 512 Domain Admins, 518 Schema "
+        "Admins, 519 Enterprise Admins and 520 Group Policy Creator Owners "
+        "on any computer; 516 Domain Controllers on a computer that is not "
+        "a writable DC (critical: the group holds DCSync rights, a known "
+        "persistence trick); and 521 / 498 (Read-only / Enterprise "
+        "Read-only Domain Controllers) on a computer that is not a DC. "
         "NOT downgraded when disabled -- this is persistent configuration "
         "that survives disablement."
     ),
@@ -48,9 +63,10 @@ PLUGIN = {
             'PingCastle / ANSSI: "Accounts with modified PrimaryGroupID" '
                 '(vuln3_primary_group_id_nochange) -- same rule already cited for '
                 'the user-account equivalent, applies identically to computer objects' AS tool_reference,
-            CASE WHEN c.is_domain_controller THEN 'critical' ELSE 'high' END AS fd_severity,
+            CASE WHEN c.is_domain_controller OR c.primary_group_id = 516
+                 THEN 'critical' ELSE 'high' END AS fd_severity,
             (CASE WHEN c.is_domain_controller THEN 'Domain Controller ' ELSE '' END)
-                || 'Computer Account ' || c.sam_account_name
+                || 'Computer Account ' || COALESCE(c.sam_account_name, c.object_guid::text)
                 || ' has primaryGroupID set to a privileged group (RID '
                 || c.primary_group_id || ')' AS summary,
             jsonb_build_object(
@@ -58,11 +74,16 @@ PLUGIN = {
                 'dns_hostname', c.dns_hostname,
                 'primary_group_id', c.primary_group_id,
                 'is_enabled', c.is_enabled,
-                'is_domain_controller', c.is_domain_controller
+                'is_domain_controller', c.is_domain_controller,
+                'is_read_only_dc', c.is_read_only_dc
             ) AS detail
         FROM ad_computer c
         WHERE c.valid_to IS NULL
           AND c.client_id = %(client_id)s
-          AND c.primary_group_id IN (512, 518, 519, 520, 544)
+          -- keep in sync with plugin 2017's exclusion
+          AND (c.primary_group_id IN (512, 518, 519, 520)
+               OR (c.primary_group_id = 516
+                   AND (NOT c.is_domain_controller OR c.is_read_only_dc))
+               OR (c.primary_group_id IN (498, 521) AND NOT c.is_domain_controller))
     """,
 }

@@ -36,14 +36,30 @@ computed from now(). The summary is part of adaudit.py's change
 comparison, so the day count made an unchanged finding re-version as
 "changed" on every analysis run. The evidence detail still carries
 password_age_days.
+
+[v1.2] The ADSyncMSA% name branch was removed: ADSyncMSA* accounts are
+standalone/group managed service accounts (computer subclasses, collected
+into ad_computer, never ad_user), and they are the ADSync service account,
+not the replication-holding connector account, so the branch could never
+match. Replication rights are now confirmed with the real DCSync test
+(v_privileged_principal 'dcsync' / 'dcsync_via_group': both rights, All
+Extended Rights or GenericAll, inherit-only excluded, also via groups)
+instead of a direct ACE carrying either GUID. The installer's own
+description wording ("Microsoft Azure Active Directory Connect") is now
+matched. Looser hints -- descriptions mentioning Azure AD/Entra Connect or
+synchronization, or "sync" in the account name (custom-named connector
+accounts) -- now count only when the account really holds DCSync, so
+unrelated sync service accounts are no longer labelled Tier 0. "Disabled
+but retains its replication rights" is only stated when DCSync is
+confirmed.
 """
 
 PLUGIN = {
     "plugin_id": 10009,
     "category": "Hybrid Identity",
     "name": "Entra Connect Directory Synchronization Account Exposure",
-    "version": "1.1",
-    "revision_date": "2026-10-03",
+    "version": "1.2",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Treat this account as Tier 0 and the Entra Connect server as "
         "a Tier 0 asset, on par with a domain controller -- it holds a "
@@ -93,17 +109,31 @@ PLUGIN = {
         "rotated within a year, when it carries a "
         "servicePrincipalName (making a standing-DCSync principal "
         "Kerberoastable), or when it is disabled yet still holds "
-        "replication rights. Severity is raised when the account's "
-        "replication rights are directly confirmed against the "
-        "collected domain root ACL."
+        "replication rights. Accounts are identified by the MSOL_/AAD_ "
+        "name or the installer's description; custom-named accounts "
+        "whose name or description mentions sync/Entra Connect are "
+        "included only when they really hold DCSync. Severity is raised "
+        "when the account's DCSync rights (direct or via a group) are "
+        "confirmed against the collected domain root ACL."
     ),
     "base_severity": "high",
     "query": """
-        WITH sync_accounts AS (
-            SELECT u.*, do2.dn_current, do2.object_sid
+        WITH dcsync_holders AS (
+            -- [v1.2] Real DCSync (both replication rights, All Extended
+            -- Rights or GenericAll; inherit-only excluded; direct or via a
+            -- group), per v_privileged_principal.
+            SELECT DISTINCT pp.object_guid
+            FROM v_privileged_principal pp
+            WHERE pp.client_id = %(client_id)s
+              AND pp.privilege_source IN ('dcsync', 'dcsync_via_group')
+        ),
+        sync_accounts AS (
+            SELECT u.*, do2.dn_current, do2.object_sid,
+                   (dh.object_guid IS NOT NULL) AS has_dcsync
             FROM ad_user u
             JOIN directory_object do2
                 ON do2.object_guid = u.object_guid AND do2.client_id = u.client_id
+            LEFT JOIN dcsync_holders dh ON dh.object_guid = u.object_guid
             WHERE u.valid_to IS NULL
               AND u.client_id = %(client_id)s
               AND (
@@ -111,23 +141,18 @@ PLUGIN = {
                     -- a single-character wildcard (matching e.g. 'AADX...').
                     u.sam_account_name LIKE 'MSOL\\_%%'
                  OR u.sam_account_name LIKE 'AAD\\_%%'
-                 OR u.sam_account_name LIKE 'ADSyncMSA%%'
-                 OR u.description ILIKE '%%Azure AD Connect%%'
-                 OR u.description ILIKE '%%Entra Connect%%'
-                 OR u.description ILIKE '%%directory synchronization%%'
+                 OR u.description ILIKE '%%Azure Active Directory Connect%%'
+                 -- [v1.2] Looser name/description hints (custom-named
+                 -- connector accounts, generic "directory synchronization"
+                 -- service accounts) count only when the account really
+                 -- holds DCSync, so e.g. an HR-sync account is not labelled
+                 -- Tier 0.
+                 OR (dh.object_guid IS NOT NULL
+                     AND (u.description ILIKE '%%Azure AD Connect%%'
+                          OR u.description ILIKE '%%Entra Connect%%'
+                          OR u.description ILIKE '%%synchroni%%'
+                          OR u.sam_account_name ILIKE '%%sync%%'))
               )
-        ),
-        replication_holders AS (
-            SELECT DISTINCT a.trustee_sid
-            FROM acl_edge a
-            JOIN ad_domain d
-                ON d.object_guid = a.object_guid AND d.valid_to IS NULL
-                AND d.client_id = a.client_id
-            WHERE a.client_id = %(client_id)s
-              AND a.valid_to IS NULL
-              AND a.ace_type = 'allow'
-              AND a.object_type_guid IN ('1131f6aa-9c07-11d1-f79f-00c04fc2dcd2',
-                                          '1131f6ad-9c07-11d1-f79f-00c04fc2dcd2')
         )
         SELECT
             'fail' AS status,
@@ -139,17 +164,19 @@ PLUGIN = {
             CASE
                 WHEN COALESCE(array_length(sa.service_principal_names, 1), 0) > 0
                     THEN 'critical'
-                WHEN rh.trustee_sid IS NOT NULL THEN 'high'
+                WHEN sa.has_dcsync THEN 'high'
                 ELSE 'medium'
             END AS fd_severity,
-            'Directory synchronization account "' || sa.sam_account_name
+            'Directory synchronization account "' || COALESCE(sa.sam_account_name, sa.object_guid::text)
                 || '" (Tier 0, holds directory replication rights by design) '
                 || CASE
                        WHEN COALESCE(array_length(sa.service_principal_names, 1), 0) > 0
                            THEN 'has a servicePrincipalName registered and is therefore '
                                 'Kerberoastable'
-                       WHEN sa.is_enabled IS FALSE
+                       WHEN sa.is_enabled IS FALSE AND sa.has_dcsync
                            THEN 'is disabled but retains its replication rights'
+                       WHEN sa.is_enabled IS FALSE
+                           THEN 'is disabled'
                        WHEN sa.pwd_last_set IS NULL
                            THEN 'has no recorded password rotation date'
                        ELSE 'has not had its password rotated since '
@@ -160,8 +187,7 @@ PLUGIN = {
                 'distinguished_name', sa.dn_current,
                 'description', sa.description,
                 'is_enabled', sa.is_enabled,
-                'replication_rights_confirmed_on_domain_root',
-                    rh.trustee_sid IS NOT NULL,
+                'replication_rights_confirmed_on_domain_root', sa.has_dcsync,
                 'has_service_principal_names',
                     COALESCE(array_length(sa.service_principal_names, 1), 0) > 0,
                 'service_principal_names', sa.service_principal_names,
@@ -175,7 +201,6 @@ PLUGIN = {
                 'when_created', sa.when_created
             ) AS detail
         FROM sync_accounts sa
-        LEFT JOIN replication_holders rh ON rh.trustee_sid = sa.object_sid
         WHERE COALESCE(array_length(sa.service_principal_names, 1), 0) > 0
            OR sa.is_enabled IS FALSE
            OR sa.pwd_last_set IS NULL

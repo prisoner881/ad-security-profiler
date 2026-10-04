@@ -7,14 +7,17 @@ DOMAIN-WIDE DEFAULT. If enabled, every account's password gets stored
 recoverably by default, not just individually-flagged ones -- the
 difference between "some accounts have this problem" and "every account
 has this problem unless something else overrides it."
+
+[v1.3] Populates the DISA STIG citation: V-254293, CAT I (reversible
+password encryption must be disabled).
 """
 
 PLUGIN = {
     "plugin_id": 4010,
     "category": "Domain",
     "name": "Domain-Wide Reversible Encryption Password Storage Enabled",
-    "version": "1.2",
-    "revision_date": "2026-07-15",
+    "version": "1.3",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Disable \"Store passwords using reversible encryption\" in the "
         "Default Domain Policy (Computer Configuration >> Windows "
@@ -28,7 +31,7 @@ PLUGIN = {
         "passwords."
     ),
     "control_id": "POLICY-010",
-    "framework_tags": [],
+    "framework_tags": ["DISA-STIG"],
     "references": [
         {"title": "Microsoft: Store passwords using reversible encryption",
          "url": "https://learn.microsoft.com/en-us/windows/security/threat-protection/security-policy-settings/store-passwords-using-reversible-encryption"},
@@ -51,8 +54,9 @@ PLUGIN = {
         SELECT
             'fail' AS status,
             d.object_guid,
-            NULL AS stig_severity,
-            NULL AS stig_reference,
+            'CAT_I' AS stig_severity,
+            'DISA Windows Server STIG V-254293: reversible password encryption must be '
+                'disabled' AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
             'critical' AS fd_severity,

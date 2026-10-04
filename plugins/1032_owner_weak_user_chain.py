@@ -15,14 +15,21 @@ object. A user account owning both the domain root and AdminSDHolder produced
 two rows with the same object_guid and broke the one-open-version-per-
 identity constraint; both are now named in one summary (in a stable
 order) and listed in detail.object_dns, which replaces detail.object_dn.
+
+[v1.3] A disabled owner is no longer called Kerberoastable, AS-REP
+roastable, PASSWD_NOTREQD or dormant (it cannot authenticate at all);
+its weakness is reported as 'disabled' at 'high' -- whoever re-enables
+it gets the ownership. The weakness list is aggregated in a fixed,
+explicit order; the domain-root test is client-scoped and deleted owner
+objects are ignored. detail gains is_enabled.
 """
 
 PLUGIN = {
     "plugin_id": 1032,
     "category": "User Accounts",
     "name": "Domain Root or AdminSDHolder Owned by an Independently Weak User Account",
-    "version": "1.2",
-    "revision_date": "2026-10-03",
+    "version": "1.3",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Take ownership back to a recognized default holder immediately "
         "(see plugin 5006's remediation) -- this is a higher-priority "
@@ -42,7 +49,8 @@ PLUGIN = {
         "Refines plugin 5006 (any unexpected owner of the domain root "
         "or AdminSDHolder) with a specific, higher-urgency angle: the "
         "owner is a user account that is ALSO independently exploitable "
-        "via at least one of dormancy (90+ days since last logon, or "
+        "via at least one of being disabled (rated high: re-enabling "
+        "it restores the ownership), dormancy (90+ days since last logon, or "
         "never logged on), Kerberoasting, AS-REP roasting, or a blank/"
         "not-required password. An owner can always rewrite an object's "
         "ACL to grant themselves anything regardless of current "
@@ -73,11 +81,13 @@ PLUGIN = {
             FROM directory_object target
             JOIN directory_object owner
                 ON owner.object_sid = target.owner_sid AND owner.client_id = target.client_id
+               AND NOT owner.is_deleted
             WHERE target.client_id = %(client_id)s
               AND target.owner_sid IS NOT NULL
               AND (
                     target.dn_current ILIKE 'CN=AdminSDHolder,%%'
-                    OR EXISTS (SELECT 1 FROM ad_domain d WHERE d.object_guid = target.object_guid AND d.valid_to IS NULL)
+                    OR EXISTS (SELECT 1 FROM ad_domain d WHERE d.object_guid = target.object_guid
+                                 AND d.client_id = target.client_id AND d.valid_to IS NULL)
                   )
             GROUP BY owner.object_guid
         )
@@ -88,21 +98,31 @@ PLUGIN = {
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
-            'critical' AS fd_severity,
+            -- [v1.3] A disabled owner is not usable until re-enabled: 'high'.
+            CASE WHEN u.is_enabled IS FALSE THEN 'high' ELSE 'critical' END AS fd_severity,
             'User Account ' || COALESCE(u.user_principal_name, u.sam_account_name)
                 || ' owns ' || ow.owned_list
                 || ' and is independently weak: ' || (
-                    SELECT string_agg(x, ', ') FROM (VALUES
-                        (CASE WHEN u.last_logon_timestamp IS NULL OR u.last_logon_timestamp < now() - interval '90 days'
+                    -- [v1.3] Ordered by an explicit ordinal. A disabled
+                    -- account cannot authenticate, so it is labelled
+                    -- 'disabled' rather than roastable/PASSWD_NOTREQD.
+                    SELECT string_agg(x, ', ' ORDER BY ord) FROM (VALUES
+                        (1, CASE WHEN u.is_enabled IS FALSE THEN 'disabled' END),
+                        (2, CASE WHEN u.is_enabled IS NOT FALSE
+                                  AND (u.last_logon_timestamp IS NULL OR u.last_logon_timestamp < now() - interval '90 days')
                               THEN 'dormant' END),
-                        (CASE WHEN u.service_principal_names IS NOT NULL AND array_length(u.service_principal_names, 1) > 0
+                        (3, CASE WHEN u.is_enabled IS NOT FALSE
+                                  AND u.service_principal_names IS NOT NULL AND array_length(u.service_principal_names, 1) > 0
                               THEN 'Kerberoastable' END),
-                        (CASE WHEN (u.user_account_control & 4194304) != 0 THEN 'AS-REP roastable' END),
-                        (CASE WHEN (u.user_account_control & 32) != 0 THEN 'PASSWD_NOTREQD' END)
-                    ) AS v(x) WHERE x IS NOT NULL
+                        (4, CASE WHEN u.is_enabled IS NOT FALSE AND (u.user_account_control & 4194304) != 0
+                              THEN 'AS-REP roastable' END),
+                        (5, CASE WHEN u.is_enabled IS NOT FALSE AND (u.user_account_control & 32) != 0
+                              THEN 'PASSWD_NOTREQD' END)
+                    ) AS v(ord, x) WHERE x IS NOT NULL
                 ) AS summary,
             jsonb_build_object(
                 'sam_account_name', u.sam_account_name,
+                'is_enabled', u.is_enabled,
                 'object_dns', ow.object_dns
             ) AS detail
         FROM owned ow
@@ -111,7 +131,8 @@ PLUGIN = {
            AND u.client_id = %(client_id)s
            AND u.valid_to IS NULL
         WHERE (
-                u.last_logon_timestamp IS NULL OR u.last_logon_timestamp < now() - interval '90 days'
+                u.is_enabled IS FALSE
+                OR u.last_logon_timestamp IS NULL OR u.last_logon_timestamp < now() - interval '90 days'
                 OR (u.service_principal_names IS NOT NULL AND array_length(u.service_principal_names, 1) > 0)
                 OR (u.user_account_control & 4194304) != 0
                 OR (u.user_account_control & 32) != 0

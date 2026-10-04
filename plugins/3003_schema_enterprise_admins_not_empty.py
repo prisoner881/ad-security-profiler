@@ -8,14 +8,20 @@ documentation, not a general inference. Detected by RID (518 Schema
 Admins, 519 Enterprise Admins), not name, for the same rename-resistance
 reason as the built-in Administrator/Guest account checks (plugins
 1004/1005): these groups can be renamed, but their RID cannot change.
+
+[v1.3] Populates stig_severity/stig_reference (CAT_I, DISA AD Forest STIG
+V-243502) for the Schema Admins finding; detail.members now falls back
+to the member's SID (foreign security principals have no
+sAMAccountName and previously appeared as null) and the summary is
+NULL-safe.
 """
 
 PLUGIN = {
     "plugin_id": 3003,
     "category": "Groups",
     "name": "Schema Admins or Enterprise Admins Group Has Members",
-    "version": "1.2",
-    "revision_date": "2026-07-15",
+    "version": "1.3",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Remove all members. Per Microsoft's own guidance: membership in "
         "Schema Admins is not required for any purpose beyond actively "
@@ -51,12 +57,13 @@ PLUGIN = {
         SELECT
             'fail' AS status,
             g.object_guid,
-            NULL AS stig_severity,
-            NULL AS stig_reference,
+            CASE WHEN do2.object_sid LIKE '%%-518' THEN 'CAT_I' END AS stig_severity,
+            CASE WHEN do2.object_sid LIKE '%%-518'
+                 THEN 'DISA Active Directory Forest STIG V-243502' END AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
             'high' AS fd_severity,
-            'Group "' || g.sam_account_name || '" (RID '
+            'Group "' || COALESCE(g.sam_account_name, do2.object_sid, g.object_guid::text) || '" (RID '
                 || right(do2.object_sid, 3) || ') has ' || g.member_count_direct
                 || ' member(s)' AS summary,
             jsonb_build_object(
@@ -64,7 +71,8 @@ PLUGIN = {
                 'object_sid', do2.object_sid,
                 'member_count_direct', g.member_count_direct,
                 'members', (
-                    SELECT array_agg(mdo.sam_account_name ORDER BY mdo.sam_account_name)
+                    SELECT array_agg(COALESCE(mdo.sam_account_name, mdo.object_sid, mdo.object_guid::text)
+                                     ORDER BY COALESCE(mdo.sam_account_name, mdo.object_sid, mdo.object_guid::text))
                     FROM group_member_edge gme
                     JOIN directory_object mdo ON mdo.object_guid = gme.member_guid AND mdo.client_id = gme.client_id
                     WHERE gme.group_guid = g.object_guid AND gme.client_id = g.client_id AND gme.valid_to IS NULL

@@ -38,14 +38,29 @@ WriteDacl/WriteOwner (raw bits are still matched too). The rights label
 names only GenericAll when it is held, since it subsumes the rest.
 Inherit-only ACEs (acl_edge.inherit_only, schema v34) are skipped: they
 grant nothing on the object they are stored on, only on its descendants.
+
+[v1.4] The summary no longer goes NULL (and the evidence write no longer
+fails) for a template without a displayName: it falls back to the cn.
+Trustees that are already Tier 0 -- the built-in Administrator (RID
+500), AdminSDHolder-protected groups and anything in
+v_privileged_principal (e.g. a Domain Admins member who created or
+duplicated the template and so holds Full Control) -- are no longer
+reported. WriteProperty on the template attributes that alone make it
+exploitable (msPKI-Certificate-Name-Flag, msPKI-Enrollment-Flag,
+pKIExtendedKeyUsage, msPKI-RA-Signature,
+msPKI-Certificate-Application-Policy, msPKI-RA-Application-Policies) is
+now flagged, and the template's owner (implicit WriteDacl) is reported
+when directory_object.owner_sid is populated for it -- note adprofiler
+does not yet store owners for templates, so that branch is dormant
+until it does. Rows are aggregated per (template, trustee) first.
 """
 
 PLUGIN = {
     "plugin_id": 6006,
     "category": "Certificate Services",
     "name": "Certificate Template ACL Misconfiguration Matches ESC4",
-    "version": "1.3",
-    "revision_date": "2026-10-03",
+    "version": "1.4",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Confirm whether this grant is a deliberate PKI administration "
         "delegation or leftover/overly broad. Review via the template's "
@@ -66,14 +81,16 @@ PLUGIN = {
          "url": "https://bloodhound.specterops.io/resources/edges/generic-all"},
     ],
     "description": (
-        "A non-admin principal holds GenericAll, GenericWrite, "
-        "WriteDacl, or WriteOwner on a certificate template object "
+        "A non-admin principal owns, or holds GenericAll, GenericWrite, "
+        "WriteDacl, WriteOwner or write access to the enrollment "
+        "settings attributes on, a certificate template object "
         "itself -- letting them rewrite the template into an ESC1-"
         "shaped one (enrollee-supplied subject, client-auth EKU, no "
         "manager approval) and then enroll against their own creation. "
-        "Excludes the same baseline well-known holders used elsewhere "
-        "in this project (Domain Admins, Enterprise Admins, "
-        "Administrators, SYSTEM)."
+        "Excludes Domain Admins, Enterprise Admins, Administrators, "
+        "SYSTEM, the built-in Administrator, AdminSDHolder-protected "
+        "groups and any principal already privileged per "
+        "v_privileged_principal."
     ),
     "base_severity": "critical",
     "query": """
@@ -89,15 +106,28 @@ PLUGIN = {
             WHERE fsp.client_id = %(client_id)s AND fsp.valid_to IS NULL
               AND fsp.well_known_name = 'Local System'
         ),
+        -- Template attributes whose write alone turns a template into an
+        -- ESC1/ESC2/ESC3 one (schemaIDGUIDs): msPKI-Certificate-Name-Flag,
+        -- msPKI-Enrollment-Flag, pKIExtendedKeyUsage, msPKI-RA-Signature,
+        -- msPKI-Certificate-Application-Policy, msPKI-RA-Application-Policies.
         dangerous_aces AS (
             SELECT a.object_guid AS template_guid, a.trustee_sid, a.access_mask,
                    ((a.access_mask & 983551) = 983551 OR (a.access_mask & 268435456) <> 0) AS is_generic_all,
                    (((a.access_mask & 32) <> 0 AND a.object_type_guid IS NULL)
                        OR (a.access_mask & 1073741824) <> 0) AS is_generic_write,
                    (a.access_mask & 262144) != 0 AS is_write_dacl,
-                   (a.access_mask & 524288) != 0 AS is_write_owner
+                   (a.access_mask & 524288) != 0 AS is_write_owner,
+                   ((a.access_mask & 32) <> 0
+                    AND a.object_type_guid IN ('ea1dddc4-60ff-416e-8cc0-17cee534bce7',
+                                               'd15ef7d8-f226-46db-ae79-b34e560bd12c',
+                                               '18976af6-3b9e-11d2-90cc-00c04fd91ab1',
+                                               'fe17e04b-937d-4f7e-8e0e-9292c8d5683e',
+                                               'dbd90548-aa37-4202-9966-8c537ba5ce32',
+                                               '3c91fbbf-4773-4ccd-a87b-85d53e7bcf6a')) AS is_write_settings,
+                   false AS is_owner
             FROM acl_edge a
-            JOIN ad_cert_template ct ON ct.object_guid = a.object_guid AND ct.valid_to IS NULL
+            JOIN ad_cert_template ct ON ct.object_guid = a.object_guid AND ct.client_id = a.client_id
+             AND ct.valid_to IS NULL
             WHERE a.client_id = %(client_id)s
               AND a.valid_to IS NULL
               AND a.ace_type = 'allow'
@@ -106,26 +136,61 @@ PLUGIN = {
                     (a.access_mask & (268435456 | 1073741824 | 262144 | 524288)) != 0
                     OR (a.access_mask & 983551) = 983551                    -- GenericAll, as stored
                     OR ((a.access_mask & 32) <> 0 AND a.object_type_guid IS NULL)  -- GenericWrite, as stored
+                    OR ((a.access_mask & 32) <> 0                           -- [v1.4] write a dangerous
+                        AND a.object_type_guid IN ('ea1dddc4-60ff-416e-8cc0-17cee534bce7',   --   template attribute
+                                                   'd15ef7d8-f226-46db-ae79-b34e560bd12c',
+                                                   '18976af6-3b9e-11d2-90cc-00c04fd91ab1',
+                                                   'fe17e04b-937d-4f7e-8e0e-9292c8d5683e',
+                                                   'dbd90548-aa37-4202-9966-8c537ba5ce32',
+                                                   '3c91fbbf-4773-4ccd-a87b-85d53e7bcf6a'))
                   )
+            UNION ALL
+            -- [v1.4] The owner can always rewrite the DACL (implicit
+            -- WriteDacl). Used whenever directory_object.owner_sid is
+            -- populated for the template.
+            SELECT ct.object_guid, tdo.owner_sid, 0, false, false, false, false, false, true
+            FROM ad_cert_template ct
+            JOIN directory_object tdo ON tdo.object_guid = ct.object_guid AND tdo.client_id = ct.client_id
+            WHERE ct.client_id = %(client_id)s AND ct.valid_to IS NULL
+              AND tdo.owner_sid IS NOT NULL
         ),
+        -- [v1.4] One row per (template, trustee), and only trustees that
+        -- are not Tier 0 already: not a well-known admin SID (incl. the
+        -- built-in Administrator, RID 500), not an AdminSDHolder-protected
+        -- group, and not in v_privileged_principal (e.g. a Domain Admins
+        -- member who created or duplicated the template).
         unexpected_holders AS (
             SELECT da.template_guid,
                    COALESCE(trustee_do.sam_account_name, da.trustee_sid) AS trustee_label,
                    trustee_do.object_sid AS trustee_sid,
                    trustee_do.object_class AS trustee_object_class,
-                   da.access_mask,
+                   bit_or(da.access_mask) AS access_mask,
                    (SELECT string_agg(x, ', ') FROM (VALUES
-                        (CASE WHEN da.is_generic_all THEN 'GenericAll' END),
-                        (CASE WHEN da.is_generic_write AND NOT da.is_generic_all THEN 'GenericWrite' END),
-                        (CASE WHEN da.is_write_dacl AND NOT da.is_generic_all THEN 'WriteDacl' END),
-                        (CASE WHEN da.is_write_owner AND NOT da.is_generic_all THEN 'WriteOwner' END)
+                        (CASE WHEN bool_or(da.is_owner) THEN 'Owner' END),
+                        (CASE WHEN bool_or(da.is_generic_all) THEN 'GenericAll' END),
+                        (CASE WHEN bool_or(da.is_generic_write) AND NOT bool_or(da.is_generic_all) THEN 'GenericWrite' END),
+                        (CASE WHEN bool_or(da.is_write_dacl) AND NOT bool_or(da.is_generic_all) THEN 'WriteDacl' END),
+                        (CASE WHEN bool_or(da.is_write_owner) AND NOT bool_or(da.is_generic_all) THEN 'WriteOwner' END),
+                        (CASE WHEN bool_or(da.is_write_settings) AND NOT bool_or(da.is_generic_all)
+                                   AND NOT bool_or(da.is_generic_write) THEN 'WriteProperty on template settings' END)
                     ) AS v(x) WHERE x IS NOT NULL) AS rights_label
             FROM dangerous_aces da
             JOIN directory_object trustee_do
                 ON trustee_do.object_sid = da.trustee_sid AND trustee_do.client_id = %(client_id)s
+               AND NOT trustee_do.is_deleted
             WHERE NOT EXISTS (
                 SELECT 1 FROM expected_holders eh WHERE eh.object_guid = trustee_do.object_guid
             )
+              AND NOT (trustee_do.object_sid LIKE '%%-500' OR trustee_do.object_sid LIKE '%%-516'
+                       OR trustee_do.object_sid LIKE '%%-518' OR trustee_do.object_sid = 'S-1-5-9')
+              AND NOT EXISTS (SELECT 1 FROM ad_group pg
+                              WHERE pg.object_guid = trustee_do.object_guid AND pg.client_id = trustee_do.client_id
+                                AND pg.valid_to IS NULL AND pg.is_protected_group)
+              AND NOT EXISTS (SELECT 1 FROM v_privileged_principal vp
+                              WHERE vp.client_id = trustee_do.client_id
+                                AND vp.object_guid = trustee_do.object_guid)
+            GROUP BY da.template_guid, trustee_do.object_guid, trustee_do.sam_account_name,
+                     da.trustee_sid, trustee_do.object_sid, trustee_do.object_class
         ),
         -- [fix, caught via a real production crash at large scale (70
         -- certificate templates) that this project's own small test
@@ -135,14 +200,14 @@ PLUGIN = {
         -- Aggregated here instead, same pattern as plugin 9001's fix.
         aggregated AS (
             SELECT template_guid,
-                   array_agg(trustee_label || ' (' || rights_label || ')' ORDER BY trustee_label) AS holder_summaries,
+                   array_agg(trustee_label || ' (' || rights_label || ')' ORDER BY trustee_label, trustee_sid) AS holder_summaries,
                    jsonb_agg(jsonb_build_object(
                        'trustee_sid', trustee_sid,
                        'trustee_sam_account_name', trustee_label,
                        'trustee_object_class', trustee_object_class,
                        'access_mask', access_mask,
                        'rights', rights_label
-                   ) ORDER BY trustee_label) AS holder_details,
+                   ) ORDER BY trustee_label, trustee_sid) AS holder_details,
                    count(*) AS holder_count
             FROM unexpected_holders
             GROUP BY template_guid
@@ -156,13 +221,15 @@ PLUGIN = {
             NULL AS tool_reference,
             'critical' AS fd_severity,
             a.holder_count || ' unexpected principal(s) hold dangerous rights on certificate template "'
-                || ct.display_name || '" (ESC4): ' || array_to_string(a.holder_summaries, '; ') AS summary,
+                || COALESCE(ct.display_name, ct.template_name, ct.object_guid::text)
+                || '" (ESC4): ' || array_to_string(a.holder_summaries, '; ') AS summary,
             jsonb_build_object(
                 'template_name', ct.template_name,
                 'display_name', ct.display_name,
                 'holders', a.holder_details
             ) AS detail
         FROM aggregated a
-        JOIN ad_cert_template ct ON ct.object_guid = a.template_guid AND ct.valid_to IS NULL
+        JOIN ad_cert_template ct ON ct.object_guid = a.template_guid AND ct.client_id = %(client_id)s
+         AND ct.valid_to IS NULL
     """,
 }

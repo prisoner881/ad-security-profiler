@@ -21,14 +21,23 @@ its protected_group_member rows (they rest on is_protected_group, which
 would be circular here). The old inline subquery treated a dangerous
 right on, or ownership of, ANY object as privilege, so a stale group that
 merely held OU delegation or had created an OU was never reported.
+
+[v1.6] Key Admins (526) and Enterprise Key Admins (527) are now
+well-known roots by RID instead of being excluded by English name: a
+group nested in Key Admins carries a legitimate adminCount=1 and was
+reported as stale, and renamed/localized KA/EKA groups were reported
+too. Distribution groups (group_type >= 0) are left to plugin 3009 so
+the same marker isn't reported twice. Known limitation: operator groups
+excluded from SDProp via dSHeuristics dwAdminSDExMask are not modelled
+(the collector does not parse that character).
 """
 
 PLUGIN = {
     "plugin_id": 3005,
     "category": "Groups",
     "name": "Group Has a Stale AdminSDHolder Protection Marker",
-    "version": "1.5",
-    "revision_date": "2026-10-03",
+    "version": "1.6",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Investigate why this group is no longer nested under a "
         "privileged group despite carrying the AdminSDHolder protection "
@@ -71,8 +80,9 @@ PLUGIN = {
         "Domain Controllers, Read-only Domain Controllers, and "
         "Replicator (all genuinely part of the canonical AdminSDHolder "
         "list) and incorrectly included Group Policy Creator Owners "
-        "(which is not). Also excludes Key Admins/Enterprise Key Admins "
-        "by name -- see the query for why."
+        "(which is not). [v1.6] Key Admins/Enterprise Key Admins are "
+        "treated as roots by RID (526/527), and distribution groups are "
+        "left to plugin 3009."
     ),
     "base_severity": "low",
     "query": """
@@ -91,14 +101,19 @@ PLUGIN = {
               -- Operators(551), Domain Admins(512), Domain
               -- Controllers(516), Enterprise Admins(519), Print
               -- Operators(550), Read-only Domain Controllers(521),
-              -- Replicator(552), Schema Admins(518). Group Policy
-              -- Creator Owners(520), used in an earlier version of this
-              -- check, is NOT actually part of this list and was removed.
+              -- Replicator(552), Schema Admins(518), Server
+              -- Operators(549). Group Policy Creator Owners(520), used in
+              -- an earlier version of this check, is NOT actually part of
+              -- this list and was removed. [v1.6] Key Admins(526) and
+              -- Enterprise Key Admins(527) are added: they carry
+              -- adminCount=1 by design on 2016+ domains, so groups nested
+              -- in them are legitimately marked, not stale.
               AND (do2.object_sid LIKE '%%-512' OR do2.object_sid LIKE '%%-516'
                    OR do2.object_sid LIKE '%%-518' OR do2.object_sid LIKE '%%-519'
                    OR do2.object_sid LIKE '%%-521' OR do2.object_sid LIKE '%%-544'
                    OR do2.object_sid LIKE '%%-548' OR do2.object_sid LIKE '%%-549'
                    OR do2.object_sid LIKE '%%-550' OR do2.object_sid LIKE '%%-551'
+                   OR do2.object_sid LIKE '%%-526' OR do2.object_sid LIKE '%%-527'
                    OR do2.object_sid LIKE '%%-552')
         ),
         currently_nested AS (
@@ -132,7 +147,7 @@ PLUGIN = {
             NULL AS tool_severity,
             NULL AS tool_reference,
             'low' AS fd_severity,
-            'Group ' || g.sam_account_name || ' carries the AdminSDHolder protection '
+            'Group ' || COALESCE(g.sam_account_name, g.object_guid::text) || ' carries the AdminSDHolder protection '
                 'marker (admin_count=1) but is not currently nested, directly or '
                 'indirectly, under any well-known privileged root group' AS summary,
             jsonb_build_object(
@@ -150,15 +165,8 @@ PLUGIN = {
           AND cn.object_guid IS NULL
           AND wkr.object_guid IS NULL
           AND apg.object_guid IS NULL
-          -- Key Admins / Enterprise Key Admins are genuinely not part of
-          -- the classic AdminSDHolder-protected list (confirmed against
-          -- the same sources used for well_known_roots above) and hold
-          -- domain-wide write access to msDS-KeyCredentialLink -- their
-          -- admin_count=1 status may plausibly be by-design given that
-          -- sensitivity, not necessarily stale nesting residue the way
-          -- it would be for a classic protected group. Excluded here
-          -- rather than force-fit into either bucket under genuine
-          -- uncertainty about the actual mechanism.
-          AND g.sam_account_name NOT IN ('Key Admins', 'Enterprise Key Admins')
+          -- [v1.6] Distribution groups with the marker are reported by
+          -- plugin 3009; Key Admins / Enterprise Key Admins are roots above.
+          AND (g.group_type IS NULL OR g.group_type < 0)
     """,
 }

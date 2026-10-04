@@ -12,14 +12,21 @@ day) rather than a day count computed from now(). The count differed on
 every run, so an unchanged finding was recorded as 'changed' on every
 audit; the date only moves when the underlying attribute does. Severity
 and inclusion thresholds are unchanged.
+
+[v1.4] A never-logged-on account whose pwdLastSet is 0 ("must change
+password at next logon" -- the classic pre-created onboarding account with
+an admin-set initial password) was never reported: pwdLastSet 0 is stored
+as NULL, so the never-logged-on branch failed. That branch now falls back
+to whenCreated: COALESCE(pwd_last_set, when_created) older than 90 days.
+Summary wording unchanged.
 """
 
 PLUGIN = {
     "plugin_id": 1007,
     "category": "User Accounts",
     "name": "Dormant Enabled User Account",
-    "version": "1.3",
-    "revision_date": "2026-10-03",
+    "version": "1.4",
+    "revision_date": "2026-10-04",
     "remediation": (
     "Disable or remove accounts inactive beyond the organization's defined "
     'threshold. If an account has a legitimate ongoing but infrequent purpose, '
@@ -41,7 +48,9 @@ PLUGIN = {
         "gone stale (last_logon_timestamp older than the threshold) and "
         "accounts that appear to have never authenticated at all despite "
         "existing for a while (last_logon_timestamp is NULL but the "
-        "account is not brand new)."
+        "account is not brand new: its password was last set, or -- when "
+        "pwdLastSet is 0 because a change is pending at next logon -- it "
+        "was created, more than 90 days ago)."
     ),
     "base_severity": "low",
     "query": """
@@ -64,6 +73,7 @@ PLUGIN = {
                 'user_principal_name', u.user_principal_name,
                 'last_logon_timestamp', u.last_logon_timestamp,
                 'pwd_last_set', u.pwd_last_set,
+                'when_created', u.when_created,
                 'never_logged_on', u.last_logon_timestamp IS NULL
             ) AS detail
         FROM ad_user u
@@ -72,8 +82,11 @@ PLUGIN = {
           AND u.is_enabled
           AND (
                 (u.last_logon_timestamp IS NOT NULL AND u.last_logon_timestamp < now() - interval '90 days')
-                OR (u.last_logon_timestamp IS NULL AND u.pwd_last_set IS NOT NULL
-                    AND u.pwd_last_set < now() - interval '90 days')
+                -- [v1.4] pwdLastSet 0 (must change at next logon) is NULL;
+                -- fall back to whenCreated so pre-created, never-used
+                -- accounts are reported.
+                OR (u.last_logon_timestamp IS NULL
+                    AND COALESCE(u.pwd_last_set, u.when_created) < now() - interval '90 days')
               )
     """,
 }

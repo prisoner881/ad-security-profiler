@@ -40,14 +40,19 @@ run on adprofiler.py v0.5.11 or later. Domains where the value is NULL are
 deliberately not reported -- NULL means the Directory Service object could not
 be read, which is not the same as the checks being enforced, and reporting it
 either way would be wrong.
+
+[v1.1] Summary wording: v1.0 always said "partially disabled", even
+when every check was off (value 7). The summary now says "fully
+disabled" for 7 and "disabled" otherwise, followed by the list of
+disabled checks.
 """
 
 PLUGIN = {
     "plugin_id": 4030,
     "category": "Domain",
     "name": "UPN, SPN or SPN Alias Uniqueness Verification Disabled",
-    "version": "1.0",
-    "revision_date": "2026-09-29",
+    "version": "1.1",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Re-enable the checks by setting character 21 of dSHeuristics back to "
         "0, or by clearing the attribute entirely if nothing else in it is "
@@ -119,7 +124,10 @@ PLUGIN = {
             END AS fd_severity,
             'Domain ' || COALESCE(d.dns_root, do2.dn_current)
                 || ' has forest-wide principal-name uniqueness verification '
-                   'partially disabled via dSHeuristics character 21 (value '
+                -- [v1.1] not always "partially"
+                || CASE WHEN d.dsheuristics_uniqueness = 7 THEN 'fully disabled'
+                        ELSE 'disabled' END
+                || ' via dSHeuristics character 21 (value '
                 || d.dsheuristics_uniqueness || '): '
                 || array_to_string(ARRAY_REMOVE(ARRAY[
                        CASE WHEN (d.dsheuristics_uniqueness & 1) = 1

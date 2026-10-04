@@ -14,14 +14,26 @@ Not inherently a misconfiguration -- RBCD has legitimate uses (certain
 constrained-delegation-replacement scenarios since Server 2012 R2) -- but
 every grant is a standing trust relationship worth being deliberately
 aware of, not discovered by accident.
+
+[v1.5] One row per resource computer. The query used to emit one row
+per trustee while using the resource computer's GUID as the finding
+identity, so any computer with two or more RBCD trustees produced
+duplicate identities and the whole plugin errored (recording nothing in
+exactly the environments with the most RBCD). Trustees are now
+aggregated: the summary lists them sorted ("trustee: X" for one,
+"trustees: X, Y" for several) and detail carries the sorted list. The
+ad_computer join is now client-scoped and deleted trustee objects are
+excluded. RODCs are escalated like other DCs (schema v36). Note: the
+collector records only trustee SIDs it can resolve to a collected
+object, so a grant to a well-known or foreign SID is not visible here.
 """
 
 PLUGIN = {
     "plugin_id": 2022,
     "category": "Computer Accounts",
     "name": "Computer Account Has Resource-Based Constrained Delegation Configured",
-    "version": "1.4",
-    "revision_date": "2026-09-02",
+    "version": "1.5",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Confirm each trustee is a deliberate, understood delegation "
         "relationship, not leftover from a decommissioned service or an "
@@ -55,27 +67,44 @@ PLUGIN = {
     ),
     "base_severity": "medium",
     "query": """
+        WITH t AS (
+            SELECT DISTINCT
+                   c.object_guid,
+                   c.sam_account_name,
+                   c.is_domain_controller,
+                   COALESCE(trustee.sam_account_name, trustee.object_sid, trustee.object_guid::text) AS trustee_label
+            FROM delegation_edge de
+            JOIN ad_computer c ON c.object_guid = de.target_guid
+                              AND c.client_id = de.client_id
+                              AND c.valid_to IS NULL
+            JOIN directory_object trustee ON trustee.object_guid = de.source_guid
+                                         AND trustee.client_id = de.client_id
+                                         AND NOT trustee.is_deleted
+            WHERE de.client_id = %(client_id)s
+              AND de.valid_to IS NULL
+              AND de.delegation_type = 'rbcd'
+        )
         SELECT
             'warn' AS status,
-            c.object_guid,
+            t.object_guid,
             NULL AS stig_severity,
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
-            CASE WHEN c.is_domain_controller THEN 'high' ELSE 'medium' END AS fd_severity,
-            (CASE WHEN c.is_domain_controller THEN 'Domain Controller ' ELSE 'Computer Account ' END)
-                || c.sam_account_name || ' has resource-based constrained delegation configured -- trustee: '
-                || COALESCE(trustee.sam_account_name, trustee.object_sid) AS summary,
+            CASE WHEN t.is_domain_controller THEN 'high' ELSE 'medium' END AS fd_severity,
+            (CASE WHEN t.is_domain_controller THEN 'Domain Controller ' ELSE 'Computer Account ' END)
+                || COALESCE(t.sam_account_name, t.object_guid::text)
+                || ' has resource-based constrained delegation configured -- '
+                || CASE WHEN count(*) = 1 THEN 'trustee: ' ELSE 'trustees: ' END
+                || string_agg(t.trustee_label, ', ' ORDER BY t.trustee_label) AS summary,
             jsonb_build_object(
-                'resource_computer', c.sam_account_name,
-                'trustee', COALESCE(trustee.sam_account_name, trustee.object_sid),
-                'is_domain_controller', c.is_domain_controller
+                'resource_computer', t.sam_account_name,
+                'trustees', jsonb_agg(t.trustee_label ORDER BY t.trustee_label),
+                'trustee_count', count(*),
+                'is_domain_controller', t.is_domain_controller
             ) AS detail
-        FROM delegation_edge de
-        JOIN ad_computer c ON c.object_guid = de.target_guid AND c.valid_to IS NULL
-        JOIN directory_object trustee ON trustee.object_guid = de.source_guid AND trustee.client_id = de.client_id
-        WHERE de.client_id = %(client_id)s
-          AND de.valid_to IS NULL
-          AND de.delegation_type = 'rbcd'
+        FROM t
+        GROUP BY t.object_guid, t.sam_account_name, t.is_domain_controller
+        ORDER BY t.object_guid
     """,
 }
