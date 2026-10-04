@@ -27,14 +27,24 @@ values happen to decode as valid, if unprintable, UTF-8). Scoped to
 domain-scoped AD-integrated zones only (DomainDnsZones partition) --
 forest-scoped zones and non-AD-integrated (file-based) zones are not
 covered; see adprofiler.py's own DNS_ZONE_ATTRS comment for why.
+
+[v1.1] Requires adprofiler 0.5.15 (schema v36): parse_dns_zone_allow_update
+previously required >= 4 data bytes, but DSPROPERTY_ZONE_ALLOW_UPDATE
+carries a single byte (DNS_ZONE_UPDATE is an 8-bit enum), so
+allow_update was NULL for every real zone and this plugin could never
+fire. The collector now reads the 1-byte value. As a guard against a
+silent repeat, the plugin also raises a low 'warn' on the domain when
+DNS zones were collected but the dynamic-update setting could not be
+determined for any of them (parser or collection failure), instead of
+passing.
 """
 
 PLUGIN = {
     "plugin_id": 4025,
     "category": "Domain",
     "name": "AD-Integrated DNS Zone Allows Nonsecure Dynamic Updates",
-    "version": "1.0",
-    "revision_date": "2026-08-05",
+    "version": "1.1",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Change the zone's dynamic update setting to \"Secure only\": "
         "in the DNS Manager console, right-click the zone -> "
@@ -85,5 +95,37 @@ PLUGIN = {
         WHERE z.client_id = %(client_id)s
           AND z.valid_to IS NULL
           AND z.allow_update = 1
+
+        UNION ALL
+
+        -- [v1.1] Coverage guard: zones collected, but allow_update is
+        -- NULL for every one of them -> the check could not run.
+        SELECT
+            'warn' AS status,
+            d.object_guid,
+            NULL AS stig_severity,
+            NULL AS stig_reference,
+            NULL AS tool_severity,
+            NULL AS tool_reference,
+            'low' AS fd_severity,
+            'Domain ' || COALESCE(d.dns_root, d.object_guid::text)
+                || ': the dynamic update setting could not be determined for any '
+                || 'collected AD-integrated DNS zone (verify "Secure only" manually)' AS summary,
+            jsonb_build_object(
+                'zones_collected', zc.n,
+                'zones_with_allow_update', zc.n_known
+            ) AS detail
+        FROM ad_domain d
+        CROSS JOIN (
+            SELECT count(*) AS n,
+                   count(z.allow_update) AS n_known
+            FROM ad_dns_zone z
+            WHERE z.client_id = %(client_id)s
+              AND z.valid_to IS NULL
+        ) zc
+        WHERE d.client_id = %(client_id)s
+          AND d.valid_to IS NULL
+          AND zc.n > 0
+          AND zc.n_known = 0
     """,
 }

@@ -14,14 +14,23 @@ of every account whose hash it has been allowed to cache. Microsoft's
 intended pattern is to create dedicated Allowed/Denied password
 replication groups scoped to each individual RODC's actual use case,
 not to add accounts to this shared, domain-wide group.
+
+[v1.1] The group is identified by its well-known domain RID 571 instead
+of its English name (which never matched on localized or renamed
+domains). Severity drops to medium when the domain has no read-only DC
+(ad_computer.is_read_only_dc, schema v36) -- the exposure is then
+latent. detail lists the effective enabled member accounts (nested and
+primaryGroupID membership included) and which of them are also in the
+Denied RODC Password Replication Group (RID 572), since Deny wins and
+those are not actually cached.
 """
 
 PLUGIN = {
     "plugin_id": 3016,
     "category": "Groups",
     "name": "Allowed RODC Password Replication Group Is Not Empty",
-    "version": "1.0",
-    "revision_date": "2026-07-18",
+    "version": "1.1",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Remove every member from the Allowed RODC Password Replication "
         "Group -- it is designed to remain empty. If specific accounts "
@@ -48,10 +57,32 @@ PLUGIN = {
         "equivalent to compromising every account whose hash it was "
         "allowed to cache. Microsoft's intended pattern is a dedicated "
         "Password Replication Policy scoped to each individual RODC, "
-        "not this shared group."
+        "not this shared group. Identified by RID 571; rated medium "
+        "when the domain has no read-only DC yet (latent exposure)."
     ),
     "base_severity": "high",
     "query": """
+        WITH eff AS (
+            SELECT vem.group_guid, vem.member_guid,
+                   COALESCE(mdo.sam_account_name, mdo.object_sid, mdo.object_guid::text) AS n
+            FROM v_effective_group_membership vem
+            JOIN directory_object mdo
+                ON mdo.object_guid = vem.member_guid AND mdo.client_id = vem.client_id
+            LEFT JOIN ad_user u
+                ON u.object_guid = vem.member_guid AND u.client_id = vem.client_id AND u.valid_to IS NULL
+            LEFT JOIN ad_computer c
+                ON c.object_guid = vem.member_guid AND c.client_id = vem.client_id AND c.valid_to IS NULL
+            WHERE vem.client_id = %(client_id)s
+              AND NOT mdo.is_deleted
+              AND (u.is_enabled IS TRUE OR c.is_enabled IS TRUE)
+        ),
+        denied AS (
+            SELECT e.member_guid
+            FROM eff e
+            JOIN directory_object ddo
+                ON ddo.object_guid = e.group_guid AND ddo.client_id = %(client_id)s
+            WHERE ddo.object_sid LIKE 'S-1-5-21-%%-572'
+        )
         SELECT
             'fail' AS status,
             g.object_guid,
@@ -59,21 +90,41 @@ PLUGIN = {
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
-            'high' AS fd_severity,
+            CASE WHEN EXISTS (SELECT 1 FROM ad_computer rc
+                               WHERE rc.client_id = g.client_id AND rc.valid_to IS NULL
+                                 AND rc.is_read_only_dc)
+                 THEN 'high' ELSE 'medium' END AS fd_severity,
             'Allowed RODC Password Replication Group has ' || g.member_count_direct || ' member(s), but should be empty' AS summary,
             jsonb_build_object(
+                'sam_account_name', g.sam_account_name,
+                'object_sid', do2.object_sid,
                 'member_count_direct', g.member_count_direct,
                 'members', (
-                    SELECT array_agg(mdo.sam_account_name ORDER BY mdo.sam_account_name)
+                    SELECT array_agg(COALESCE(mdo.sam_account_name, mdo.object_sid, mdo.object_guid::text)
+                                     ORDER BY COALESCE(mdo.sam_account_name, mdo.object_sid, mdo.object_guid::text))
                     FROM group_member_edge gme
                     JOIN directory_object mdo ON mdo.object_guid = gme.member_guid AND mdo.client_id = gme.client_id
                     WHERE gme.group_guid = g.object_guid AND gme.client_id = g.client_id AND gme.valid_to IS NULL
+                ),
+                'effective_member_accounts', (
+                    SELECT array_agg(DISTINCT e.n ORDER BY e.n) FROM eff e WHERE e.group_guid = g.object_guid
+                ),
+                'effective_members_also_denied', (
+                    SELECT array_agg(DISTINCT e.n ORDER BY e.n) FROM eff e
+                    WHERE e.group_guid = g.object_guid
+                      AND e.member_guid IN (SELECT member_guid FROM denied)
+                ),
+                'read_only_dc_present', EXISTS (
+                    SELECT 1 FROM ad_computer rc
+                    WHERE rc.client_id = g.client_id AND rc.valid_to IS NULL AND rc.is_read_only_dc
                 )
             ) AS detail
         FROM ad_group g
+        JOIN directory_object do2
+            ON do2.object_guid = g.object_guid AND do2.client_id = g.client_id
         WHERE g.valid_to IS NULL
           AND g.client_id = %(client_id)s
-          AND g.sam_account_name = 'Allowed RODC Password Replication Group'
+          AND do2.object_sid LIKE 'S-1-5-21-%%-571'
           AND COALESCE(g.member_count_direct, 0) > 0
     """,
 }

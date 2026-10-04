@@ -26,14 +26,26 @@ finding's evidence includes the trust partner's name specifically so
 the auditor can make that judgment call -- a name that's clearly a
 child of this domain warrants a different read than an unrelated
 external domain name.
+
+[v1.1] Scoped to the trusts where bit 0x4 actually governs SID filtering:
+external (non-forest) Windows trusts -- trustType 1 (downlevel) or 2
+(uplevel), FOREST_TRANSITIVE (0x8) not set -- whose direction includes
+outbound (trustDirection & 2), i.e. where this domain trusts the partner
+and so is the side exposed to injected SIDs. Forest trusts are filtered
+to the trusted forest's SIDs by default without 0x4; their relaxation
+(TREAT_AS_EXTERNAL, 0x40) is plugin 7002's check, so every healthy forest
+trust (trustAttributes = 0x8) was previously a false positive here. MIT
+Kerberos realm trusts (trustType 3), where SID filtering does not apply,
+and inbound-only trusts, where the filtering is done by the partner, are
+no longer reported.
 """
 
 PLUGIN = {
     "plugin_id": 7001,
     "category": "Trusts",
     "name": "Trust Relationship Does Not Have SID Filtering Enabled",
-    "version": "1.0",
-    "revision_date": "2026-07-18",
+    "version": "1.1",
+    "revision_date": "2026-10-04",
     "remediation": (
         "First, confirm whether this trust is a genuine external/cross-"
         "forest relationship or a legacy intra-forest parent-child trust "
@@ -61,7 +73,12 @@ PLUGIN = {
         "specification) restricts which SIDs a trusted domain can "
         "present in an authenticated token. Without it, a compromise on "
         "the trusted side can inject SID history claiming membership in "
-        "a privileged group on this side of the trust. Excludes intra-"
+        "a privileged group on this side of the trust. Applies to "
+        "external (non-forest) Windows trusts that are outbound or "
+        "bidirectional, where this domain trusts the partner. Excludes "
+        "forest trusts (SID filtering is on by default there; relaxing it "
+        "via TREAT_AS_EXTERNAL is plugin 7002), MIT Kerberos realm trusts, "
+        "inbound-only trusts (filtering is the partner's side), intra-"
         "forest trusts (TRUST_ATTRIBUTE_WITHIN_FOREST set), where SID "
         "filtering isn't meaningful, and disabled trusts (covered by "
         "plugin 7004). Known limitation: legitimate, long-standing "
@@ -95,6 +112,11 @@ PLUGIN = {
           AND t.client_id = %(client_id)s
           AND NOT t.sid_filtering_enabled
           AND (COALESCE(t.trust_attributes, 0) & 32) = 0
-          AND COALESCE(t.trust_direction, 0) != 0
+          -- [v1.1] external trusts only: forest trusts filter by default
+          -- (relaxation = TREAT_AS_EXTERNAL, plugin 7002); MIT realms excluded
+          AND (COALESCE(t.trust_attributes, 0) & 8) = 0
+          AND COALESCE(t.trust_type, 2) IN (1, 2)
+          -- [v1.1] outbound or bidirectional: this domain trusts the partner
+          AND (COALESCE(t.trust_direction, 0) & 2) != 0
     """,
 }

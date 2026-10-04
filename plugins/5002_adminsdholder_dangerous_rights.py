@@ -29,14 +29,21 @@ WriteDacl/WriteOwner (raw bits are still matched too). The rights label
 names only GenericAll when it is held, since it subsumes the rest.
 Inherit-only ACEs (acl_edge.inherit_only, schema v34) are skipped: they
 grant nothing on the object they are stored on, only on its descendants.
+
+[v1.5] Aggregated to one finding per trustee. A principal holding two or
+more dangerous ACEs on AdminSDHolder (e.g. separate WriteDacl and
+WriteOwner ACEs) produced one row per ACE with the same object_guid,
+which violated the one-open-finding-per-identity rule and made the whole
+plugin error. access_mask in the detail is now the OR of the trustee's
+dangerous ACE masks; access_masks lists them individually.
 """
 
 PLUGIN = {
     "plugin_id": 5002,
     "category": "ACLs",
     "name": "Dangerous Rights on AdminSDHolder Held by an Unexpected Principal",
-    "version": "1.4",
-    "revision_date": "2026-10-03",
+    "version": "1.5",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Remove the grant unless it's a deliberate, understood exception "
         "(`dsacls \"CN=AdminSDHolder,CN=System,DC=...\" /R <trustee>`, or "
@@ -105,6 +112,19 @@ PLUGIN = {
                     OR (a.access_mask & 983551) = 983551                    -- GenericAll, as stored
                     OR ((a.access_mask & 32) <> 0 AND a.object_type_guid IS NULL)  -- GenericWrite, as stored
                   )
+        ),
+        -- [v1.5] One row per trustee: several dangerous ACEs held by the
+        -- same principal used to produce duplicate finding identities.
+        per_trustee AS (
+            SELECT da.trustee_sid,
+                   bit_or(da.access_mask) AS access_mask,
+                   array_agg(DISTINCT da.access_mask ORDER BY da.access_mask) AS access_masks,
+                   bool_or(da.is_generic_all) AS is_generic_all,
+                   bool_or(da.is_generic_write) AS is_generic_write,
+                   bool_or(da.is_write_dacl) AS is_write_dacl,
+                   bool_or(da.is_write_owner) AS is_write_owner
+            FROM dangerous_aces da
+            GROUP BY da.trustee_sid
         )
         SELECT
             'fail' AS status,
@@ -128,11 +148,13 @@ PLUGIN = {
                 'trustee_sid', da.trustee_sid,
                 'sam_account_name', do2.sam_account_name,
                 'object_class', do2.object_class,
-                'access_mask', da.access_mask
+                'access_mask', da.access_mask,
+                'access_masks', to_jsonb(da.access_masks)
             ) AS detail
-        FROM dangerous_aces da
+        FROM per_trustee da
         JOIN directory_object do2
             ON do2.object_sid = da.trustee_sid AND do2.client_id = %(client_id)s
+           AND NOT do2.is_deleted
         WHERE NOT EXISTS (
             SELECT 1 FROM expected_holders eh WHERE eh.object_guid = do2.object_guid
         )

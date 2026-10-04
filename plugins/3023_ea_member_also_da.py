@@ -18,14 +18,22 @@ those would require the client to tell us their names first; silently
 guessing at group names would produce unreliable results, so that part
 of the STIG's intent is left to the client to verify manually rather
 than approximated here.
+
+[v1.1] The summary labels the member by object class (User / Group /
+Computer / Foreign principal) and falls back to its SID rather than its
+GUID (foreign security principals have no sAMAccountName). Coverage
+note: Enterprise Admins exists only in the forest root domain, so this
+check can only fire on a forest-root collection; child-domain admins
+placed in the root's Enterprise Admins are visible only there. Plugin
+3024 reports the same intersection under STIG V-243467.
 """
 
 PLUGIN = {
     "plugin_id": 3023,
     "category": "Groups",
     "name": "Enterprise Admins Member Also Holds Domain Admins Membership",
-    "version": "1.0",
-    "revision_date": "2026-08-12",
+    "version": "1.1",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Remove this account from either Enterprise Admins or Domain "
         "Admins so that no single account holds both simultaneously. "
@@ -49,7 +57,8 @@ PLUGIN = {
         "member of both Enterprise Admins and Domain Admins collapses "
         "the separation those two tiers are meant to enforce -- a "
         "single compromised credential now carries both forest-wide "
-        "and domain-wide privilege at once."
+        "and domain-wide privilege at once. Enterprise Admins exists only in the forest root domain, "
+        "so this can only fire on a forest-root collection."
     ),
     "base_severity": "critical",
     "query": """
@@ -57,13 +66,13 @@ PLUGIN = {
             SELECT DISTINCT vem.member_guid
             FROM v_effective_group_membership vem
             JOIN directory_object gdo ON gdo.object_guid = vem.group_guid AND gdo.client_id = vem.client_id
-            WHERE vem.client_id = %(client_id)s AND gdo.object_sid LIKE '%%-519'
+            WHERE vem.client_id = %(client_id)s AND gdo.object_sid LIKE 'S-1-5-21-%%-519'
         ),
         da_members AS (
             SELECT DISTINCT vem.member_guid
             FROM v_effective_group_membership vem
             JOIN directory_object gdo ON gdo.object_guid = vem.group_guid AND gdo.client_id = vem.client_id
-            WHERE vem.client_id = %(client_id)s AND gdo.object_sid LIKE '%%-512'
+            WHERE vem.client_id = %(client_id)s AND gdo.object_sid LIKE 'S-1-5-21-%%-512'
         )
         SELECT
             'fail' AS status,
@@ -73,10 +82,16 @@ PLUGIN = {
             NULL AS tool_severity,
             NULL AS tool_reference,
             'critical' AS fd_severity,
-            'Account ' || COALESCE(mdo.sam_account_name, mdo.object_guid::text)
+            (CASE mdo.object_class::text
+                  WHEN 'group' THEN 'Group '
+                  WHEN 'computer' THEN 'Computer '
+                  WHEN 'foreign_security_principal' THEN 'Foreign principal '
+                  ELSE 'Account ' END)
+                || COALESCE(mdo.sam_account_name, mdo.object_sid, mdo.object_guid::text)
                 || ' is a member of both Enterprise Admins and Domain Admins' AS summary,
             jsonb_build_object(
                 'sam_account_name', mdo.sam_account_name,
+                'object_sid', mdo.object_sid,
                 'object_class', mdo.object_class
             ) AS detail
         FROM ea_members m

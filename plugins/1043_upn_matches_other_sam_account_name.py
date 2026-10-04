@@ -41,14 +41,22 @@ jdoe@corp.example and sAMAccountName jdoe belong to the same person, and
 across a multi-domain forest collisions between different people are routine.
 Including that comparison would bury the exact match this plugin exists to
 find. Only the full-string match is reported.
+
+[v1.1] Offending accounts now include computer objects (and gMSAs/sMSAs,
+which are collected as computers): schema v36 collects userPrincipalName
+for them (ad_computer.user_principal_name). A computer created through
+ms-DS-MachineAccountQuota by any authenticated user, with its UPN set to
+a privileged account's sAMAccountName, is the zero-privilege variant of
+this attack and was invisible before. The impersonated account's
+adminCount and pwdLastSet are now also read for computer targets.
 """
 
 PLUGIN = {
     "plugin_id": 1043,
     "category": "User Accounts",
     "name": "User Principal Name Matches Another Account's sAMAccountName",
-    "version": "1.0",
-    "revision_date": "2026-09-29",
+    "version": "1.1",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Treat this as a live privilege escalation attempt until proven "
         "otherwise, particularly where the impersonated account is "
@@ -57,7 +65,8 @@ PLUGIN = {
         "sAMAccountName. "
         "Immediate actions: clear or correct the offending "
         "userPrincipalName (Set-ADUser <account> -UserPrincipalName "
-        "<account>@<domain>); reset the password of the impersonated target, "
+        "<account>@<domain>; for a computer or gMSA use Set-ADComputer / "
+        "Set-ADServiceAccount, normally clearing the UPN entirely); reset the password of the impersonated target, "
         "because ResetNightmare works by resetting it and the attacker may "
         "already hold the new value; and review authentication activity for "
         "the target account. Security event ID 4738 (user account changed) on "
@@ -83,7 +92,7 @@ PLUGIN = {
          "url": "https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-kile/b4af186e-b2ff-43f9-b18e-eedb366abf13"},
     ],
     "description": (
-        "Reports a user account whose userPrincipalName is a verbatim copy of "
+        "Reports a user, computer or managed service account whose userPrincipalName is a verbatim copy of "
         "a different account's sAMAccountName. This is the direct "
         "configuration signature of ResetNightmare (CVE-2026-27912): because "
         "Kerberos can resolve principals by UPN using the NT-ENTERPRISE name "
@@ -121,6 +130,25 @@ PLUGIN = {
             JOIN privileged_roots pr ON pr.object_guid = vem.group_guid
             WHERE vem.client_id = %(client_id)s
             GROUP BY vem.member_guid
+        ),
+        -- [v1.1] Offending accounts: users, and computers (incl. gMSA/sMSA)
+        -- whose UPN is collected since schema v36.
+        offender AS (
+            SELECT u.object_guid, u.sam_account_name, u.user_principal_name,
+                   u.is_enabled, u.when_created
+            FROM ad_user u
+            WHERE u.valid_to IS NULL
+              AND u.client_id = %(client_id)s
+              AND u.user_principal_name IS NOT NULL
+              AND u.user_principal_name <> ''
+            UNION ALL
+            SELECT c.object_guid, c.sam_account_name, c.user_principal_name,
+                   c.is_enabled, c.when_created
+            FROM ad_computer c
+            WHERE c.valid_to IS NULL
+              AND c.client_id = %(client_id)s
+              AND c.user_principal_name IS NOT NULL
+              AND c.user_principal_name <> ''
         ),
         -- Candidate impersonation targets: any user or computer principal.
         -- Groups are excluded because Kerberos resolves security principals,
@@ -169,6 +197,7 @@ PLUGIN = {
                    '(CVE-2026-27912)' AS summary,
             jsonb_build_object(
                 'offending_account', u.sam_account_name,
+                'offending_object_class', odo.object_class,
                 'offending_account_dn', odo.dn_current,
                 'offending_account_enabled', u.is_enabled,
                 'offending_user_principal_name', u.user_principal_name,
@@ -183,21 +212,29 @@ PLUGIN = {
                 'impersonated_pwd_last_set', tu.pwd_last_set,
                 'corroborating_event_ids', jsonb_build_array(4738, 4724, 5136)
             ) AS detail
-        FROM ad_user u
+        FROM offender u
         JOIN directory_object odo
-            ON odo.object_guid = u.object_guid AND odo.client_id = u.client_id
+            ON odo.object_guid = u.object_guid AND odo.client_id = %(client_id)s
         JOIN principal p
             ON lower(p.sam_account_name) = lower(u.user_principal_name)
            AND p.object_guid <> u.object_guid
-        LEFT JOIN ad_user tu
-            ON tu.object_guid = p.object_guid
-           AND tu.client_id = %(client_id)s
-           AND tu.valid_to IS NULL
+        LEFT JOIN LATERAL (
+            -- [v1.1] adminCount / pwdLastSet of the target, user or computer.
+            SELECT x.admin_count, x.pwd_last_set
+            FROM (
+                SELECT au.admin_count, au.pwd_last_set
+                FROM ad_user au
+                WHERE au.object_guid = p.object_guid AND au.client_id = %(client_id)s
+                  AND au.valid_to IS NULL
+                UNION ALL
+                SELECT ac.admin_count, ac.pwd_last_set
+                FROM ad_computer ac
+                WHERE ac.object_guid = p.object_guid AND ac.client_id = %(client_id)s
+                  AND ac.valid_to IS NULL
+            ) x
+            LIMIT 1
+        ) tu ON TRUE
         LEFT JOIN privileged_members tpm ON tpm.member_guid = p.object_guid
-        WHERE u.valid_to IS NULL
-          AND u.client_id = %(client_id)s
-          AND u.user_principal_name IS NOT NULL
-          AND u.user_principal_name <> ''
         ORDER BY u.object_guid, p.sam_account_name
     """,
 }

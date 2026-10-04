@@ -34,14 +34,24 @@ specific FGPP, or "domain default") that leaves at least one enabled
 user below the threshold -- not one row per user, which could mean
 thousands of rows on a large domain, and not a single domain-wide row,
 which is exactly the framing that produced the original false positive.
+
+[v2.1] Group-based PSO targets now count only global security groups --
+AD ignores a PSO linked to any other group type. Primary-group
+membership (e.g. a PSO linked to Domain Users) is resolved through the
+primary-group edges group_member_edge now carries (schema v36); before
+that, such a PSO reached nobody and every user fell back to the domain
+default, the very false FAIL v2.0 was written to remove. The affected
+user count moved from the summary to the detail so the finding no
+longer changes whenever the user population drifts. Computer accounts
+are not evaluated: their passwords are machine-generated.
 """
 
 PLUGIN = {
     "plugin_id": 4002,
     "category": "Domain",
     "name": "Effective Minimum Password Length Below Recommended Threshold",
-    "version": "2.0",
-    "revision_date": "2026-08-05",
+    "version": "2.1",
+    "revision_date": "2026-10-04",
     "remediation": (
         "For the specific policy source named in this finding "
         "(a Fine-Grained Password Policy, or the domain-wide default), "
@@ -99,6 +109,10 @@ PLUGIN = {
             SELECT vem.member_guid AS user_guid, af.pso_guid, af.policy_name, af.precedence, af.min_pwd_length
             FROM fgpp_applies_to_edge e
             JOIN active_fgpps af ON af.pso_guid = e.pso_guid
+            -- [v2.1] PSOs apply only through global security groups
+            -- (groupType 0x2 with the security bit 0x80000000 set).
+            JOIN ad_group g ON g.object_guid = e.target_guid AND g.client_id = e.client_id AND g.valid_to IS NULL
+                           AND (g.group_type & 2) <> 0 AND g.group_type < 0
             JOIN v_effective_group_membership vem ON vem.group_guid = e.target_guid AND vem.client_id = e.client_id
             WHERE e.client_id = %(client_id)s AND e.valid_to IS NULL
         ),
@@ -144,8 +158,8 @@ PLUGIN = {
             NULL AS tool_severity,
             NULL AS tool_reference,
             CASE WHEN ap.effective_min_length < 8 THEN 'high' ELSE 'medium' END AS fd_severity,
-            ap.affected_user_count || ' enabled user(s) have an effective minimum password length of '
-                || ap.effective_min_length || ' characters via "' || ap.source_name
+            'Enabled users have an effective minimum password length of '
+                || ap.effective_min_length || ' characters via "' || COALESCE(ap.source_name, ap.source_guid::text)
                 || '", below the 14-character STIG minimum' AS summary,
             jsonb_build_object(
                 'policy_source', ap.source_name,

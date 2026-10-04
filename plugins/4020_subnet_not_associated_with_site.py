@@ -20,14 +20,24 @@ practical consequence as the DC-coverage gap PingCastle's check
 targets, just detected from the configuration data itself rather than
 requiring DNS resolution to determine which subnet a DC's IP falls
 into.
+
+[v1.1] The "references a site that no longer exists" branch now looks
+the siteObject DN up among current, non-deleted ad_site rows (not any
+directory_object, deleted ones included) and is skipped entirely when
+no current ad_site rows exist for the client. siteObject is a forward
+link, so AD itself clears it when a site is deleted: a dangling value
+in practice means site collection failed (it is non-fatal in the
+collector) while subnet collection succeeded, which v1.0 reported as a
+configuration problem on every subnet. The PingCastle reference is
+kept as a related (not equivalent) rule.
 """
 
 PLUGIN = {
     "plugin_id": 4020,
     "category": "Domain",
     "name": "AD Subnet Not Associated With Any Site",
-    "version": "1.0",
-    "revision_date": "2026-07-31",
+    "version": "1.1",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Associate this subnet with the correct AD site in AD Sites "
         "and Services (right-click the subnet -> Properties -> Site). "
@@ -41,13 +51,13 @@ PLUGIN = {
     "control_id": "DOM-421",
     "framework_tags": [],
     "references": [
-        {"title": "PingCastle: Stale Objects rules -- S-DC-SubnetMissing",
+        {"title": "PingCastle (related rule, DC IP coverage): S-DC-SubnetMissing",
          "url": "https://www.pingcastle.com/PingCastleFiles/ad_hc_rules_list.html"},
     ],
     "description": (
         "An AD subnet object exists but is not associated with any "
         "site -- either siteObject is empty, or it references a site "
-        "that no longer exists. Functionally inert for site-aware "
+        "that is not among the collected sites. Functionally inert for site-aware "
         "service referral, the same practical consequence PingCastle's "
         "own DC-subnet-coverage check targets, detected here from the "
         "configuration data directly rather than requiring DNS "
@@ -77,10 +87,26 @@ PLUGIN = {
           AND sub.valid_to IS NULL
           AND (
               sub.site_dn IS NULL
-              OR NOT EXISTS (
-                  SELECT 1 FROM directory_object do2
-                  WHERE do2.client_id = %(client_id)s
-                    AND lower(do2.dn_current) = lower(sub.site_dn)
+              -- [v1.1] dangling-site branch: match current, non-deleted
+              -- ad_site rows only, and only when sites were collected
+              -- at all (otherwise it is a collection gap, not config).
+              OR (
+                  EXISTS (
+                      SELECT 1 FROM ad_site s0
+                      WHERE s0.client_id = %(client_id)s
+                        AND s0.valid_to IS NULL
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM ad_site s
+                      JOIN directory_object do2
+                        ON do2.object_guid = s.object_guid
+                       AND do2.client_id = s.client_id
+                       AND NOT do2.is_deleted
+                      WHERE s.client_id = %(client_id)s
+                        AND s.valid_to IS NULL
+                        AND lower(do2.dn_current) = lower(sub.site_dn)
+                  )
               )
           )
     """,

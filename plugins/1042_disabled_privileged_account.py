@@ -26,18 +26,31 @@ shipped, and flagging them would train the reader to ignore this
 finding.
 
 Scope note: this identifies accounts that are privileged *today* by
-membership or admin_count. It does not attempt to determine who can
-re-enable them -- that requires per-object ACL collection, which this
-project currently performs only for the domain root and AdminSDHolder
-(see acl_edge's own scope documentation).
+membership or by Tier 0 ACL rights. It does not attempt to determine who
+can re-enable them -- that requires the ACL of each user object, which
+is not collected (ACLs are collected for the domain root, AdminSDHolder,
+OUs, PKI objects and CA objects; see acl_edge's scope documentation).
+
+[v1.1] Privilege paths widened and the adminCount-only case dropped:
+- primaryGroupID: a user whose primary group is a privileged group
+  (e.g. 512) is reported as a member of it at 'high' (schema v36 also
+  records primary-group membership as an edge; the explicit RID match
+  keeps it right either way).
+- Tier 0 ACL privilege from v_privileged_principal (control of or
+  ownership of a Tier 0 object, DCSync, directly or via a group) is
+  reported at 'high' too, e.g. a disabled account holding DCSync.
+- An account whose only sign of privilege was admin_count=1 was worded
+  "still holds privilege"; a stale adminCount grants nothing, and plugin
+  1025 already reports it as a stale marker. Such accounts are no longer
+  reported here.
 """
 
 PLUGIN = {
     "plugin_id": 1042,
     "category": "User Accounts",
     "name": "Disabled Account Still Holding Privilege",
-    "version": "1.0",
-    "revision_date": "2026-09-02",
+    "version": "1.1",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Treat a disabled privileged account as an account that still "
         "needs decommissioning, not one that has been decommissioned. "
@@ -68,9 +81,12 @@ PLUGIN = {
     ],
     "description": (
         "Identifies accounts that are disabled in Active Directory but "
-        "still hold privilege -- either an effective membership "
-        "(including nested) in a well-known privileged group, or the "
-        "AdminSDHolder admin_count marker. Disabling an account "
+        "still hold privilege -- an effective membership (including "
+        "nested and primary-group membership) in a well-known "
+        "privileged group, or Tier 0 rights (control or ownership of a "
+        "Tier 0 object, or DCSync), directly or through a group. A "
+        "leftover admin_count marker alone is plugin 1025's finding. "
+        "Disabling an account "
         "suspends authentication; it does not remove group membership, "
         "SPNs, SID history, or any ACE granting the account rights "
         "elsewhere in the directory. A single write to "
@@ -84,7 +100,7 @@ PLUGIN = {
     "base_severity": "high",
     "query": """
         WITH privileged_roots AS (
-            SELECT g.object_guid, g.sam_account_name
+            SELECT g.object_guid, g.sam_account_name, gdo.object_sid
             FROM ad_group g
             JOIN directory_object gdo
                 ON gdo.object_guid = g.object_guid AND gdo.client_id = g.client_id
@@ -106,13 +122,34 @@ PLUGIN = {
                    OR gdo.object_sid LIKE '%%-552')
         ),
         privileged_members AS (
-            SELECT vem.member_guid,
-                   array_agg(DISTINCT pr.sam_account_name ORDER BY pr.sam_account_name)
-                       AS via_groups
-            FROM v_effective_group_membership vem
-            JOIN privileged_roots pr ON pr.object_guid = vem.group_guid
-            WHERE vem.client_id = %(client_id)s
-            GROUP BY vem.member_guid
+            SELECT m.member_guid,
+                   array_agg(DISTINCT m.group_name ORDER BY m.group_name) AS via_groups
+            FROM (
+                SELECT vem.member_guid, COALESCE(pr.sam_account_name, pr.object_guid::text) AS group_name
+                FROM v_effective_group_membership vem
+                JOIN privileged_roots pr ON pr.object_guid = vem.group_guid
+                WHERE vem.client_id = %(client_id)s
+                UNION ALL
+                -- [v1.1] primaryGroupID membership, by RID.
+                SELECT u.object_guid, COALESCE(pr.sam_account_name, pr.object_guid::text)
+                FROM ad_user u
+                JOIN privileged_roots pr ON pr.object_sid LIKE '%%-' || u.primary_group_id::text
+                WHERE u.client_id = %(client_id)s AND u.valid_to IS NULL
+                  AND u.primary_group_id IS NOT NULL
+            ) m
+            GROUP BY m.member_guid
+        ),
+        acl_privileged AS (
+            -- [v1.1] Tier 0 control / ownership / DCSync (direct or via a
+            -- group) from the shared view; protected_group_member rows are
+            -- left out (they rest on adminCount=1 groups, which may be
+            -- stale -- the RID list above covers real membership).
+            SELECT object_guid,
+                   array_agg(DISTINCT privilege_source ORDER BY privilege_source) AS privilege_sources
+            FROM v_privileged_principal
+            WHERE client_id = %(client_id)s
+              AND privilege_source <> 'protected_group_member'
+            GROUP BY object_guid
         )
         SELECT
             'fail' AS status,
@@ -121,16 +158,13 @@ PLUGIN = {
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
-            CASE
-                WHEN pm.via_groups IS NOT NULL THEN 'high'
-                ELSE 'medium'
-            END AS fd_severity,
+            'high' AS fd_severity,
             'Disabled account "' || COALESCE(u.sam_account_name, do2.dn_current)
                 || '" still holds privilege ('
                 || CASE
                        WHEN pm.via_groups IS NOT NULL
                            THEN 'effective member of ' || array_to_string(pm.via_groups, ', ')
-                       ELSE 'admin_count marker set'
+                       ELSE 'Tier 0 rights: ' || array_to_string(ap.privilege_sources, ', ')
                    END
                 || ') -- re-enabling it restores that privilege in a single write'
                 AS summary,
@@ -140,6 +174,7 @@ PLUGIN = {
                 'distinguished_name', do2.dn_current,
                 'admin_count', u.admin_count,
                 'privileged_via_groups', pm.via_groups,
+                'privilege_sources', ap.privilege_sources,
                 'has_service_principal_names',
                     COALESCE(array_length(u.service_principal_names, 1), 0) > 0,
                 'service_principal_names', u.service_principal_names,
@@ -156,10 +191,11 @@ PLUGIN = {
         JOIN directory_object do2
             ON do2.object_guid = u.object_guid AND do2.client_id = u.client_id
         LEFT JOIN privileged_members pm ON pm.member_guid = u.object_guid
+        LEFT JOIN acl_privileged ap ON ap.object_guid = u.object_guid
         WHERE u.valid_to IS NULL
           AND u.client_id = %(client_id)s
           AND u.is_enabled IS FALSE
-          AND (u.admin_count = 1 OR pm.member_guid IS NOT NULL)
+          AND (pm.member_guid IS NOT NULL OR ap.object_guid IS NOT NULL)
           -- Disabled by design in every domain; excluding these keeps the
           -- finding actionable rather than perpetually noisy.
           AND COALESCE(do2.object_sid, '') NOT LIKE '%%-501'

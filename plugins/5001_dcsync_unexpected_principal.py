@@ -42,14 +42,27 @@ CLEARED, not granted, and dedicated Windows Event IDs (1979-1983) exist
 specifically to detect this exact condition as a default-security-
 descriptor anomaly. A finding on that group is a genuine, if
 lower-confidence, anomaly worth surfacing, not a default to suppress.
+
+[v1.5] Corrected the v1.1 reasoning above: since Windows Server 2012 the
+default domain-root DACL grants the Domain Controllers group (RID 516)
+DS-Replication-Get-Changes-All, so it is now excluded as a default
+holder (it was a critical false positive on every modern domain). The
+DCSync test now mirrors v_privileged_principal: only allow ACEs that
+apply to the root itself (inherit_only IS NOT TRUE) and carry the
+CONTROL_ACCESS bit count, and All Extended Rights / GenericAll (which
+include both replication rights) are reported too. A full DCSync grant
+is fail / critical; a partial grant (one right only, which cannot
+extract secrets on its own) is warn / medium. Read-only DCs (521) and
+Enterprise Read-only DCs (498) are excluded unless they hold the full
+set.
 """
 
 PLUGIN = {
     "plugin_id": 5001,
     "category": "ACLs",
     "name": "DCSync Replication Rights Held by an Unexpected Principal",
-    "version": "1.4",
-    "revision_date": "2026-09-02",
+    "version": "1.5",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Confirm this grant was deliberate and is still needed. "
         "Service accounts frequently accumulate replication rights for "
@@ -77,88 +90,106 @@ PLUGIN = {
         "hashes for any account via DCSync -- Mimikatz's "
         "lsadump::dcsync, MITRE ATT&CK T1003.006. By default only "
         "Domain Admins, Enterprise Admins, Administrators, and domain "
-        "controller computer accounts hold this pair. This finding "
-        "flags any OTHER principal holding either right on the domain "
-        "root, since a real DCSync attack needs both but a partial "
-        "grant is itself worth investigating -- it either indicates an "
-        "in-progress/incomplete grant or a misconfiguration."
+        "controller computer accounts (and the Domain Controllers "
+        "group) hold this pair. All Extended Rights and GenericAll on "
+        "the domain root include both rights and also grant DCSync. "
+        "This finding flags any OTHER principal holding DCSync on the "
+        "domain root (fail / critical) and, at warn / medium, any "
+        "principal holding only one of the two rights, which cannot "
+        "extract secrets alone but indicates an incomplete grant or a "
+        "misconfiguration."
     ),
     "base_severity": "critical",
     "query": """
-        WITH expected_holders AS (
-            SELECT do2.object_guid
-            FROM directory_object do2
-            WHERE do2.client_id = %(client_id)s
-              -- 512=Domain Admins, 519=Enterprise Admins, 544=Administrators,
-              -- 498=Enterprise Read-only Domain Controllers (confirmed
-              -- against Microsoft's own MS-ADTS spec and multiple KB
-              -- articles as a by-design DEFAULT holder of exactly
-              -- DS-Replication-Get-Changes, deliberately NOT the -All
-              -- variant -- Microsoft's own troubleshooting docs treat an
-              -- RODC group holding the -All variant as the bug scenario,
-              -- not the reverse). S-1-5-9 (Enterprise Domain Controllers,
-              -- a well-known SID, not a domain-relative RID) is also a
-              -- confirmed by-design default holder of the full
-              -- replication right set. Deliberately does NOT exclude the
-              -- "Domain Controllers" group (RID 516) itself -- Microsoft's
-              -- own documentation explicitly and repeatedly instructs
-              -- that group's replication rights be CLEARED, not granted
-              -- (Event IDs 1979-1983 exist specifically to detect and
-              -- flag this exact condition as a default-security-descriptor
-              -- anomaly), so a finding there is a genuine anomaly worth
-              -- surfacing, not a default to suppress.
-              AND (do2.object_sid LIKE '%%-512' OR do2.object_sid LIKE '%%-519'
-                   OR do2.object_sid LIKE '%%-544' OR do2.object_sid LIKE '%%-498'
-                   OR do2.object_sid = 'S-1-5-9')
-            UNION
-            SELECT c.object_guid
-            FROM ad_computer c
-            WHERE c.client_id = %(client_id)s AND c.valid_to IS NULL
-              AND c.is_domain_controller
-        ),
-        dcsync_rights AS (
+        -- [v1.5] Mirrors v_privileged_principal's 'dcsync' definition:
+        -- allow ACEs that apply to the domain root itself (inherit_only IS
+        -- NOT TRUE) carrying CONTROL_ACCESS (0x100), for Get-Changes /
+        -- Get-Changes-All, or All Extended Rights (CONTROL_ACCESS with no
+        -- object type -- which GenericAll 0xF01FF includes).
+        WITH dcsync_rights AS (
             SELECT
                 a.trustee_sid,
-                bool_or(a.object_type_guid = '1131f6aa-9c07-11d1-f79f-00c04fc2dcd2') AS has_get_changes,
-                bool_or(a.object_type_guid = '1131f6ad-9c07-11d1-f79f-00c04fc2dcd2') AS has_get_changes_all
+                COALESCE(bool_or(a.object_type_guid = '1131f6aa-9c07-11d1-f79f-00c04fc2dcd2'), false) AS has_get_changes,
+                COALESCE(bool_or(a.object_type_guid = '1131f6ad-9c07-11d1-f79f-00c04fc2dcd2'), false) AS has_get_changes_all,
+                bool_or(a.object_type_guid IS NULL) AS has_all_extended_rights,
+                bool_or(a.object_type_guid IS NULL
+                        AND (a.access_mask & 983551) = 983551) AS has_generic_all
             FROM acl_edge a
-            JOIN ad_domain d ON d.object_guid = a.object_guid AND d.valid_to IS NULL
+            JOIN ad_domain d
+              ON d.object_guid = a.object_guid AND d.client_id = a.client_id
+             AND d.valid_to IS NULL
             WHERE a.client_id = %(client_id)s
               AND a.valid_to IS NULL
               AND a.ace_type = 'allow'
-              AND a.object_type_guid IN ('1131f6aa-9c07-11d1-f79f-00c04fc2dcd2',
-                                          '1131f6ad-9c07-11d1-f79f-00c04fc2dcd2')
+              AND a.inherit_only IS NOT TRUE
+              AND (a.access_mask & 256) <> 0              -- CONTROL_ACCESS
+              AND (a.object_type_guid IS NULL
+                   OR a.object_type_guid IN ('1131f6aa-9c07-11d1-f79f-00c04fc2dcd2',
+                                             '1131f6ad-9c07-11d1-f79f-00c04fc2dcd2'))
             GROUP BY a.trustee_sid
+        ),
+        classified AS (
+            SELECT dr.*,
+                   (dr.has_all_extended_rights
+                    OR (dr.has_get_changes AND dr.has_get_changes_all)) AS full_dcsync
+            FROM dcsync_rights dr
         )
         SELECT
-            'fail' AS status,
+            CASE WHEN c.full_dcsync THEN 'fail' ELSE 'warn' END AS status,
             do2.object_guid,
             NULL AS stig_severity,
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
-            'critical' AS fd_severity,
-            'Principal ' || COALESCE(do2.sam_account_name, dr.trustee_sid)
-                || ' holds DCSync replication rights on the domain root ('
-                || CASE WHEN dr.has_get_changes AND dr.has_get_changes_all
+            CASE WHEN c.full_dcsync THEN 'critical' ELSE 'medium' END AS fd_severity,
+            'Principal ' || COALESCE(do2.sam_account_name, c.trustee_sid)
+                || CASE WHEN c.full_dcsync
+                        THEN ' holds DCSync replication rights on the domain root ('
+                        ELSE ' holds a partial DCSync grant on the domain root ('
+                   END
+                || CASE WHEN c.has_generic_all
+                        THEN 'GenericAll, which includes All Extended Rights'
+                        WHEN c.has_all_extended_rights
+                        THEN 'All Extended Rights'
+                        WHEN c.has_get_changes AND c.has_get_changes_all
                         THEN 'both DS-Replication-Get-Changes and -All'
-                        ELSE 'only ' || (CASE WHEN dr.has_get_changes
+                        ELSE 'only ' || (CASE WHEN c.has_get_changes
                                               THEN 'DS-Replication-Get-Changes'
                                               ELSE 'DS-Replication-Get-Changes-All' END)
                    END
                 || ')' AS summary,
             jsonb_build_object(
-                'trustee_sid', dr.trustee_sid,
+                'trustee_sid', c.trustee_sid,
                 'sam_account_name', do2.sam_account_name,
                 'object_class', do2.object_class,
-                'has_get_changes', dr.has_get_changes,
-                'has_get_changes_all', dr.has_get_changes_all
+                'has_get_changes', c.has_get_changes,
+                'has_get_changes_all', c.has_get_changes_all,
+                'has_all_extended_rights', c.has_all_extended_rights,
+                'has_generic_all', c.has_generic_all,
+                'full_dcsync', c.full_dcsync
             ) AS detail
-        FROM dcsync_rights dr
+        FROM classified c
         JOIN directory_object do2
-            ON do2.object_sid = dr.trustee_sid AND do2.client_id = %(client_id)s
-        WHERE NOT EXISTS (
-            SELECT 1 FROM expected_holders eh WHERE eh.object_guid = do2.object_guid
-        )
+            ON do2.object_sid = c.trustee_sid AND do2.client_id = %(client_id)s
+           AND NOT do2.is_deleted
+        WHERE
+            -- Default holders of the full right set: Domain Admins (512),
+            -- Enterprise Admins (519), Administrators (S-1-5-32-544),
+            -- Enterprise Domain Controllers (S-1-5-9), and -- since Windows
+            -- Server 2012 -- the Domain Controllers group (516), which the
+            -- default domain-root DACL grants Get-Changes-All.
+            NOT (do2.object_sid LIKE '%%-512' OR do2.object_sid LIKE '%%-519'
+                 OR do2.object_sid = 'S-1-5-32-544' OR do2.object_sid = 'S-1-5-9'
+                 OR do2.object_sid LIKE '%%-516')
+            -- Read-only DCs (521) and Enterprise Read-only DCs (498) hold
+            -- only Get-Changes by default; flag them only if they can DCSync.
+            AND NOT ((do2.object_sid LIKE '%%-521' OR do2.object_sid LIKE '%%-498')
+                     AND NOT c.full_dcsync)
+            -- Domain controller computer accounts (writable and read-only).
+            AND NOT EXISTS (
+                SELECT 1 FROM ad_computer dc
+                WHERE dc.client_id = do2.client_id AND dc.valid_to IS NULL
+                  AND dc.object_guid = do2.object_guid AND dc.is_domain_controller
+            )
     """,
 }

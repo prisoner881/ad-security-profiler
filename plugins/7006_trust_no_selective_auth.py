@@ -11,8 +11,9 @@ bit corresponding to Selective Authentication -- confirmed against
 [MS-ADTS] and cross-checked against four independent technical
 sources before writing this query, not assumed from the bit's name
 alone. Mirrors the exact bitwise-check pattern already used and
-proven in plugins 7001 (SID filtering, bit 32) and 7002 (Treat as
-External, bit 64) -- same trust_attributes column, same style of
+proven in plugins 7001 (SID filtering, QUARANTINED_DOMAIN 0x4; bit 32
+is WITHIN_FOREST, which 7001 excludes) and 7002 (Treat as External,
+bit 64) -- same trust_attributes column, same style of
 check, just a different, newly-verified bit.
 
 Scoped specifically to FOREST trusts in the outgoing direction,
@@ -25,14 +26,18 @@ alone would have silently matched ordinary domain trusts too.
 "Outgoing" means trustDirection has the Outbound bit set (value 2 or
 3, Outbound or Bidirectional) -- confirmed against [MS-ADTS]'s own
 trustDirection definition directly, not assumed from convention.
+
+[v1.1] trust_partner is COALESCEd in the summary (a NULL partner made the
+summary NULL and the evidence write fail), matching plugins 7001-7005;
+docstring bit reference for 7001 corrected.
 """
 
 PLUGIN = {
     "plugin_id": 7006,
     "category": "Trusts",
     "name": "Outgoing Forest Trust Does Not Have Selective Authentication Enabled",
-    "version": "1.0",
-    "revision_date": "2026-08-12",
+    "version": "1.1",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Enable Selective Authentication on the trust: open \"Active "
         "Directory Domains and Trusts\", right-click the domain, "
@@ -72,7 +77,7 @@ PLUGIN = {
             NULL AS tool_severity,
             NULL AS tool_reference,
             'medium' AS fd_severity,
-            'Outgoing forest trust to "' || t.trust_partner
+            'Outgoing forest trust to "' || COALESCE(t.trust_partner, '(unknown)')
                 || '" does not have Selective Authentication enabled' AS summary,
             jsonb_build_object(
                 'trust_partner', t.trust_partner,

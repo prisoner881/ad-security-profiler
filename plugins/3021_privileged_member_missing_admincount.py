@@ -19,14 +19,26 @@ excluded because this project didn't collect admin_count for computer
 objects at all; that gap is closed as of adprofiler.py v0.5.2. A
 domain controller's own computer object is the clearest example of a
 computer that's an effective member of a Tier-0 group.
+
+[v1.3] Key Admins (526) and Enterprise Key Admins (527) added to the
+roots (both are on Microsoft's AdminSDHolder protected list since
+Windows Server 2016). Membership through primaryGroupID is now covered
+(schema v36 records it as a membership edge), which also catches the
+"primaryGroupID=512" stealth trick; detail carries primary_group_id.
+Domain controllers' own computer objects are not reported for their
+default Domain Controllers (516) / Read-only Domain Controllers (521)
+membership: that membership is via primaryGroupID and DC objects
+commonly carry no adminCount, so it is expected, not a symptom.
+Known limitation: operator groups excluded from SDProp via dSHeuristics
+dwAdminSDExMask are not modelled (the collector does not parse it).
 """
 
 PLUGIN = {
     "plugin_id": 3021,
     "category": "Groups",
     "name": "Privileged Group Member Missing the AdminSDHolder Protection Marker",
-    "version": "1.2",
-    "revision_date": "2026-08-04",
+    "version": "1.3",
+    "revision_date": "2026-10-04",
     "remediation": (
         "If this membership was added very recently (within the last "
         "hour or so), this may simply be normal SDProp propagation lag "
@@ -52,26 +64,32 @@ PLUGIN = {
         "this can indicate SDProp isn't running correctly, or that the "
         "object's ACL was deliberately rewritten after protection was "
         "applied -- a documented defense-evasion technique. Covers "
-        "users, groups, and computers."
+        "users, groups, and computers, nested membership and "
+        "membership through primaryGroupID; roots are the 11 classic "
+        "protected groups plus Key Admins / Enterprise Key Admins, by "
+        "RID. A domain controller's default Domain Controllers / "
+        "Read-only DCs membership is not reported. Operator groups "
+        "excluded from SDProp via dSHeuristics dwAdminSDExMask are not "
+        "modelled and may produce findings for their members."
     ),
     "base_severity": "medium",
     "query": """
         WITH well_known_roots AS (
-            SELECT g.object_guid, g.sam_account_name
+            SELECT g.object_guid, COALESCE(g.sam_account_name, do2.object_sid) AS sam_account_name,
+                   do2.object_sid ~ '-(516|521)$' AS is_dc_group
             FROM ad_group g
             JOIN directory_object do2
                 ON do2.object_guid = g.object_guid AND do2.client_id = g.client_id
             WHERE g.valid_to IS NULL
               AND g.client_id = %(client_id)s
-              AND (do2.object_sid LIKE '%%-512' OR do2.object_sid LIKE '%%-516'
-                   OR do2.object_sid LIKE '%%-518' OR do2.object_sid LIKE '%%-519'
-                   OR do2.object_sid LIKE '%%-521' OR do2.object_sid LIKE '%%-544'
-                   OR do2.object_sid LIKE '%%-548' OR do2.object_sid LIKE '%%-549'
-                   OR do2.object_sid LIKE '%%-550' OR do2.object_sid LIKE '%%-551'
-                   OR do2.object_sid LIKE '%%-552')
+              -- [v1.3] + Key Admins (526) / Enterprise Key Admins (527)
+              AND do2.object_sid ~ '-(512|516|518|519|521|526|527|544|548|549|550|551|552)$'
         ),
         matches AS (
-            SELECT mdo.object_guid, mdo.sam_account_name, mdo.object_class,
+            SELECT mdo.object_guid,
+                   COALESCE(mdo.sam_account_name, mdo.object_sid, mdo.object_guid::text) AS sam_account_name,
+                   mdo.object_class,
+                   COALESCE(u.primary_group_id, c.primary_group_id) AS primary_group_id,
                    wkr.sam_account_name AS privileged_group_name,
                    COALESCE(u.admin_count, g.admin_count, c.admin_count) AS admin_count
             FROM v_effective_group_membership vem
@@ -83,6 +101,8 @@ PLUGIN = {
             WHERE vem.client_id = %(client_id)s
               AND mdo.object_class IN ('user', 'group', 'computer')
               AND COALESCE(u.admin_count, g.admin_count, c.admin_count, 0) != 1
+              -- [v1.3] a DC's default (primaryGroupID) DC-group membership
+              AND NOT (c.is_domain_controller AND wkr.is_dc_group)
         ),
         -- [fix, caught by this project's own defensive savepoint
         -- isolation during a routine regression run, not by a client
@@ -94,6 +114,7 @@ PLUGIN = {
         aggregated AS (
             SELECT object_guid, max(sam_account_name) AS sam_account_name,
                    max(object_class) AS object_class, max(admin_count) AS admin_count,
+                   max(primary_group_id) AS primary_group_id,
                    array_agg(DISTINCT privileged_group_name ORDER BY privileged_group_name) AS privileged_group_names
             FROM matches
             GROUP BY object_guid
@@ -116,7 +137,8 @@ PLUGIN = {
                 'sam_account_name', a.sam_account_name,
                 'object_class', a.object_class,
                 'privileged_groups', a.privileged_group_names,
-                'admin_count', a.admin_count
+                'admin_count', a.admin_count,
+                'primary_group_id', a.primary_group_id
             ) AS detail
         FROM aggregated a
     """,

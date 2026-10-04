@@ -40,14 +40,18 @@ finding here that 1015 considered protected. Not merged: disabled
 privileged accounts (plugin 1042's finding) and accounts privileged only
 by a leftover admin_count=1 (plugin 1025). detail gains
 protected_users_direct_flag. Summary and severity are unchanged.
+
+[v1.4] detail gains has_spn (and spn_count) so service accounts -- which
+Protected Users can break (no delegation, AES-only, no NTLM) -- can be
+triaged separately. Selection, summary and severity are unchanged.
 """
 
 PLUGIN = {
     "plugin_id": 1040,
     "category": "User Accounts",
     "name": "Privileged Account Not a Member of the Protected Users Group",
-    "version": "1.3",
-    "revision_date": "2026-10-03",
+    "version": "1.4",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Add this account to the built-in Protected Users group, "
         "provided the domain functional level is at least Windows "
@@ -122,6 +126,9 @@ PLUGIN = {
                 'admin_count', u.admin_count,
                 'is_enabled', u.is_enabled,
                 'protected_users_direct_flag', u.protected_users_member,
+                -- [v1.4] service-account triage
+                'has_spn', COALESCE(cardinality(u.service_principal_names), 0) > 0,
+                'spn_count', COALESCE(cardinality(u.service_principal_names), 0),
                 'privilege_sources', pc.privilege_sources
             ) AS detail
         FROM ad_user u

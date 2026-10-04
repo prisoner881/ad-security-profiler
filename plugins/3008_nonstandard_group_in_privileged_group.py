@@ -20,14 +20,25 @@ GenericAll/GenericWrite/WriteDACL/WriteOwner on, or ownership of, ANY
 object, so a custom group nested in a helpdesk group with OU delegation
 was reported as nested inside a privileged group. AdminSDHolder-protected
 outer groups are still matched via is_protected_group.
+
+[v1.8] Two precision fixes. (1) Only the actual Windows default nestings
+are exempt -- Domain Admins (512) and Enterprise Admins (519) inside
+Administrators (544) -- instead of exempting every well-known group as
+an inner group wherever it sits, so a non-default nesting such as
+Account Operators inside Domain Admins is now reported. (2) An outer
+group's adminCount=1 is only trusted when the group is a well-known
+privileged root by RID (512/516/518/519/521/526/527/544/548-552) or is
+currently nested under one -- a group with a stale marker (plugin 3005's
+population) no longer makes its members "privileged". A group in a
+nesting cycle is no longer reported as nested inside itself.
 """
 
 PLUGIN = {
     "plugin_id": 3008,
     "category": "Groups",
     "name": "Non-Standard Group Nested Inside a Privileged Group",
-    "version": "1.7",
-    "revision_date": "2026-10-03",
+    "version": "1.8",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Confirm this nesting was a deliberate, documented administrative "
         "decision. Anyone added to the nested group inherits the outer "
@@ -47,35 +58,42 @@ PLUGIN = {
         "(e.g. Domain Admins and Enterprise Admins are both, by default, "
         "members of the built-in Administrators group) -- deliberately "
         "excluded here to avoid flagging expected, out-of-the-box "
-        "behavior as anomalous. What this specifically flags is a "
-        "CUSTOM group (not itself one of the well-known RID-identified "
-        "groups: 512, 518, 519, 520, 544, 548-551) nested inside a "
-        "privileged group -- a genuinely non-default administrative "
+        "behavior as anomalous. Only those default nestings (Domain "
+        "Admins and Enterprise Admins inside Administrators) are "
+        "exempt; any other group -- custom or well-known -- nested "
+        "inside a privileged group is flagged. A privileged group is a "
+        "well-known protected group by RID (or an adminCount=1 group "
+        "currently nested under one) or a direct Tier 0 ACL/owner/DCSync "
+        "holder. Such a nesting is a genuinely non-default administrative "
         "action worth reviewing, since anyone later added to the nested "
         "group inherits the outer group's privilege without appearing "
         "in that privileged group's own direct member list at all."
     ),
     "base_severity": "high",
     "query": """
-        WITH well_known_rids AS (
-            SELECT g.object_guid
+        WITH well_known_roots AS (
+            SELECT g.object_guid, do2.object_sid
             FROM ad_group g
             JOIN directory_object do2
                 ON do2.object_guid = g.object_guid AND do2.client_id = g.client_id
             WHERE g.valid_to IS NULL
               AND g.client_id = %(client_id)s
               -- Same corrected, verified list as plugin 3005 -- see that
-              -- plugin for the source citations. Group Policy Creator
-              -- Owners(520) removed (not actually on the canonical list);
-              -- Domain Controllers(516), Read-only Domain
-              -- Controllers(521), and Replicator(552) added (genuinely
-              -- on the list, previously missing).
-              AND (do2.object_sid LIKE '%%-512' OR do2.object_sid LIKE '%%-516'
-                   OR do2.object_sid LIKE '%%-518' OR do2.object_sid LIKE '%%-519'
-                   OR do2.object_sid LIKE '%%-521' OR do2.object_sid LIKE '%%-544'
-                   OR do2.object_sid LIKE '%%-548'
-                   OR do2.object_sid LIKE '%%-549' OR do2.object_sid LIKE '%%-550'
-                   OR do2.object_sid LIKE '%%-551' OR do2.object_sid LIKE '%%-552')
+              -- plugin for the source citations (the 11 AdminSDHolder-
+              -- protected groups plus Key Admins 526 / Enterprise Key
+              -- Admins 527).
+              AND do2.object_sid ~ '-(512|516|518|519|521|526|527|544|548|549|550|551|552)$'
+        ),
+        protected_outer AS (
+            -- [v1.8] adminCount=1 is sticky, so is_protected_group is no
+            -- longer the test: a root itself, or any group currently
+            -- nested under a root (whatever its adminCount).
+            SELECT object_guid FROM well_known_roots
+            UNION
+            SELECT vem.member_guid
+            FROM v_effective_group_membership vem
+            JOIN well_known_roots r ON r.object_guid = vem.group_guid
+            WHERE vem.client_id = %(client_id)s
         ),
         acl_privileged_groups AS (
             -- [v1.7] A group can grant real privilege to everyone nested
@@ -95,21 +113,31 @@ PLUGIN = {
               AND privilege_source IN ('tier0_acl_control', 'dcsync', 'tier0_ownership')
         ),
         nestings AS (
-            SELECT inner_g.object_guid AS inner_guid, inner_g.sam_account_name AS inner_name,
+            SELECT inner_g.object_guid AS inner_guid,
+                   COALESCE(inner_g.sam_account_name, inner_do.object_sid, inner_g.object_guid::text) AS inner_name,
                    inner_g.member_count_direct,
-                   outer_g.sam_account_name AS outer_name,
-                   outer_g.is_protected_group,
+                   COALESCE(outer_g.sam_account_name, outer_g.object_guid::text) AS outer_name,
+                   po.object_guid IS NOT NULL AS is_protected_group,
                    apg.object_guid IS NOT NULL AS via_acl_or_ownership
             FROM v_effective_group_membership vem
             JOIN ad_group outer_g
                 ON outer_g.object_guid = vem.group_guid AND outer_g.valid_to IS NULL
+            JOIN directory_object outer_do
+                ON outer_do.object_guid = outer_g.object_guid AND outer_do.client_id = outer_g.client_id
             JOIN ad_group inner_g
                 ON inner_g.object_guid = vem.member_guid AND inner_g.valid_to IS NULL
+            JOIN directory_object inner_do
+                ON inner_do.object_guid = inner_g.object_guid AND inner_do.client_id = inner_g.client_id
+            LEFT JOIN protected_outer po ON po.object_guid = outer_g.object_guid
             LEFT JOIN acl_privileged_groups apg ON apg.object_guid = outer_g.object_guid
             WHERE vem.client_id = %(client_id)s
               AND outer_g.client_id = %(client_id)s
-              AND (outer_g.is_protected_group OR apg.object_guid IS NOT NULL)
-              AND inner_g.object_guid NOT IN (SELECT object_guid FROM well_known_rids)
+              AND vem.group_guid <> vem.member_guid      -- [v1.8] cycle back to itself
+              AND (po.object_guid IS NOT NULL OR apg.object_guid IS NOT NULL)
+              -- [v1.8] Windows default nestings only: Domain Admins and
+              -- Enterprise Admins inside the builtin Administrators group.
+              AND NOT (COALESCE(inner_do.object_sid, '') ~ '-(512|519)$'
+                       AND outer_do.object_sid = 'S-1-5-32-544')
         ),
         -- [fix, caught via a real production crash at large scale
         -- (2086 groups) that this project's own small test lab never

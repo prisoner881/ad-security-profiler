@@ -16,14 +16,22 @@ GenericWrite-only grants were missed and GenericAll was labelled as
 WriteDacl/WriteOwner (raw bits are still matched too). Inherit-only ACEs
 (acl_edge.inherit_only, schema v34) are skipped: they grant nothing on
 the object they are stored on, only on its descendants.
+
+[v1.4] Severity follows the rights actually held: 'critical' for
+GenericAll, WriteDacl or WriteOwner (each lets the holder rewrite the
+object's ACL and so grant itself DCSync); 'high' when the only right is
+GenericWrite (write every property), which does not include the security
+descriptor -- still dangerous on the domain root (gPLink,
+ms-DS-MachineAccountQuota), but not an ACL rewrite. The ad_domain test is
+now client-scoped.
 """
 
 PLUGIN = {
     "plugin_id": 1029,
     "category": "User Accounts",
     "name": "AS-REP Roastable User Account Directly Holds Dangerous ACL Rights",
-    "version": "1.3",
-    "revision_date": "2026-10-03",
+    "version": "1.4",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Treat as an active, complete attack path requiring NO prior "
         "authentication. Remove the DONT_REQ_PREAUTH flag immediately "
@@ -43,7 +51,10 @@ PLUGIN = {
         "Chains two independently-true findings: this account is "
         "AS-REP roastable (plugin 1013) AND directly holds GenericAll, "
         "GenericWrite, WriteDacl, or WriteOwner on the domain root or "
-        "AdminSDHolder (plugins 5002/5003). Requires no valid domain "
+        "AdminSDHolder (plugins 5002/5003). GenericAll/WriteDacl/"
+        "WriteOwner let the holder rewrite the object's ACL (critical); "
+        "GenericWrite alone writes attributes but not the ACL (high). "
+        "Requires no valid domain "
         "credentials to begin exploiting -- any network path to a "
         "domain controller is sufficient."
     ),
@@ -71,7 +82,7 @@ PLUGIN = {
                   )
               AND (
                     secured.dn_current ILIKE 'CN=AdminSDHolder,%%'
-                    OR EXISTS (SELECT 1 FROM ad_domain d WHERE d.object_guid = secured.object_guid AND d.valid_to IS NULL)
+                    OR EXISTS (SELECT 1 FROM ad_domain d WHERE d.object_guid = secured.object_guid AND d.client_id = secured.client_id AND d.valid_to IS NULL)
                   )
             GROUP BY do2.object_guid
         )
@@ -82,7 +93,9 @@ PLUGIN = {
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
-            'critical' AS fd_severity,
+            -- [v1.4] GenericWrite alone cannot rewrite the ACL: 'high'.
+            CASE WHEN dh.is_generic_all OR dh.is_write_dacl OR dh.is_write_owner
+                 THEN 'critical' ELSE 'high' END AS fd_severity,
             'User Account ' || COALESCE(u.user_principal_name, u.sam_account_name)
                 || ' is AS-REP roastable (no Kerberos pre-authentication required) AND '
                 'directly holds dangerous rights (GenericAll/GenericWrite/WriteDacl/'

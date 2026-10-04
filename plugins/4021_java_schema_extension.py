@@ -17,21 +17,37 @@ integration tooling and is rarely something anyone still depends on.
 Collected via a narrow, targeted schema-partition filter
 (SCHEMA_JAVA_FILTER) rather than pulling the entire schema for one
 check.
+
+[v1.1] One forest-level finding instead of one per schema object (the
+extension is a single forest-wide condition; v1.0 produced ~3 findings
+for it). The finding is keyed on the domain object. Schema objects
+already marked isDefunct=TRUE -- the remediation this plugin recommends
+-- are now excluded (read from the latest directory_object_version), so
+completing the remediation clears the finding. The RFC 2713 classes
+(javaObject, javaContainer, javaSerializedObject, javaNamingReference,
+javaMarshalledObject) are classSchema objects, which SCHEMA_JAVA_FILTER
+(attributeSchema only) never returns; they are now matched by CN among
+the classSchema rows collected for the possSuperiors check, so the
+evidence lists them too. (The collector filter itself still names
+javaObject/javaSerializedObject as attributes; javaSerializedData and
+javaReferenceAddress are not collected -- detection still works through
+the mandatory javaClassName attribute.)
 """
 
 PLUGIN = {
     "plugin_id": 4021,
     "category": "Domain",
     "name": "Java RFC 2713 Schema Extension Present in the Forest",
-    "version": "1.0",
-    "revision_date": "2026-07-31",
+    "version": "1.1",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Confirm whether any current application actually depends on "
         "this schema extension -- most environments carrying it do so "
         "from historical Java/LDAP integration tooling nobody currently "
-        "uses. If nothing depends on it, these attributeSchema objects "
-        "cannot be safely deleted (AD does not support removing schema "
-        "attributes once created), but marking them isDefunct=TRUE "
+        "uses. If nothing depends on it, these attributeSchema and "
+        "classSchema objects cannot be deleted (AD does not support "
+        "removing schema objects once created), but marking them "
+        "isDefunct=TRUE (classes first, then attributes) "
         "prevents them from being used going forward. This is forest-"
         "wide, irreversible, and requires Schema Admins rights -- test "
         "in a lab first and confirm no legitimate dependency exists."
@@ -44,7 +60,7 @@ PLUGIN = {
     ],
     "description": (
         "The RFC 2713 Java-object-representation schema extension is "
-        "present in the forest schema -- the log4shell-adjacent LDAP "
+        "present (and not defunct) in the forest schema -- the log4shell-adjacent LDAP "
         "attack surface (a malicious or compromised LDAP response "
         "referencing these attributes can trigger Java deserialization "
         "in a vulnerable client). Presence alone doesn't confirm active "
@@ -53,21 +69,58 @@ PLUGIN = {
     ),
     "base_severity": "low",
     "query": """
+        WITH java AS (
+            SELECT s.object_guid, s.schema_cn, s.schema_object_type,
+                   (SELECT lower(trim(both '[]" ' from (v.attributes_full->'isDefunct')::text))
+                    FROM directory_object_version v
+                    WHERE v.object_guid = s.object_guid
+                      AND v.client_id = s.client_id
+                    ORDER BY v.run_id_valid_from DESC, v.version_id DESC
+                    LIMIT 1) AS is_defunct
+            FROM ad_schema_object s
+            WHERE s.client_id = %(client_id)s
+              AND s.valid_to IS NULL
+              AND (
+                    -- every attributeSchema row comes from SCHEMA_JAVA_FILTER
+                    s.schema_object_type = 'attributeSchema'
+                    -- [v1.1] RFC 2713 object classes, from the classSchema pass
+                    OR (s.schema_object_type = 'classSchema'
+                        AND lower(s.schema_cn) IN ('javaobject', 'javacontainer',
+                            'javaserializedobject', 'javanamingreference',
+                            'javamarshalledobject'))
+                  )
+        ),
+        live AS (
+            -- [v1.1] isDefunct=TRUE (the remediation) clears the object
+            SELECT * FROM java WHERE is_defunct IS DISTINCT FROM 'true'
+        ),
+        agg AS (
+            SELECT count(*) AS n,
+                   string_agg(schema_cn, ', ' ORDER BY lower(schema_cn), schema_cn) AS names,
+                   jsonb_agg(jsonb_build_object(
+                       'schema_cn', schema_cn,
+                       'schema_object_type', schema_object_type,
+                       'schema_object_guid', object_guid)
+                       ORDER BY lower(schema_cn), schema_cn) AS objects
+            FROM live
+        )
         SELECT
             'fail' AS status,
-            s.object_guid,
+            d.object_guid,
             NULL AS stig_severity,
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
             'low' AS fd_severity,
-            'Java RFC 2713 schema attribute "' || s.schema_cn || '" is present in the forest schema' AS summary,
+            'Java RFC 2713 schema extension is present in the forest schema ('
+                || agg.n || ' non-defunct object(s): ' || agg.names || ')' AS summary,
             jsonb_build_object(
-                'schema_cn', s.schema_cn
+                'schema_objects', agg.objects
             ) AS detail
-        FROM ad_schema_object s
-        WHERE s.client_id = %(client_id)s
-          AND s.valid_to IS NULL
-          AND s.schema_object_type = 'attributeSchema'
+        FROM agg
+        LEFT JOIN ad_domain d
+          ON d.client_id = %(client_id)s
+         AND d.valid_to IS NULL
+        WHERE agg.n > 0
     """,
 }

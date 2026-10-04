@@ -4,14 +4,22 @@ Plugin 2014: Computer Account Has SID History
 Same technique as user-account plugin 1008, applied to computer objects.
 Legitimate during domain/forest migrations, but also a well-documented
 persistence and privilege-escalation mechanism.
+
+[v1.3] Entries are now classified like user-account plugin 1008: a SID
+from this domain itself (never legitimate migration residue), a
+privileged well-known RID (-500/-502/-512/-516/-518/-519/-520/-521/-498/
+-526/-527), any BUILTIN SID (S-1-5-32-*) or Enterprise Domain Controllers
+(S-1-5-9) makes the finding critical and is listed in
+dangerous_sid_history; foreign-domain-only residue drops from high to
+medium (still critical on a DC). Previously every entry got a flat high.
 """
 
 PLUGIN = {
     "plugin_id": 2014,
     "category": "Computer Accounts",
     "name": "Computer Account Has SID History",
-    "version": "1.2",
-    "revision_date": "2026-07-15",
+    "version": "1.3",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Investigate and confirm whether this is legitimate residue from "
         "a completed domain/forest migration. If migration is fully "
@@ -34,13 +42,46 @@ PLUGIN = {
         "migrations, but is also a well-documented persistence and "
         "privilege-escalation technique (MITRE ATT&CK T1134.005) -- the "
         "same reasoning as user-account plugin 1008, applied here to "
-        "computer objects. NOT downgraded when the computer account is "
+        "computer objects. Rated critical when any entry is a SID from "
+        "this domain itself, a privileged well-known RID (Administrator, "
+        "Domain Admins, Domain Controllers, Schema/Enterprise Admins, "
+        "GPCO, RODCs, Key Admins, ...), a BUILTIN SID or Enterprise "
+        "Domain Controllers, or when the computer is a domain controller; "
+        "medium for SIDs of other domains only (typical migration "
+        "residue, still to be cleaned up). NOT downgraded when the computer account is "
         "disabled: sIDHistory is a persistent configuration on the "
         "object itself and survives disablement untouched, reactivating "
         "immediately if the account is ever re-enabled."
     ),
     "base_severity": "high",
     "query": """
+        WITH dom AS (
+            -- this client's domain SID(s), to spot same-domain sIDHistory
+            SELECT DISTINCT o.object_sid AS domain_sid
+            FROM ad_domain d
+            JOIN directory_object o
+                ON o.object_guid = d.object_guid AND o.client_id = d.client_id
+            WHERE d.client_id = %(client_id)s
+              AND d.valid_to IS NULL
+              AND o.object_sid IS NOT NULL
+            UNION
+            SELECT cl.domain_sid FROM client cl
+            WHERE cl.client_id = %(client_id)s AND cl.domain_sid IS NOT NULL
+        ),
+        flagged AS (
+            SELECT c.object_guid,
+                   array_agg(DISTINCT sh ORDER BY sh) AS dangerous_sids
+            FROM ad_computer c
+            CROSS JOIN LATERAL unnest(c.sid_history) AS sh
+            WHERE c.valid_to IS NULL
+              AND c.client_id = %(client_id)s
+              AND (sh ~ '^S-1-5-21-[0-9-]+-(500|502|512|516|518|519|520|521|498|526|527)$'
+                   OR sh LIKE 'S-1-5-32-%%'
+                   OR sh = 'S-1-5-9'
+                   OR EXISTS (SELECT 1 FROM dom
+                              WHERE sh LIKE dom.domain_sid || '-%%'))
+            GROUP BY c.object_guid
+        )
         SELECT
             'fail' AS status,
             c.object_guid,
@@ -48,19 +89,25 @@ PLUGIN = {
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
-            CASE WHEN c.is_domain_controller THEN 'critical' ELSE 'high' END AS fd_severity,
+            CASE WHEN c.is_domain_controller OR f.object_guid IS NOT NULL
+                 THEN 'critical' ELSE 'medium' END AS fd_severity,
             (CASE WHEN c.is_domain_controller THEN 'Domain Controller ' ELSE '' END)
-                || 'Computer Account ' || c.sam_account_name
+                || 'Computer Account ' || COALESCE(c.sam_account_name, c.object_guid::text)
                 || ' has SID history populated (' || array_length(c.sid_history, 1)
-                || ' entrie(s))' AS summary,
+                || ' entrie(s)'
+                || CASE WHEN f.object_guid IS NOT NULL
+                        THEN ', including a privileged or same-domain SID' ELSE '' END
+                || ')' AS summary,
             jsonb_build_object(
                 'sam_account_name', c.sam_account_name,
                 'dns_hostname', c.dns_hostname,
                 'sid_history', c.sid_history,
+                'dangerous_sid_history', f.dangerous_sids,
                 'is_enabled', c.is_enabled,
                 'is_domain_controller', c.is_domain_controller
             ) AS detail
         FROM ad_computer c
+        LEFT JOIN flagged f ON f.object_guid = c.object_guid
         WHERE c.valid_to IS NULL
           AND c.client_id = %(client_id)s
           AND c.sid_history IS NOT NULL

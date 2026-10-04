@@ -17,14 +17,22 @@ Protected-group membership, control of or ownership of a Tier 0 object
 (domain root, AdminSDHolder, DCs, CAs, ...), DCSync, and membership in a
 group holding any of those still count. detail gains privilege_sources
 (the view's reasons, sorted); summary wording is unchanged.
+
+[v1.6] Inclusion is now CURRENT privilege only (v_privileged_principal).
+adminCount = 1 alone no longer qualifies: SDProp never clears it when an
+account leaves a protected group, so former admins ("orphaned adminCount")
+kept being reported as privileged. admin_count stays in detail. krbtgt
+(RID 502; disabled, never logs on interactively) is excluded. detail gains
+has_spn so service accounts, which usually cannot use smart cards and need
+a different control (gMSA, authentication policy), are recognisable.
 """
 
 PLUGIN = {
     "plugin_id": 1012,
     "category": "User Accounts",
     "name": "Privileged Account Without Smartcard Logon Required",
-    "version": "1.5",
-    "revision_date": "2026-10-03",
+    "version": "1.6",
+    "revision_date": "2026-10-04",
     "remediation": (
     'Enable smartcard-required authentication for the account, or if smartcards '
     "aren't practical in this environment, implement an equivalent "
@@ -42,7 +50,11 @@ PLUGIN = {
         "in which case this will fire broadly and isn't independently "
         "actionable -- treat as informational context for accounts "
         "already known to be privileged, not as a standalone compliance "
-        "failure."
+        "failure. Privileged means currently privileged (protected-group "
+        "membership, direct or nested, or Tier 0 control, per "
+        "v_privileged_principal); a stale adminCount alone does not count. "
+        "Equivalent controls (Windows Hello for Business, FIDO2, "
+        "authentication policy silos) are not visible here."
     ),
     "base_severity": "low",
     "query": """
@@ -81,14 +93,22 @@ PLUGIN = {
                 'is_enabled', u.is_enabled,
                 'admin_count', u.admin_count,
                 'privileged_group_member', pc.object_guid IS NOT NULL,
-                'privilege_sources', pc.privilege_sources
+                'privilege_sources', pc.privilege_sources,
+                'has_spn', COALESCE(cardinality(u.service_principal_names), 0) > 0
             ) AS detail
         FROM ad_user u
-        LEFT JOIN privileged_check pc
+        -- [v1.6] current privilege only; orphaned adminCount=1 no longer
+        -- qualifies on its own.
+        JOIN privileged_check pc
             ON pc.object_guid = u.object_guid
         WHERE u.valid_to IS NULL
           AND u.client_id = %(client_id)s
           AND NOT u.smartcard_required
-          AND (u.admin_count = 1 OR pc.object_guid IS NOT NULL)
+          -- [v1.6] krbtgt (RID 502) is not an interactive account.
+          AND NOT EXISTS (
+                SELECT 1 FROM directory_object o
+                WHERE o.object_guid = u.object_guid
+                  AND o.client_id = u.client_id
+                  AND o.object_sid LIKE '%%-502')
     """,
 }

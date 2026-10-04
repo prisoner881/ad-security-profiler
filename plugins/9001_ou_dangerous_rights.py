@@ -31,14 +31,32 @@ WriteDacl/WriteOwner (raw bits are still matched too). The rights label
 names only GenericAll when it is held, since it subsumes the rest.
 Inherit-only ACEs are deliberately still counted: OU delegation to
 descendant objects is what this plugin reports.
+
+[v1.3] Trustees no longer have to exist in directory_object. The inner
+join silently dropped every SID without a collected object -- Everyone
+(S-1-1-0), Anonymous Logon (S-1-5-7), Authenticated Users, Creator
+Owner, principals of trusted domains without an FSP, orphaned SIDs of
+deleted principals -- so the worst grants (Everyone/Anonymous with
+GenericAll or WriteDacl) were never reported. Unresolved SIDs are now
+labelled from a well-known-SID map, else shown as the raw SID. Expected
+holders are excluded by SID (SYSTEM S-1-5-18, Administrators
+S-1-5-32-544, this domain's Domain Admins -512, Enterprise Admins -519)
+instead of through directory_object (SYSTEM was only excluded by accident
+of the inner join). Only explicit ACEs are evaluated (acl_edge.inherited
+= FALSE): an ACE inherited from a parent OU is reported once, on the OU
+where it is set, not again on every descendant OU; grants inherited from
+the domain root are plugins 5003/5010's. Rights are aggregated per
+trustee per OU first (one entry per trustee, sorted by label then SID),
+so the summary is deterministic and a trustee is never listed twice. OU
+joins are client-scoped.
 """
 
 PLUGIN = {
     "plugin_id": 9001,
     "category": "Organizational Units",
     "name": "Dangerous Rights on an Organizational Unit Held by an Unexpected Principal",
-    "version": "1.2",
-    "revision_date": "2026-10-03",
+    "version": "1.3",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Confirm whether this grant is a deliberate, understood "
         "delegation (e.g. a help desk team scoped to manage computers "
@@ -71,21 +89,19 @@ PLUGIN = {
         "Enterprise Admins, Administrators, SYSTEM) used elsewhere in "
         "this project; unlike domain root/AdminSDHolder there's no "
         "universal answer for what else is expected, since every "
-        "organization's OU delegation model differs."
+        "organization's OU delegation model differs. Well-known SIDs "
+        "with no directory object (Everyone, Anonymous Logon, "
+        "Authenticated Users, ...) and orphaned SIDs are reported too. "
+        "Only ACEs set explicitly on the OU are evaluated, so a "
+        "delegation inherited from a parent OU is reported once, on the "
+        "OU where it is set."
     ),
     "base_severity": "high",
     "query": """
-        WITH expected_holders AS (
-            SELECT do2.object_guid
-            FROM directory_object do2
-            WHERE do2.client_id = %(client_id)s
-              AND (do2.object_sid LIKE '%%-512' OR do2.object_sid LIKE '%%-519'
-                   OR do2.object_sid LIKE '%%-544')
-            UNION
-            SELECT fsp.object_guid
-            FROM ad_foreign_security_principal fsp
-            WHERE fsp.client_id = %(client_id)s AND fsp.valid_to IS NULL
-              AND fsp.well_known_name = 'Local System'
+        WITH dom AS (
+            SELECT cl.domain_sid
+            FROM client cl
+            WHERE cl.client_id = %(client_id)s
         ),
         dangerous_aces AS (
             SELECT a.object_guid AS ou_guid, a.trustee_sid, a.access_mask,
@@ -95,33 +111,84 @@ PLUGIN = {
                    (a.access_mask & 262144) != 0 AS is_write_dacl,
                    (a.access_mask & 524288) != 0 AS is_write_owner
             FROM acl_edge a
-            JOIN ad_ou o ON o.object_guid = a.object_guid AND o.valid_to IS NULL
+            JOIN ad_ou o ON o.object_guid = a.object_guid AND o.client_id = a.client_id
+                        AND o.valid_to IS NULL
             WHERE a.client_id = %(client_id)s
               AND a.valid_to IS NULL
               AND a.ace_type = 'allow'
+              -- [v1.3] explicit ACEs only: inherited copies are reported on
+              -- the OU where they are set (or by 5003/5010 for the root)
+              AND a.inherited = FALSE
               AND (
                     (a.access_mask & (268435456 | 1073741824 | 262144 | 524288)) != 0
                     OR (a.access_mask & 983551) = 983551                    -- GenericAll, as stored
                     OR ((a.access_mask & 32) <> 0 AND a.object_type_guid IS NULL)  -- GenericWrite, as stored
                   )
+              -- [v1.3] expected holders excluded by SID, not via directory_object
+              AND a.trustee_sid NOT IN ('S-1-5-18', 'S-1-5-32-544')
+              AND a.trustee_sid !~ '^S-1-5-21-[0-9-]+-519$'
+              AND NOT EXISTS (
+                    SELECT 1 FROM dom
+                    WHERE (dom.domain_sid IS NOT NULL AND a.trustee_sid = dom.domain_sid || '-512')
+                       OR (dom.domain_sid IS NULL AND a.trustee_sid ~ '^S-1-5-21-[0-9-]+-512$')
+                  )
+        ),
+        -- [v1.3] one entry per (OU, trustee): several ACEs of the same
+        -- trustee used to list it twice and order the summary ambiguously
+        per_trustee AS (
+            SELECT da.ou_guid, da.trustee_sid,
+                   bit_or(da.access_mask) AS access_mask,
+                   array_agg(DISTINCT da.access_mask ORDER BY da.access_mask) AS access_masks,
+                   bool_or(da.is_generic_all) AS is_generic_all,
+                   bool_or(da.is_generic_write) AS is_generic_write,
+                   bool_or(da.is_write_dacl) AS is_write_dacl,
+                   bool_or(da.is_write_owner) AS is_write_owner
+            FROM dangerous_aces da
+            GROUP BY da.ou_guid, da.trustee_sid
         ),
         unexpected_holders AS (
-            SELECT da.ou_guid, da.trustee_sid,
-                   COALESCE(trustee_do.sam_account_name, da.trustee_sid) AS trustee_label,
-                   trustee_do.object_class AS trustee_object_class,
-                   da.access_mask,
-                   (SELECT string_agg(x, ', ') FROM (VALUES
-                        (CASE WHEN da.is_generic_all THEN 'GenericAll' END),
-                        (CASE WHEN da.is_generic_write AND NOT da.is_generic_all THEN 'GenericWrite' END),
-                        (CASE WHEN da.is_write_dacl AND NOT da.is_generic_all THEN 'WriteDacl' END),
-                        (CASE WHEN da.is_write_owner AND NOT da.is_generic_all THEN 'WriteOwner' END)
-                    ) AS v(x) WHERE x IS NOT NULL) AS rights_label
-            FROM dangerous_aces da
-            JOIN directory_object trustee_do
-                ON trustee_do.object_sid = da.trustee_sid AND trustee_do.client_id = %(client_id)s
-            WHERE NOT EXISTS (
-                SELECT 1 FROM expected_holders eh WHERE eh.object_guid = trustee_do.object_guid
-            )
+            SELECT pt.ou_guid, pt.trustee_sid,
+                   -- [v1.3] trustees without a directory object are kept
+                   COALESCE(tdo.sam_account_name, fsp.well_known_name, wk.name, pt.trustee_sid)
+                       AS trustee_label,
+                   tdo.object_class AS trustee_object_class,
+                   pt.access_mask, pt.access_masks,
+                   (SELECT string_agg(x, ', ' ORDER BY n) FROM (VALUES
+                        (1, CASE WHEN pt.is_generic_all THEN 'GenericAll' END),
+                        (2, CASE WHEN pt.is_generic_write AND NOT pt.is_generic_all THEN 'GenericWrite' END),
+                        (3, CASE WHEN pt.is_write_dacl AND NOT pt.is_generic_all THEN 'WriteDacl' END),
+                        (4, CASE WHEN pt.is_write_owner AND NOT pt.is_generic_all THEN 'WriteOwner' END)
+                    ) AS v(n, x) WHERE x IS NOT NULL) AS rights_label
+            FROM per_trustee pt
+            LEFT JOIN LATERAL (
+                SELECT d.object_guid, d.sam_account_name, d.object_class
+                FROM directory_object d
+                WHERE d.client_id = %(client_id)s
+                  AND d.object_sid = pt.trustee_sid
+                ORDER BY d.is_deleted, d.object_guid
+                LIMIT 1
+            ) tdo ON TRUE
+            LEFT JOIN ad_foreign_security_principal fsp
+                ON fsp.object_guid = tdo.object_guid AND fsp.client_id = %(client_id)s
+               AND fsp.valid_to IS NULL
+            LEFT JOIN (VALUES
+                ('S-1-1-0', 'Everyone'),
+                ('S-1-5-7', 'Anonymous Logon'),
+                ('S-1-5-11', 'Authenticated Users'),
+                ('S-1-3-0', 'Creator Owner'),
+                ('S-1-3-1', 'Creator Group'),
+                ('S-1-5-10', 'Self'),
+                ('S-1-5-2', 'Network'),
+                ('S-1-5-4', 'Interactive'),
+                ('S-1-5-9', 'Enterprise Domain Controllers'),
+                ('S-1-5-32-545', 'Users'),
+                ('S-1-5-32-546', 'Guests'),
+                ('S-1-5-32-548', 'Account Operators'),
+                ('S-1-5-32-549', 'Server Operators'),
+                ('S-1-5-32-550', 'Print Operators'),
+                ('S-1-5-32-551', 'Backup Operators'),
+                ('S-1-5-32-554', 'Pre-Windows 2000 Compatible Access')
+            ) AS wk(sid, name) ON wk.sid = pt.trustee_sid
         ),
         -- [fix, caught via a real production crash at large scale (525
         -- OUs) that this project's own small test lab never exposed]
@@ -134,14 +201,16 @@ PLUGIN = {
         -- unexpected trustee and what they hold.
         aggregated AS (
             SELECT ou_guid,
-                   array_agg(trustee_label || ' (' || rights_label || ')' ORDER BY trustee_label) AS holder_summaries,
+                   array_agg(trustee_label || ' (' || rights_label || ')'
+                             ORDER BY trustee_label, trustee_sid) AS holder_summaries,
                    jsonb_agg(jsonb_build_object(
                        'trustee_sid', trustee_sid,
                        'trustee_sam_account_name', trustee_label,
                        'trustee_object_class', trustee_object_class,
                        'access_mask', access_mask,
+                       'access_masks', to_jsonb(access_masks),
                        'rights', rights_label
-                   ) ORDER BY trustee_label) AS holder_details,
+                   ) ORDER BY trustee_label, trustee_sid) AS holder_details,
                    count(*) AS holder_count
             FROM unexpected_holders
             GROUP BY ou_guid
@@ -155,12 +224,14 @@ PLUGIN = {
             NULL AS tool_reference,
             'high' AS fd_severity,
             a.holder_count || ' unexpected principal(s) hold dangerous rights on OU "'
-                || o.ou_name || '": ' || array_to_string(a.holder_summaries, '; ') AS summary,
+                || COALESCE(o.ou_name, a.ou_guid::text) || '": '
+                || array_to_string(a.holder_summaries, '; ') AS summary,
             jsonb_build_object(
                 'ou_name', o.ou_name,
                 'holders', a.holder_details
             ) AS detail
         FROM aggregated a
-        JOIN ad_ou o ON o.object_guid = a.ou_guid AND o.valid_to IS NULL
+        JOIN ad_ou o ON o.object_guid = a.ou_guid AND o.client_id = %(client_id)s
+                    AND o.valid_to IS NULL
     """,
 }

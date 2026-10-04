@@ -35,14 +35,27 @@ summary clause, previously missed entirely). The original summary wording
 is kept when the object is the domain root or AdminSDHolder; other Tier 0
 objects get "a Tier 0 object". detail gains via_holder_group and
 privilege_sources.
+
+[v1.5] Enterprise CA hosts: AD CS setup grants the CA's own computer
+account Full Control on its pKIEnrollmentService object and its CDP/AIA
+containers, so every CA server was reported. A CA host's (tier0_reason
+'enterprise_ca_host') control or ownership of an enterprise CA or PKI
+container object is now ignored; any other privilege it holds is still
+reported. A computer's control over its own object is ignored too.
+Severity is now critical when the computer has DCSync (directly or via a
+group) or is an effective member of Domain Admins, Enterprise Admins,
+Schema Admins or Administrators (matched by SID, not name) -- SYSTEM on
+that machine is domain compromise. Primary-group membership
+(primaryGroupID) is visible here since schema v36 materialises it as a
+group_member_edge.
 """
 
 PLUGIN = {
     "plugin_id": 2008,
     "category": "Computer Accounts",
     "name": "Computer Account Holds Unexpected Privileged Access",
-    "version": "1.4",
-    "revision_date": "2026-10-03",
+    "version": "1.5",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Determine why this computer account holds this access -- it is "
         "almost never an intentional, necessary configuration for an "
@@ -72,7 +85,12 @@ PLUGIN = {
         "machine -- a routine outcome of a very wide range of common "
         "exploitation paths, a much lower bar than compromising a "
         "specific human's credentials -- inherits that privileged access "
-        "along with it. "
+        "along with it. Membership includes primary-group membership "
+        "(primaryGroupID). Rated critical when the computer has DCSync or "
+        "is an effective member of Domain Admins, Enterprise Admins, "
+        "Schema Admins or Administrators; high otherwise. An enterprise CA "
+        "host's expected control of its own CA and PKI objects is not "
+        "reported. "
         "NOT downgraded when disabled: this kind of privilege is persistent configuration unaffected by the account's enabled state."
     ),
     "base_severity": "high",
@@ -92,9 +110,40 @@ PLUGIN = {
                    EXISTS (SELECT 1 FROM v_tier0_object t
                            WHERE t.client_id = p.client_id
                              AND t.object_guid = p.via_object_guid
-                             AND t.tier0_reason IN ('domain_root', 'adminsdholder')) AS at_root_or_adminsdholder
+                             AND t.tier0_reason IN ('domain_root', 'adminsdholder')) AS at_root_or_adminsdholder,
+                   -- [v1.5] DA / EA / Schema Admins / Administrators, by SID
+                   (p.privilege_source = 'protected_group_member'
+                    AND EXISTS (SELECT 1 FROM directory_object g
+                                  JOIN client cl ON cl.client_id = g.client_id
+                                 WHERE g.client_id = p.client_id
+                                   AND g.object_guid = p.via_object_guid
+                                   AND (g.object_sid = 'S-1-5-32-544'
+                                        OR (cl.domain_sid IS NOT NULL
+                                            AND g.object_sid IN (cl.domain_sid || '-512',
+                                                                 cl.domain_sid || '-518',
+                                                                 cl.domain_sid || '-519'))
+                                        OR (cl.domain_sid IS NULL
+                                            AND g.object_sid ~ '^S-1-5-21-[0-9-]+-(512|518|519)$'))))
+                       AS is_top_group
             FROM v_privileged_principal p
             WHERE p.client_id = %(client_id)s
+              -- [v1.5] control over its own object is not escalation
+              AND p.via_object_guid IS DISTINCT FROM p.object_guid
+              -- [v1.5] an enterprise CA host controls / owns its own CA
+              -- and PKI objects by design (AD CS setup grants it)
+              AND NOT (p.privilege_source IN ('tier0_acl_control', 'tier0_ownership')
+                       AND EXISTS (SELECT 1 FROM v_tier0_object h
+                                    WHERE h.client_id = p.client_id
+                                      AND h.object_guid = p.object_guid
+                                      AND h.tier0_reason = 'enterprise_ca_host')
+                       AND EXISTS (SELECT 1 FROM v_tier0_object t
+                                    WHERE t.client_id = p.client_id
+                                      AND t.object_guid = p.via_object_guid
+                                      AND t.tier0_reason IN ('enterprise_ca', 'pki_container'))
+                       AND NOT EXISTS (SELECT 1 FROM v_tier0_object t
+                                        WHERE t.client_id = p.client_id
+                                          AND t.object_guid = p.via_object_guid
+                                          AND t.tier0_reason NOT IN ('enterprise_ca', 'pki_container')))
         ),
         privileged_agg AS (
             SELECT object_guid,
@@ -106,6 +155,7 @@ PLUGIN = {
                    bool_or(privilege_source = 'tier0_ownership'
                            AND NOT at_root_or_adminsdholder) AS via_owner_other_tier0,
                    bool_or(right(privilege_source, 10) = '_via_group') AS via_holder_group,
+                   bool_or(privilege_source IN ('dcsync', 'dcsync_via_group') OR is_top_group) AS is_critical,
                    array_agg(DISTINCT privilege_source ORDER BY privilege_source) AS privilege_sources
             FROM privileged_sources
             GROUP BY object_guid
@@ -117,8 +167,8 @@ PLUGIN = {
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
-            'high' AS fd_severity,
-            'Computer Account ' || c.sam_account_name || ' holds privileged access: ' || (
+            CASE WHEN pa.is_critical THEN 'critical' ELSE 'high' END AS fd_severity,
+            'Computer Account ' || COALESCE(c.sam_account_name, c.object_guid::text) || ' holds privileged access: ' || (
                 SELECT string_agg(x, '; ') FROM (VALUES
                     (CASE WHEN pa.via_group THEN 'member of a privileged (AdminSDHolder-protected) group' END),
                     (CASE WHEN pa.via_acl AND NOT pa.via_acl_other_tier0

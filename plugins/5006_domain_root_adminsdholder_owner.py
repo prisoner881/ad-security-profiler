@@ -8,14 +8,18 @@ over it regardless of what the DACL itself says -- an owner can always
 rewrite the DACL to grant themselves anything else, making ownership
 itself a distinct, real finding (BloodHound's "Owns" edge) independent
 of whatever explicit ACEs plugins 5002/5003 already check.
+
+[v1.4] Deleted directory objects are ignored on both sides of the owner
+lookup (a deleted object sharing the owner SID could have duplicated the
+finding), and the ad_domain lookup is client-scoped.
 """
 
 PLUGIN = {
     "plugin_id": 5006,
     "category": "ACLs",
     "name": "Domain Root or AdminSDHolder Owned by an Unexpected Principal",
-    "version": "1.3",
-    "revision_date": "2026-09-02",
+    "version": "1.4",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Take ownership back to a recognized default holder "
         "(`takeown`-equivalent via ADSI Edit's Security tab, Advanced, "
@@ -66,11 +70,14 @@ PLUGIN = {
         FROM directory_object target
         LEFT JOIN directory_object owner
             ON owner.object_sid = target.owner_sid AND owner.client_id = %(client_id)s
+           AND NOT owner.is_deleted   -- [v1.4] a deleted object reusing the SID can't duplicate the row
         WHERE target.client_id = %(client_id)s
+          AND NOT target.is_deleted
           AND target.owner_sid IS NOT NULL
           AND (
                 target.dn_current ILIKE 'CN=AdminSDHolder,%%'
-                OR EXISTS (SELECT 1 FROM ad_domain d WHERE d.object_guid = target.object_guid AND d.valid_to IS NULL)
+                OR EXISTS (SELECT 1 FROM ad_domain d WHERE d.object_guid = target.object_guid
+                                AND d.client_id = target.client_id AND d.valid_to IS NULL)
               )
           -- Matched directly against the SID pattern rather than requiring
           -- the expected group to resolve through a directory_object JOIN

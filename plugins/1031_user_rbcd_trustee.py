@@ -10,14 +10,23 @@ resource computer, can impersonate arbitrary domain users to it. Worth
 flagging distinctly from plugin 2022's general RBCD visibility, since
 "a person can impersonate anyone to this computer" is a meaningfully
 different risk shape than "this service account can."
+
+[v1.4] One row per trustee user: a user trusted for RBCD by two or more
+computers produced one row per computer with the same object_guid, which
+violates the one-finding-per-identity rule and made the whole plugin
+fail. The summary now lists every resource computer (sorted) and detail
+carries resource_count and the sorted list. Joins are client-scoped. A
+disabled trustee is rated 'low' (it cannot authenticate until
+re-enabled). Deny ACEs in the RBCD descriptor are no longer recorded as
+trustees by the collector (schema v36).
 """
 
 PLUGIN = {
     "plugin_id": 1031,
     "category": "User Accounts",
     "name": "User Account (Not a Computer) Configured as an RBCD Trustee",
-    "version": "1.3",
-    "revision_date": "2026-09-02",
+    "version": "1.4",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Confirm this is a deliberate, understood configuration -- RBCD "
         "trustees are conventionally computer or service accounts, not "
@@ -54,18 +63,34 @@ PLUGIN = {
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
-            'high' AS fd_severity,
-            'User Account ' || COALESCE(u.user_principal_name, u.sam_account_name)
-                || ' is configured as an RBCD trustee on computer ' || COALESCE(resource.sam_account_name, '(unknown)') AS summary,
+            -- [v1.4] A disabled user cannot authenticate, so it cannot use
+            -- the delegation until re-enabled.
+            CASE WHEN u.is_enabled IS NOT FALSE THEN 'high' ELSE 'low' END AS fd_severity,
+            'User Account ' || COALESCE(u.user_principal_name, u.sam_account_name, u.object_guid::text)
+                || CASE WHEN u.is_enabled IS FALSE THEN ' (disabled)' ELSE '' END
+                || ' is configured as an RBCD trustee on '
+                || CASE WHEN count(DISTINCT resource.object_guid) = 1 THEN 'computer ' ELSE 'computers ' END
+                || string_agg(DISTINCT COALESCE(resource.sam_account_name, resource.object_guid::text), ', '
+                              ORDER BY COALESCE(resource.sam_account_name, resource.object_guid::text)) AS summary,
             jsonb_build_object(
                 'sam_account_name', u.sam_account_name,
-                'resource_computer', resource.sam_account_name
+                'is_enabled', u.is_enabled,
+                'resource_count', count(DISTINCT resource.object_guid),
+                'resource_computers', jsonb_agg(DISTINCT COALESCE(resource.sam_account_name, resource.object_guid::text)
+                                               ORDER BY COALESCE(resource.sam_account_name, resource.object_guid::text))
             ) AS detail
         FROM delegation_edge de
-        JOIN ad_user u ON u.object_guid = de.source_guid AND u.valid_to IS NULL
-        JOIN ad_computer resource ON resource.object_guid = de.target_guid AND resource.valid_to IS NULL
+        JOIN ad_user u
+            ON u.object_guid = de.source_guid AND u.client_id = de.client_id AND u.valid_to IS NULL
+        JOIN ad_computer resource
+            ON resource.object_guid = de.target_guid AND resource.client_id = de.client_id
+           AND resource.valid_to IS NULL
         WHERE de.client_id = %(client_id)s
           AND de.valid_to IS NULL
           AND de.delegation_type = 'rbcd'
+        -- [v1.4] One finding per trustee user (the finding identity is the
+        -- user's GUID); a user trusted by several computers used to emit
+        -- one row per computer and make the plugin fail.
+        GROUP BY u.object_guid, u.user_principal_name, u.sam_account_name, u.is_enabled
     """,
 }

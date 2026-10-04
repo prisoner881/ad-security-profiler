@@ -27,14 +27,26 @@ fix there is deleting the account, not upgrading Windows on a box sitting
 in a closet, and both findings resolve simultaneously either way. Without
 this, a reader has to manually cross-reference against plugin 2006's
 separate output to reach the same conclusion.
+
+[v1.5] Matching is done on the OS string with the (R)/(TM) signs removed,
+so "Windows Server(R) 2008 Standard" (2008 RTM) is caught; Windows 2000 and
+Windows NT are added. Windows 10 LTSC/LTSB editions are judged by build
+instead of being flagged wholesale: LTSB 2015 (10240) is past end of
+support, LTSB 2016 (14393) and Enterprise LTSC 2021 (19044) are warned until
+their end dates (2026-10-13 / 2027-01-12) and failed after, LTSC 2019
+(17763) and IoT Enterprise LTSC 2021 are supported and not flagged. The
+same date switch turns the Windows Server 2016 warning into a failure after
+2027-01-12. The "likely dormant" marker moved from the summary to the
+detail only: it is derived from now() and made the summary flip with no
+change in AD.
 """
 
 PLUGIN = {
     "plugin_id": 2003,
     "category": "Computer Accounts",
     "name": "Unsupported or Soon-to-be-Unsupported Operating System",
-    "version": "1.4",
-    "revision_date": "2026-07-15",
+    "version": "1.5",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Check whether the machine is also flagged as dormant (no logon "
         "in 90+ days, reflected directly in this finding's own detail) "
@@ -77,7 +89,7 @@ PLUGIN = {
         "Vista/XP are all long past end of support. Windows Server 2016 "
         "is flagged separately at lower severity as approaching its "
         "extended-support end date (January 12, 2027) rather than already "
-        "unsupported. Windows Server 2019/2022/2025 and Windows 11 are "
+        "unsupported (and failed once that date has passed). Windows Server 2019/2022/2025 and Windows 11 are "
         "not flagged -- confirmed still within their supported lifecycle "
         "as of this writing, though individual Windows 11 feature-update "
         "versions have their own rolling end-of-support dates this check "
@@ -97,27 +109,49 @@ PLUGIN = {
     ),
     "base_severity": "critical",
     "query": """
-        WITH os_check AS (
+        WITH os_norm AS (
             SELECT
                 c.object_guid, c.sam_account_name, c.dns_hostname,
                 c.operating_system, c.operating_system_version, c.is_domain_controller,
                 c.last_logon_timestamp, c.is_enabled,
-                (c.last_logon_timestamp IS NULL OR c.last_logon_timestamp < now() - interval '90 days')
-                    AS likely_dormant,
-                CASE
-                    WHEN c.operating_system ILIKE '%%windows 10%%' THEN 'fail'
-                    WHEN c.operating_system ILIKE '%%server 2012%%' THEN 'fail'
-                    WHEN c.operating_system ILIKE '%%server 2008%%' THEN 'fail'
-                    WHEN c.operating_system ILIKE '%%server 2003%%' THEN 'fail'
-                    WHEN c.operating_system ILIKE '%%windows 7%%' THEN 'fail'
-                    WHEN c.operating_system ILIKE '%%windows 8%%' THEN 'fail'
-                    WHEN c.operating_system ILIKE '%%windows xp%%' THEN 'fail'
-                    WHEN c.operating_system ILIKE '%%windows vista%%' THEN 'fail'
-                    WHEN c.operating_system ILIKE '%%server 2016%%' THEN 'warn'
-                    ELSE NULL
-                END AS match_status
+                regexp_replace(c.operating_system, '[' || chr(174) || chr(8482) || ']', '', 'g') AS os,
+                substring(c.operating_system_version FROM '[(]([0-9]+)[)]') AS build
             FROM ad_computer c
             WHERE c.valid_to IS NULL AND c.client_id = %(client_id)s
+              AND c.operating_system IS NOT NULL
+        ),
+        os_check AS (
+            SELECT
+                n.*,
+                (n.last_logon_timestamp IS NULL OR n.last_logon_timestamp < now() - interval '90 days')
+                    AS likely_dormant,
+                CASE
+                    -- Windows 10 LTSC/LTSB: supported per build, not per family
+                    WHEN n.os ILIKE '%%windows 10%%' AND (n.os ILIKE '%%LTSC%%' OR n.os ILIKE '%%LTSB%%') THEN
+                        CASE
+                            WHEN n.build = '10240' THEN 'fail'
+                            WHEN n.build = '17763' THEN NULL
+                            WHEN n.build = '19044' AND n.os ILIKE '%%IoT%%' THEN NULL
+                            WHEN n.build = '14393' AND now() >= timestamptz '2026-10-14' THEN 'fail'
+                            WHEN n.build = '19044' AND now() >= timestamptz '2027-01-13' THEN 'fail'
+                            WHEN n.build IN ('14393', '19044') THEN 'warn'
+                            ELSE 'warn'  -- unknown LTSC build: review
+                        END
+                    WHEN n.os ILIKE '%%windows 10%%' THEN 'fail'
+                    WHEN n.os ILIKE '%%server%%2012%%' THEN 'fail'
+                    WHEN n.os ILIKE '%%server%%2008%%' THEN 'fail'
+                    WHEN n.os ILIKE '%%server%%2003%%' THEN 'fail'
+                    WHEN n.os ILIKE '%%windows 2000%%' THEN 'fail'
+                    WHEN n.os ILIKE '%%windows nt%%' THEN 'fail'
+                    WHEN n.os ILIKE '%%windows 7%%' THEN 'fail'
+                    WHEN n.os ILIKE '%%windows 8%%' THEN 'fail'
+                    WHEN n.os ILIKE '%%windows xp%%' THEN 'fail'
+                    WHEN n.os ILIKE '%%windows vista%%' THEN 'fail'
+                    WHEN n.os ILIKE '%%server%%2016%%' AND now() >= timestamptz '2027-01-13' THEN 'fail'
+                    WHEN n.os ILIKE '%%server%%2016%%' THEN 'warn'
+                    ELSE NULL
+                END AS match_status
+            FROM os_norm n
         )
         SELECT
             match_status AS status,
@@ -133,16 +167,12 @@ PLUGIN = {
                 ELSE 'medium'
             END AS fd_severity,
             (CASE WHEN is_domain_controller THEN 'Domain Controller ' ELSE '' END)
-                || 'Computer ' || sam_account_name
+                || 'Computer ' || COALESCE(sam_account_name, object_guid::text)
                 || CASE
                      WHEN match_status = 'fail' THEN ' is running an unsupported operating system ('
                      ELSE ' is running an operating system approaching end of support ('
                    END
-                || operating_system || COALESCE(' ' || operating_system_version, '') || ')'
-                || CASE
-                     WHEN likely_dormant THEN ' (Dormant Computer Account)'
-                     ELSE ''
-                   END AS summary,
+                || operating_system || COALESCE(' ' || operating_system_version, '') || ')' AS summary,
             jsonb_build_object(
                 'sam_account_name', sam_account_name,
                 'dns_hostname', dns_hostname,

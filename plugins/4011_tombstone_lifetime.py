@@ -18,14 +18,28 @@ AD, so the collector used the MS-ADTS-specified last-resort default) --
 a real trust distinction, not just an implementation detail. A "clean"
 result riding on a confirmed value means something different than one
 riding on an assumed one.
+
+[v1.4] Two corrections. (1) The collected value is msDS-DeletedObjectLifetime
+when set, otherwise tombstoneLifetime -- which is exactly the effective
+deleted-object lifetime, since msDS-DeletedObjectLifetime defaults to
+tombstoneLifetime. With the Recycle Bin enabled that is the window in
+which a deleted object can be restored with all its attributes, not the
+tombstone (recycled-object) lifetime, so the summary now says
+"deleted-object lifetime". (2) The collector also falls back to the
+assumed 60 days when the Directory Service object could not be read at
+all, and this plugin cannot tell that apart from "neither attribute set"
+(which modern forests never are: tombstoneLifetime is written at forest
+creation since Server 2003 SP1). An assumed value is therefore reported
+as unconfirmed at low severity instead of as a medium-severity short
+lifetime.
 """
 
 PLUGIN = {
     "plugin_id": 4011,
     "category": "Domain",
     "name": "Tombstone Lifetime Unusually Short",
-    "version": "1.3",
-    "revision_date": "2026-07-15",
+    "version": "1.4",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Confirm this is an intentional choice, not an artifact of an "
         "old default that was never revisited -- Windows Server 2003 SP1 "
@@ -72,7 +86,12 @@ PLUGIN = {
         "of 60 days was used) -- a real trust distinction found "
         "necessary after a real collection run against real data showed "
         "the underlying attribute genuinely unreadable, which turned out "
-        "to be the common case, not an edge case."
+        "to be the common case, not an edge case. The value checked is "
+        "msDS-DeletedObjectLifetime, or tombstoneLifetime when that is "
+        "unset -- the effective deleted-object (recoverable) lifetime. "
+        "An ASSUMED value may also mean the Directory Service object "
+        "could not be read, so it is reported as unconfirmed, at low "
+        "severity."
     ),
     "base_severity": "low",
     "query": """
@@ -83,17 +102,23 @@ PLUGIN = {
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
-            CASE WHEN d.tombstone_lifetime_is_default THEN 'medium' ELSE 'low' END AS fd_severity,
+            'low' AS fd_severity,
             'Domain ' || COALESCE(d.dns_root, '(this domain)')
-                || ' tombstone lifetime is ' || d.tombstone_lifetime_days
-                || ' days, below a conservative 90-day threshold'
                 || CASE WHEN d.tombstone_lifetime_is_default
-                        THEN ' (Assumed Value)'
-                        ELSE ' (Confirmed Value)'
+                        THEN ' deleted-object lifetime could not be confirmed (neither '
+                             || 'msDS-DeletedObjectLifetime nor tombstoneLifetime was found); '
+                             || 'assumed ' || d.tombstone_lifetime_days
+                             || ' days, below a conservative 90-day threshold (Assumed Value)'
+                        ELSE ' deleted-object lifetime is ' || d.tombstone_lifetime_days
+                             || ' days, below a conservative 90-day threshold (Confirmed Value)'
                    END AS summary,
             jsonb_build_object(
                 'dns_root', d.dns_root,
-                'tombstone_lifetime_days', d.tombstone_lifetime_days,
+                'deleted_object_lifetime_days', d.tombstone_lifetime_days,
+                'value_source', CASE WHEN d.tombstone_lifetime_is_default
+                                     THEN 'assumed MS-ADTS default (attributes unset or unreadable)'
+                                     ELSE 'msDS-DeletedObjectLifetime, or tombstoneLifetime when unset'
+                                END,
                 'tombstone_lifetime_is_default', d.tombstone_lifetime_is_default
             ) AS detail
         FROM ad_domain d

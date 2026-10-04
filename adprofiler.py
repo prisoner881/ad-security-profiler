@@ -4,7 +4,7 @@
  adprofiler.py -- Active Directory Security & Compliance Profiler (Collector)
 ================================================================================
 
-VERSION: 0.5.14
+VERSION: 0.5.15
 
 PURPOSE:
     Connects to an on-premise Active Directory Domain Controller via LDAP,
@@ -180,7 +180,7 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
-VERSION = "0.5.14"
+VERSION = "0.5.15"
 # [client-test-branch] These are always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
 # connect_postgres() is ever called -- the values here are placeholders,
@@ -197,6 +197,7 @@ UAC_DONT_EXPIRE_PASSWORD = 0x10000
 UAC_SMARTCARD_REQUIRED = 0x40000
 UAC_TRUSTED_FOR_DELEGATION = 0x80000
 UAC_SERVER_TRUST_ACCOUNT = 0x2000  # set on domain controller computer accounts
+UAC_PARTIAL_SECRETS_ACCOUNT = 0x04000000  # set on read-only domain controller accounts
 
 LDAP_CONTROL_SHOW_DELETED = "1.2.840.113556.1.4.417"
 
@@ -208,6 +209,10 @@ USER_ATTRS = [
     "msDS-AllowedToDelegateTo", "memberOf", "whenChanged", "whenCreated",
     "uSNChanged", "uSNCreated", "isDeleted", "msDS-ReplAttributeMetaData",
     "description", "info", "msDS-KeyCredentialLink", "mail", "proxyAddresses",
+    # [v0.5.15] RBCD can be set on a user too -- notably on krbtgt as a
+    # persistence technique (plugin 1034); collect_delegation_edges()
+    # already walks users and computers alike.
+    "msDS-AllowedToActOnBehalfOfOtherIdentity",
 ]
 
 COMPUTER_ATTRS = [
@@ -220,6 +225,10 @@ COMPUTER_ATTRS = [
     "msDS-KeyCredentialLink", "primaryGroupID", "sIDHistory",
     "msDS-AllowedToActOnBehalfOfOtherIdentity", "msDS-GroupMSAMembership",
     "adminCount",
+    # [v0.5.15] A computer or gMSA can carry a UPN too; the unprivileged
+    # "create a computer via MachineAccountQuota, set its UPN" path in
+    # plugin 1043 was invisible without it.
+    "userPrincipalName",
 ]
 # [v0.1.1] The two LAPS expiration attributes are deliberately NOT in this
 # static list. Unlike built-in AD attributes (pwdLastSet, userAccountControl,
@@ -277,6 +286,9 @@ TRUST_ATTRS = [
     "objectGUID", "distinguishedName", "trustPartner", "trustDirection",
     "trustType", "trustAttributes", "whenChanged", "whenCreated",
     "uSNChanged", "uSNCreated", "msDS-ReplAttributeMetaData",
+    # [v0.5.15] Kerberos encryption types negotiated over the trust (AES vs
+    # RC4/DES); read from attributes_full by plugin 7003.
+    "msDS-SupportedEncryptionTypes",
 ]
 TRUST_FILTER = "(objectClass=trustedDomain)"
 TRUST_ATTR_FILTER_SIDS = 0x4  # bit in trustAttributes: SID filtering enabled
@@ -306,6 +318,10 @@ CERT_TEMPLATE_ATTRS = [
     "pKIExtendedKeyUsage", "whenChanged", "whenCreated",
     "uSNChanged", "uSNCreated", "msDS-ReplAttributeMetaData",
     "msPKI-Certificate-Policy", "msPKI-Template-Schema-Version",
+    # [v0.5.15] ESC1/ESC2/ESC15 need the number of authorized signatures
+    # required for issuance (plugins 6001, 6002, 6010) and the template's
+    # own OID.
+    "msPKI-RA-Signature", "msPKI-Cert-Template-OID",
 ]
 CERT_TEMPLATE_FILTER = "(objectClass=pKICertificateTemplate)"
 
@@ -395,7 +411,12 @@ DISPLAY_SPECIFIER_ATTRS = ["objectGUID", "distinguishedName", "cn", "adminContex
 DISPLAY_SPECIFIER_FILTER = "(objectClass=displaySpecifier)"
 
 # [v0.5.4] ESC13 -- certificate template OID objects, Configuration NC.
-CERT_OID_ATTRS = ["objectGUID", "distinguishedName", "cn", "msDS-OIDToGroupLink"]
+# [v0.5.15] msPKI-Cert-Template-OID is the issuance policy's dotted OID --
+# what a template's msPKI-Certificate-Policy actually references. Plugin
+# 6009 (ESC13) previously joined that dotted OID to cn, which is a
+# generated "<n>.<hex>" name, and never matched.
+CERT_OID_ATTRS = ["objectGUID", "distinguishedName", "cn", "msDS-OIDToGroupLink",
+                  "msPKI-Cert-Template-OID", "displayName"]
 CERT_OID_FILTER = "(objectClass=msPKI-Enterprise-Oid)"
 
 # [v0.5.6] AD-integrated DNS zones. Lives in an entirely different
@@ -652,9 +673,12 @@ def parse_dns_zone_allow_update(raw_dns_property_values):
         if prop_id != DNSPROPERTY_ID_ALLOW_UPDATE:
             continue
         data = raw[20:20 + data_length]
-        if len(data) < 4:
-            return None
-        return struct.unpack_from("<I", data, 0)[0]
+        # [v0.5.15] DSPROPERTY_ZONE_ALLOW_UPDATE's value is a single byte
+        # ([MS-DNSP] 2.3.2.1.1; Samba's dnsp IDL agrees), so requiring
+        # four bytes returned None for every zone and plugin 4025 could
+        # never fire. The low byte is the value whether the property is
+        # stored as one byte or as a little-endian DWORD.
+        return data[0] if data else None
     return None
 
 
@@ -1017,7 +1041,7 @@ def filetime_to_datetime(value):
         return None
 
 
-def ad_interval_to_seconds(raw_value):
+def ad_interval_to_seconds(raw_value, zero_means_none=True):
     """
     [v0.1.0] Converts an AD "Interval" attribute -- msDS-MinimumPasswordAge,
     msDS-MaximumPasswordAge, msDS-LockoutDuration,
@@ -1040,8 +1064,15 @@ def ad_interval_to_seconds(raw_value):
     maximum" -- returning None here instead, matching what an absent
     attribute would mean, since both represent "no maximum applies".
     """
-    if raw_value in (None, "", 0, "0", -9223372036854775808, "-9223372036854775808"):
+    # [v0.5.15] zero_means_none: 0 means "no limit" only for maxPwdAge. For
+    # minPwdAge (no minimum), lockoutDuration (locked until an admin
+    # unlocks) and the observation window, 0 is a real value -- returning
+    # None for it made plugin 4005 (minimum password age is zero)
+    # impossible to trigger.
+    if raw_value in (None, "", -9223372036854775808, "-9223372036854775808"):
         return None
+    if raw_value in (0, "0"):
+        return None if zero_means_none else 0
     try:
         ticks = int(raw_value)
     except (TypeError, ValueError):
@@ -1485,7 +1516,7 @@ REQUIRED_SCHEMA_COLUMNS = {
     "ad_computer": {"object_guid", "client_id", "version_id", "valid_from", "valid_to",
                      "sam_account_name", "dns_hostname", "operating_system",
                      "operating_system_version", "user_account_control",
-                     "is_domain_controller", "last_logon_timestamp",
+                     "is_domain_controller", "is_read_only_dc", "user_principal_name", "last_logon_timestamp",
                      "supported_encryption_types", "unconstrained_delegation",
                      "laps_expiration_legacy", "laps_expiration_modern",
                      "pwd_last_set", "description", "notes", "key_credential_count",
@@ -1596,7 +1627,7 @@ REQUIRED_IDENTITY_COLUMNS = {
 # the structural check remains the backstop for a schema altered
 # outside the approved migration files, where the version number could
 # claim to be current while the actual structure doesn't match it.
-EXPECTED_SCHEMA_VERSION = 35
+EXPECTED_SCHEMA_VERSION = 36
 
 
 def check_schema_version(pg_conn):
@@ -2522,7 +2553,14 @@ def computer_typed_columns(full):
         "operating_system": full.get("operatingSystem"),
         "operating_system_version": full.get("operatingSystemVersion"),
         "user_account_control": uac,
-        "is_domain_controller": bool(uac & UAC_SERVER_TRUST_ACCOUNT),
+        # [v0.5.15] RODCs carry PARTIAL_SECRETS_ACCOUNT, not
+        # SERVER_TRUST_ACCOUNT, so they were treated as ordinary computers:
+        # flagged for their default delegation/primary group and skipped by
+        # every DC check. is_domain_controller now covers both kinds;
+        # is_read_only_dc (schema v36) tells them apart.
+        "is_domain_controller": bool(uac & (UAC_SERVER_TRUST_ACCOUNT | UAC_PARTIAL_SECRETS_ACCOUNT)),
+        "is_read_only_dc": bool(uac & UAC_PARTIAL_SECRETS_ACCOUNT),
+        "user_principal_name": full.get("userPrincipalName"),
         "is_enabled": not bool(uac & UAC_ACCOUNTDISABLE),
         "last_logon_timestamp": filetime_to_datetime(full.get("lastLogonTimestamp")),
         "supported_encryption_types": _as_int(full.get("msDS-SupportedEncryptionTypes")),
@@ -2613,7 +2651,9 @@ def domain_typed_columns(full, functional_level, tombstone_lifetime_days, tombst
     if isinstance(raw_wko, str):
         raw_wko = [raw_wko]
     return {
-        "dns_root": full.get("distinguishedName"),
+        # [v0.5.15] Was the domain's DN ("DC=corp,DC=local"), so every
+        # summary built from it read "Domain DC=corp,DC=local ...".
+        "dns_root": base_dn_to_fqdn(full.get("distinguishedName") or ""),
         "functional_level": functional_level,
         "tombstone_lifetime_days": tombstone_lifetime_days,
         "tombstone_lifetime_is_default": tombstone_lifetime_is_default,
@@ -2626,10 +2666,10 @@ def domain_typed_columns(full, functional_level, tombstone_lifetime_days, tombst
         "dsheuristics_anonymous_access": dsheuristics_anonymous_access,
         "dsheuristics_uniqueness": dsheuristics_uniqueness,
         "lockout_threshold": _as_int(full.get("lockoutThreshold")),
-        "min_pwd_age_seconds": ad_interval_to_seconds(full.get("minPwdAge")),
+        "min_pwd_age_seconds": ad_interval_to_seconds(full.get("minPwdAge"), zero_means_none=False),
         "max_pwd_age_seconds": ad_interval_to_seconds(full.get("maxPwdAge")),
-        "lockout_duration_seconds": ad_interval_to_seconds(full.get("lockoutDuration")),
-        "lockout_observation_window_seconds": ad_interval_to_seconds(full.get("lockOutObservationWindow")),
+        "lockout_duration_seconds": ad_interval_to_seconds(full.get("lockoutDuration"), zero_means_none=False),
+        "lockout_observation_window_seconds": ad_interval_to_seconds(full.get("lockOutObservationWindow"), zero_means_none=False),
         "pwd_history_count": _as_int(full.get("pwdHistoryLength")),
         "machine_account_quota": _as_int(full.get("ms-DS-MachineAccountQuota")),
         "block_inheritance": gpoptions_block_inheritance(full),
@@ -2679,11 +2719,11 @@ def fgpp_typed_columns(full):
         "pwd_complexity_enabled": str(full.get("msDS-PasswordComplexityEnabled")).upper() == "TRUE",
         "reversible_encryption_enabled": str(full.get("msDS-PasswordReversibleEncryptionEnabled")).upper() == "TRUE",
         "pwd_history_count": _as_int(full.get("msDS-PasswordHistoryLength")),
-        "min_pwd_age_seconds": ad_interval_to_seconds(full.get("msDS-MinimumPasswordAge")),
+        "min_pwd_age_seconds": ad_interval_to_seconds(full.get("msDS-MinimumPasswordAge"), zero_means_none=False),
         "max_pwd_age_seconds": ad_interval_to_seconds(full.get("msDS-MaximumPasswordAge")),
         "lockout_threshold": _as_int(full.get("msDS-LockoutThreshold")),
-        "lockout_duration_seconds": ad_interval_to_seconds(full.get("msDS-LockoutDuration")),
-        "lockout_observation_window_seconds": ad_interval_to_seconds(full.get("msDS-LockoutObservationWindow")),
+        "lockout_duration_seconds": ad_interval_to_seconds(full.get("msDS-LockoutDuration"), zero_means_none=False),
+        "lockout_observation_window_seconds": ad_interval_to_seconds(full.get("msDS-LockoutObservationWindow"), zero_means_none=False),
     }
 
 
@@ -2727,6 +2767,11 @@ def cert_template_typed_columns(full):
         # technique -- V1 templates are schema_version = 1).
         "certificate_policy_oids": json.dumps(list(cert_policy)) if cert_policy else None,
         "schema_version": _as_int(full.get("msPKI-Template-Schema-Version")),
+        # [v0.5.15, schema v36] Authorized signatures required for issuance
+        # (an enrollment agent must co-sign; ESC1/2/15 need this to be 0)
+        # and the template's own OID.
+        "ra_signature_count": _as_int(full.get("msPKI-RA-Signature")),
+        "template_oid": full.get("msPKI-Cert-Template-OID"),
     }
 
 
@@ -2853,6 +2898,10 @@ def cert_oid_typed_columns(full):
     return {
         "schema_cn": full.get("cn"),
         "oid_to_group_link": full.get("msDS-OIDToGroupLink"),
+        # [v0.5.15, schema v36] The dotted OID templates reference in
+        # msPKI-Certificate-Policy (cn is a generated name, not the OID).
+        "policy_oid": full.get("msPKI-Cert-Template-OID"),
+        "display_name": full.get("displayName"),
     }
 
 
@@ -2910,7 +2959,19 @@ def update_group_member_count(pg_cur, object_guid, count):
 
 def collect_group_membership(conn, pg_cur, client_id, run_id, base_dn,
                               page_size, dn_to_guid, group_entries, stats,
-                              run_timestamp):
+                              run_timestamp, principal_entries=(), domain_sid=None):
+    """[v0.5.15] Also records primary-group membership. A user's or
+    computer's primary group (primaryGroupID -- 513 Domain Users, 515
+    Domain Computers, 516 Domain Controllers, ...) is never listed in the
+    group's member attribute, so it was missing from group_member_edge:
+    Domain Users looked empty (plugin 3007), an FGPP applied to Domain
+    Users covered nobody (4002), and an account whose primaryGroupID is
+    a privileged group (512, 516, ...) wasn't a member of it anywhere
+    membership is evaluated, v_effective_group_membership and
+    v_privileged_principal included. Those edges are now added with
+    is_primary_group = TRUE (schema v36) for every principal in
+    principal_entries whose primary group resolves to a collected group
+    of this domain."""
     log_info("Resolving group membership...")
     desired = {}
     valid_from = run_timestamp
@@ -2937,15 +2998,34 @@ def collect_group_membership(conn, pg_cur, client_id, run_id, base_dn,
                 continue
             if member_guid == object_guid:
                 continue
-            desired[(object_guid, member_guid)] = {"is_direct": True}
+            desired[(object_guid, member_guid)] = {"is_direct": True, "is_primary_group": False}
+
+    primary_edges = 0
+    if domain_sid:
+        group_by_rid = {}
+        for group_guid, full in group_entries:
+            sid = full.get("objectSid") or ""
+            prefix, _, rid = sid.rpartition("-")
+            if prefix == domain_sid and rid.isdigit():
+                group_by_rid[int(rid)] = group_guid
+        for member_guid, full in principal_entries:
+            rid = _as_int(full.get("primaryGroupID"))
+            group_guid = group_by_rid.get(rid)
+            if group_guid is None or group_guid == member_guid:
+                continue
+            desired.setdefault((group_guid, member_guid),
+                               {"is_direct": True, "is_primary_group": True})
+            primary_edges += 1
 
     opened, closed = sync_edges(
         pg_cur, "group_member_edge", client_id, run_id, valid_from,
         ["group_guid", "member_guid"], desired,
+        payload_cols=["is_primary_group"],
     )
     stats.edges_opened += opened
     stats.edges_closed += closed
     log_success(f"Group membership: {total_members_seen} member reference(s) seen, "
+                f"{primary_edges} primary-group membership(s), "
                 f"{opened} edge(s) opened, {closed} closed, "
                 f"{stats.skipped_unresolved_members} unresolved (not a collected object)")
 
@@ -3124,6 +3204,19 @@ def collect_cert_template_publication(pg_cur, client_id, run_id, ca_entries,
                 f"{unresolved} unresolved (template name not found in this run's collection)")
 
 
+# [v0.5.15] The default sPNMappings HOST alias set (MS-ADA3, sPNMappings on
+# CN=Directory Service): a request for any of these service classes on a
+# host is answered by that host's HOST/<name> SPN when no exact SPN exists.
+HOST_SPN_ALIASES = frozenset("""
+    alerter http appmgmt cisvc clipsrv browser dhcp dnscache replicator
+    eventlog eventsystem policyagent oakley dmserver dns mcsvc fax msiserver
+    ias messenger netlogon netman netdde netddedsm nmagent plugplay
+    protectedstorage rasman rpclocator rpc rpcss remoteaccess rsvp samss
+    scardsvr scesrv seclogon scm dcom cifs spooler snmp schedule tapisrv
+    trksvr trkwks ups time wins www http w3svc iisadmin msdtc
+""".split())
+
+
 def build_spn_to_guid(entries):
     mapping = {}
     for object_guid, full in entries:
@@ -3133,6 +3226,24 @@ def build_spn_to_guid(entries):
         for spn in spns:
             mapping.setdefault(spn.lower(), object_guid)
     return mapping
+
+
+def resolve_spn(spn_to_guid, spn):
+    """[v0.5.15] Resolves a delegation target SPN the way the KDC does:
+    an exact registered SPN first, then -- for a service class in the
+    default HOST alias set -- the host's HOST/<name> SPN (port and
+    service name dropped). Before, only exact matches resolved, so a
+    perfectly valid target such as cifs/fs01 on a computer that only
+    registers HOST/fs01 was recorded as a "ghost" SPN (plugin 2034)."""
+    key = spn.lower()
+    guid = spn_to_guid.get(key)
+    if guid is not None:
+        return guid
+    service_class, _, rest = key.partition("/")
+    if not rest or service_class not in HOST_SPN_ALIASES:
+        return None
+    host = rest.split("/", 1)[0].split(":", 1)[0]
+    return spn_to_guid.get(f"host/{host}")
 
 
 def collect_spn_edges(pg_cur, client_id, run_id, entries, stats, run_timestamp):
@@ -3192,7 +3303,7 @@ def collect_delegation_edges(pg_cur, client_id, run_id, entries, spn_to_guid, st
         if isinstance(allowed_to, str):
             allowed_to = [allowed_to]
         for target_spn in allowed_to:
-            target_guid = spn_to_guid.get(target_spn.lower())
+            target_guid = resolve_spn(spn_to_guid, target_spn)
             if target_guid is None:
                 unresolved += 1
                 ghost_spn_desired[(object_guid, target_spn)] = {}
@@ -3214,6 +3325,10 @@ def collect_delegation_edges(pg_cur, client_id, run_id, entries, spn_to_guid, st
             raw_rbcd_sd = base64.b64decode(raw_rbcd_b64)
             _, rbcd_aces = parse_security_descriptor(raw_rbcd_sd)
             for ace in rbcd_aces:
+                # [v0.5.15] A deny ACE in this descriptor forbids, not
+                # grants, delegation -- it was being recorded as a trustee.
+                if ace["ace_type"] != "allow":
+                    continue
                 trustee_guid = sid_to_guid.get(ace["trustee_sid"])
                 if trustee_guid is None:
                     rbcd_unresolved_trustees += 1
@@ -4036,6 +4151,33 @@ def main():
             log_success(f"DC computer object ownership: scanned, "
                         f"{dc_owner_read_failures} read failure(s)")
 
+            # [v0.5.15] Owner of every AdminSDHolder-protected (adminCount=1)
+            # user, group and computer. Plugin 5007 (privileged object owned
+            # by an unprivileged account) had nothing to evaluate: owners
+            # were only read for the domain root, AdminSDHolder, OUs, PKI
+            # objects and DCs. Targeted reads, like the DC loop above --
+            # protected objects number in the tens or hundreds, not the
+            # whole directory.
+            protected_owner_reads = protected_owner_failures = 0
+            for obj_guid, obj_full in users + groups + computers:
+                if _as_int(obj_full.get("adminCount")) != 1:
+                    continue
+                obj_dn = obj_full.get("distinguishedName")
+                if not obj_dn:
+                    continue
+                owner_sid, _ = parse_security_descriptor(
+                    get_object_security_descriptor(ldap_conn, obj_dn))
+                if owner_sid is None:
+                    protected_owner_failures += 1
+                    continue
+                protected_owner_reads += 1
+                cur.execute(
+                    "UPDATE directory_object SET owner_sid = %s WHERE object_guid = %s AND client_id = %s",
+                    (owner_sid, obj_guid, client_id),
+                )
+            log_success(f"Protected (adminCount=1) object ownership: {protected_owner_reads} read, "
+                        f"{protected_owner_failures} read failure(s)")
+
 
             # [v0.5.4] The sync_edges("acl_edge", ...) call that used to sit
             # here was moved to AFTER the ADCS ACL collection section below --
@@ -4055,6 +4197,7 @@ def main():
             collect_group_membership(
                 ldap_conn, cur, client_id, run_id, base_dn, args.page_size,
                 dn_to_guid, groups, stats, run_timestamp,
+                principal_entries=users + computers, domain_sid=domain_sid,
             )
 
             all_principals = users + computers
@@ -4232,9 +4375,15 @@ def main():
                     if not template_dn:
                         continue
                     raw_template_sd = get_object_security_descriptor(ldap_conn, template_dn)
-                    ok, _ = build_acl_desired_edges(
+                    ok, template_owner_sid = build_acl_desired_edges(
                         template_guid, raw_template_sd, template_dn, acl_desired, acl_unreadable,
                     )
+                    if template_owner_sid:
+                        # [v0.5.15] Owner kept, not discarded (plugins 6006/6008 owner checks).
+                        cur.execute(
+                            "UPDATE directory_object SET owner_sid = %s WHERE object_guid = %s AND client_id = %s",
+                            (template_owner_sid, template_guid, client_id),
+                        )
                     if not ok:
                         cert_template_acl_failures += 1
 
@@ -4252,8 +4401,14 @@ def main():
                     ca_dn = ca_full.get("distinguishedName")
                     if ca_dn:
                         raw_ca_sd = get_object_security_descriptor(ldap_conn, ca_dn)
-                        ok, _ = build_acl_desired_edges(ca_guid, raw_ca_sd, ca_dn, acl_desired,
-                                                        acl_unreadable)
+                        ok, ca_owner_sid = build_acl_desired_edges(ca_guid, raw_ca_sd, ca_dn, acl_desired,
+                                                                   acl_unreadable)
+                        if ca_owner_sid:
+                            # [v0.5.15] Owner kept, not discarded (plugins 6006/6008 owner checks).
+                            cur.execute(
+                                "UPDATE directory_object SET owner_sid = %s WHERE object_guid = %s AND client_id = %s",
+                                (ca_owner_sid, ca_guid, client_id),
+                            )
                         if not ok:
                             ca_acl_failures += 1
 

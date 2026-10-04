@@ -61,6 +61,18 @@ only version > 1 counts. Generalized-time values are now interpreted as UTC
 rather than in the database session's time zone. The evidence carries the
 creation time alongside each change.
 
+[v1.2] The summary timestamp is rendered in UTC (with a "UTC" suffix)
+instead of the database session's TimeZone, so a server/session time-zone
+change no longer rewrites every open summary. Severity is now graded:
+high for privileged principals (protected-group membership or any
+v_privileged_principal source), for a user/computer sAMAccountName
+rename (noPac-style) and for a userPrincipalName that now equals another
+user/computer's sAMAccountName (plugin 1043's impersonation signature);
+medium for other UPN changes, group renames and user SPN changes; low for
+SPN-only changes on computer accounts, which are routine (renames,
+cluster/SQL/Hyper-V registrations). The summary now says "Group" or
+"Computer" instead of "Account" for those object classes.
+
 Timestamp format caveat
 -----------------------
 adprofiler.py parses msDS-ReplAttributeMetaData into structured JSON, but
@@ -82,8 +94,8 @@ PLUGIN = {
     "plugin_id": 11008,
     "category": "Change Detection",
     "name": "Principal Name Attribute Modified Recently (Replication Metadata)",
-    "version": "1.1",
-    "revision_date": "2026-10-03",
+    "version": "1.2",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Reconcile each change against a known administrative action. The "
         "evidence names the attribute, the originating domain controller and "
@@ -134,7 +146,11 @@ PLUGIN = {
         "modification: sAMAccountName at version 1, and any change within "
         "10 minutes of whenCreated, are ignored, so newly created accounts "
         "are not reported. Timestamps that cannot be parsed are treated as "
-        "unknown and produce no finding."
+        "unknown and produce no finding. Severity is high for privileged "
+        "principals, user/computer renames and a UPN that now equals "
+        "another account's sAMAccountName; medium for other UPN changes, "
+        "group renames and user SPN changes; low for SPN-only changes on "
+        "computers."
     ),
     "base_severity": "medium",
     "query": """
@@ -168,6 +184,34 @@ PLUGIN = {
             JOIN privileged_roots pr ON pr.object_guid = vem.group_guid
             WHERE vem.client_id = %(client_id)s
             GROUP BY vem.member_guid
+        ),
+        -- [v1.2] Any Tier 0 privilege (group, ACL, DCSync, ownership).
+        tier0 AS (
+            SELECT DISTINCT pp.object_guid
+            FROM v_privileged_principal pp
+            WHERE pp.client_id = %(client_id)s
+        ),
+        -- [v1.2] Current UPN equal to another user/computer's
+        -- sAMAccountName (the plugin 1043 impersonation signature).
+        upn_collision AS (
+            SELECT DISTINCT o.object_guid
+            FROM (
+                SELECT u.object_guid, u.user_principal_name
+                FROM ad_user u
+                WHERE u.client_id = %(client_id)s AND u.valid_to IS NULL
+                  AND COALESCE(u.user_principal_name, '') <> ''
+                UNION ALL
+                SELECT c.object_guid, c.user_principal_name
+                FROM ad_computer c
+                WHERE c.client_id = %(client_id)s AND c.valid_to IS NULL
+                  AND COALESCE(c.user_principal_name, '') <> ''
+            ) o
+            JOIN directory_object p
+              ON p.client_id = %(client_id)s
+             AND NOT p.is_deleted
+             AND p.object_class IN ('user', 'computer')
+             AND lower(p.sam_account_name) = lower(o.user_principal_name)
+             AND p.object_guid <> o.object_guid
         ),
         meta AS (
             SELECT v.object_guid,
@@ -265,19 +309,27 @@ PLUGIN = {
             NULL AS tool_severity,
             NULL AS tool_reference,
             CASE
-                WHEN pm.via_groups IS NOT NULL THEN 'high'
-                WHEN rc.upn_changed OR rc.sam_changed THEN 'high'
+                WHEN pm.via_groups IS NOT NULL OR t0.object_guid IS NOT NULL THEN 'high'
+                WHEN rc.sam_changed AND do2.object_class IN ('user', 'computer') THEN 'high'
+                WHEN rc.upn_changed AND uc.object_guid IS NOT NULL THEN 'high'
+                WHEN rc.upn_changed OR rc.sam_changed THEN 'medium'
+                WHEN do2.object_class = 'computer' THEN 'low'
                 ELSE 'medium'
             END AS fd_severity,
-            'Account "' || COALESCE(do2.sam_account_name, do2.dn_current)
+            CASE do2.object_class WHEN 'group' THEN 'Group'
+                                  WHEN 'computer' THEN 'Computer'
+                                  ELSE 'Account' END
+                || ' "' || COALESCE(do2.sam_account_name, do2.dn_current,
+                                    rc.object_guid::text)
                 || '" had '
                 || array_to_string(ARRAY_REMOVE(ARRAY[
                        CASE WHEN rc.sam_changed THEN 'sAMAccountName' END,
                        CASE WHEN rc.upn_changed THEN 'userPrincipalName' END,
                        CASE WHEN rc.spn_changed THEN 'servicePrincipalName' END
                    ], NULL), ', ')
-                || ' modified on ' || to_char(rc.most_recent_change,
-                                              'YYYY-MM-DD HH24:MI')
+                || ' modified on '
+                || to_char(rc.most_recent_change AT TIME ZONE 'UTC',
+                           'YYYY-MM-DD HH24:MI') || ' UTC'
                 || ' according to directory replication metadata'
                 || CASE WHEN pm.via_groups IS NOT NULL
                         THEN ' -- the account is an effective member of '
@@ -292,6 +344,8 @@ PLUGIN = {
                 'service_principal_name_changed', rc.spn_changed,
                 'sam_account_name_changed', rc.sam_changed,
                 'privileged_via_groups', pm.via_groups,
+                'is_tier0_principal', t0.object_guid IS NOT NULL,
+                'upn_matches_other_sam_account_name', uc.object_guid IS NOT NULL,
                 'changes', rc.changes,
                 'source',
                     'msDS-ReplAttributeMetaData (directory-reported, does not '
@@ -303,5 +357,7 @@ PLUGIN = {
         JOIN directory_object do2
             ON do2.object_guid = rc.object_guid AND do2.client_id = %(client_id)s
         LEFT JOIN privileged_members pm ON pm.member_guid = rc.object_guid
+        LEFT JOIN tier0 t0 ON t0.object_guid = rc.object_guid
+        LEFT JOIN upn_collision uc ON uc.object_guid = rc.object_guid
     """,
 }

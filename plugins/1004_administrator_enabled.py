@@ -5,52 +5,82 @@ The RID-500 built-in Administrator account is a predictable, unrenameable
 (by RID) target with one property that makes it worse than an ordinary
 privileged account: it is hardcoded immune to account lockout policy,
 regardless of how lockoutThreshold is configured domain-wide.
+
+[v1.4] Rationale and mappings corrected. The "hardcoded immune to lockout"
+claim is outdated: whether the RID-500 account locks out depends on
+pwdProperties DOMAIN_LOCKOUT_ADMINS (0x8, ad_domain.pwd_allows_admin_lockout)
+and, since KB5020282 (Oct 2022), the "Allow Administrator account lockout"
+policy -- detail now carries the domain flag and lockout threshold instead of
+asserting immunity. The CAT II STIG mapping (WN10-SO-000005, a Windows 10
+LOCAL-account rule) is dropped: no DISA STIG requires the domain RID-500
+account to be disabled; Microsoft's "Appendix D: Securing Built-In
+Administrator Accounts in Active Directory" recommends restricting it
+(smart card, sensitive and cannot be delegated, deny network/RDP/batch/
+service logon). Severity is now medium, high when the account has logged on
+within the last 90 days (lastLogonTimestamp) -- PingCastle reports on use of
+this account, not on its enabled state. Summary unchanged.
 """
 
 PLUGIN = {
     "plugin_id": 1004,
     "category": "User Accounts",
     "name": "Built-in Administrator Account Is Enabled",
-    "version": "1.3",
-    "revision_date": "2026-07-15",
+    "version": "1.4",
+    "revision_date": "2026-10-04",
     "remediation": (
-    'Disable the account (`Disable-ADAccount`). Ensure named, '
+    'Stop using the account for day-to-day administration: ensure named, '
     'individually-attributable administrative accounts exist to cover whatever '
-    "this account was being used for, so disabling it doesn't create pressure "
-    'to re-enable it later. Renaming the account is a reasonable complementary '
-    'hardening step but does not replace disabling it -- the account is still '
-    'RID 500 and still lockout-immune regardless of its name.'
+    'this account was being used for, then either disable it '
+    '(`Disable-ADAccount`) or, if it must stay enabled as a break-glass '
+    "account, secure it per Microsoft's Appendix D: set \"Account is "
+    'sensitive and cannot be delegated" and "Smart card is required for '
+    'interactive logon", deny it network, batch, service and Remote Desktop '
+    'logon via GPO on all member systems, and alert on its use. Enable '
+    'administrator lockout (pwdProperties DOMAIN_LOCKOUT_ADMINS / the "Allow '
+    'Administrator account lockout" policy, KB5020282). Renaming the account '
+    'is complementary only -- it is still RID 500 regardless of its name.'
 ),
     "control_id": "PRIV-101",
-    "framework_tags": ["DISA-STIG"],
-    "references": [],
+    "framework_tags": [],
+    "references": [
+        {"title": "Microsoft: Appendix D -- Securing Built-In Administrator Accounts in Active Directory",
+         "url": "https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/plan/security-best-practices/appendix-d--securing-built-in-administrator-accounts-in-active-directory"},
+        {"title": "Microsoft KB5020282: Account lockout available for built-in local administrators",
+         "url": "https://support.microsoft.com/help/5020282"},
+    ],
     "description": (
-        "The built-in Administrator account (RID 500) should be disabled "
-        "in favor of named, individually-attributable administrative "
-        "accounts. This account is additionally hardcoded immune to "
-        "account lockout policy regardless of the domain's configured "
-        "lockoutThreshold, making it a standing brute-force target with "
-        "no automatic mitigation available. Comparable to the recurring "
-        "'Accounts: Administrator account status must be Disabled' rule "
-        "present across DISA Windows STIG families (e.g. WN10-SO-000005 "
-        "and equivalents in later STIG versions). Detected by RID (the "
+        "The built-in Administrator account (RID 500) should be disabled, "
+        "or restricted as a break-glass account, in favor of named, "
+        "individually-attributable administrative accounts (Microsoft "
+        "'Appendix D: Securing Built-In Administrator Accounts in Active "
+        "Directory'). It is a predictable, always-present Domain Admin "
+        "target; historically it was exempt from account lockout, and it "
+        "still is unless pwdProperties DOMAIN_LOCKOUT_ADMINS / the 'Allow "
+        "Administrator account lockout' policy (KB5020282) is in effect "
+        "(the domain flag is shown in detail). Severity is medium, high "
+        "when the account has logged on in the last 90 days -- active use "
+        "of a shared, non-attributable admin account (PingCastle "
+        "P-AdminLogin). Detected by RID (the "
         "trailing -500 in the account's SID), not by name -- STIG "
         "guidance separately recommends renaming this account, and a "
         "rename does not change its RID, so a name-only check would miss "
         "a renamed-but-still-enabled instance of this exact account."
     ),
-    "base_severity": "high",
+    "base_severity": "medium",
     "query": """
         SELECT
             'fail' AS status,
             u.object_guid,
-            'CAT_II' AS stig_severity,
-            'DISA Windows STIG family: "Accounts: Administrator account status" '
-                'must be Disabled (e.g. WN10-SO-000005 and equivalents across '
-                'STIG versions)' AS stig_reference,
-            NULL AS tool_severity,
-            NULL AS tool_reference,
-            'high' AS fd_severity,
+            -- [v1.4] No DISA STIG requires the DOMAIN RID-500 account to be
+            -- disabled (WN10-SO-000005 is a Windows 10 local-account rule).
+            NULL AS stig_severity,
+            NULL AS stig_reference,
+            'medium' AS tool_severity,
+            'PingCastle P-AdminLogin (use of the built-in Administrator); '
+                'Microsoft AD security best practices, Appendix D' AS tool_reference,
+            -- [v1.4] high only when the account is actually in use.
+            CASE WHEN u.last_logon_timestamp > now() - interval '90 days'
+                 THEN 'high' ELSE 'medium' END AS fd_severity,
             'Built-in Administrator account (RID 500, currently named "' || u.sam_account_name
                 || '") is enabled' AS summary,
             jsonb_build_object(
@@ -61,11 +91,24 @@ PLUGIN = {
                                            THEN EXTRACT(DAY FROM now() - u.pwd_last_set)::int
                                            ELSE NULL END,
                 'last_logon_timestamp', u.last_logon_timestamp,
-                'pwd_never_expires', u.pwd_never_expires
+                'pwd_never_expires', u.pwd_never_expires,
+                'smartcard_required', u.smartcard_required,
+                'recently_used_90d', COALESCE(u.last_logon_timestamp > now() - interval '90 days', false),
+                -- [v1.4] whether lockout can apply (pwdProperties 0x8);
+                -- NULL when no current domain row was collected.
+                'domain_pwd_allows_admin_lockout', dom.pwd_allows_admin_lockout,
+                'domain_lockout_threshold', dom.lockout_threshold
             ) AS detail
         FROM ad_user u
         JOIN directory_object do2
             ON do2.object_guid = u.object_guid AND do2.client_id = u.client_id
+        LEFT JOIN LATERAL (
+            SELECT d.pwd_allows_admin_lockout, d.lockout_threshold
+            FROM ad_domain d
+            WHERE d.client_id = u.client_id AND d.valid_to IS NULL
+            ORDER BY d.object_guid
+            LIMIT 1
+        ) dom ON true
         WHERE u.valid_to IS NULL
           AND u.client_id = %(client_id)s
           AND u.is_enabled

@@ -9,14 +9,20 @@ without one crisp, universally-cited numeric threshold the way some
 other findings in this project have. The threshold used here (deeper
 than 4 levels) is this project's own reasoned heuristic, stated as such,
 not an externally cited standard.
+
+[v1.2] Summary falls back to the group's SID / GUID when it has no
+sAMAccountName (a NULL summary made the evidence write fail); the inner
+aggregate is renamed max_min_depth for clarity (detail key
+max_nesting_depth unchanged: the deepest shortest-path depth of any
+member).
 """
 
 PLUGIN = {
     "plugin_id": 3010,
     "category": "Groups",
     "name": "Group Membership Nested Unusually Deep",
-    "version": "1.1",
-    "revision_date": "2026-07-15",
+    "version": "1.2",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Review the full nesting chain (available in this finding's "
         "detail) and consider flattening it -- add the ultimately-"
@@ -58,21 +64,23 @@ PLUGIN = {
             NULL AS tool_reference,
             CASE WHEN g.is_protected_group THEN 'medium' ELSE 'low' END AS fd_severity,
             (CASE WHEN g.is_protected_group THEN 'Privileged ' ELSE '' END)
-                || 'Group ' || g.sam_account_name || ' has a membership chain nested '
-                || deep.min_depth || ' levels deep' AS summary,
+                || 'Group ' || COALESCE(g.sam_account_name, gdo.object_sid, g.object_guid::text)
+                || ' has a membership chain nested '
+                || deep.max_min_depth || ' levels deep' AS summary,
             jsonb_build_object(
                 'sam_account_name', g.sam_account_name,
-                'max_nesting_depth', deep.min_depth,
+                'max_nesting_depth', deep.max_min_depth,
                 'is_protected_group', g.is_protected_group
             ) AS detail
         FROM (
-            SELECT group_guid, max(min_depth) AS min_depth
+            SELECT group_guid, max(min_depth) AS max_min_depth
             FROM v_effective_group_membership
             WHERE client_id = %(client_id)s
             GROUP BY group_guid
             HAVING max(min_depth) > 4
         ) deep
         JOIN ad_group g ON g.object_guid = deep.group_guid AND g.valid_to IS NULL
+        LEFT JOIN directory_object gdo ON gdo.object_guid = g.object_guid AND gdo.client_id = g.client_id
         WHERE g.client_id = %(client_id)s
     """,
 }

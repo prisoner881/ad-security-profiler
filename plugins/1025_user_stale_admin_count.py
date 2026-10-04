@@ -21,14 +21,22 @@ its protected_group_member rows (circular here). The old inline subquery
 treated a dangerous right on, or ownership of, ANY object as privilege,
 so an account that merely had OU delegation or had created an OU was
 wrongly treated as currently privileged and its stale marker was hidden.
+
+[v1.6] Excludes the built-in Administrator (RID 500): it is itself an
+AdminSDHolder-protected account, so admin_count=1 on it is never stale
+even when it has been removed from every protected group. Also treats a
+primaryGroupID of a protected global group (512/516/518/519/521) as
+current membership. Since schema v36 primary-group membership is also an
+edge in group_member_edge (so currently_nested sees it); the explicit
+test keeps that right even if the edge is missing.
 """
 
 PLUGIN = {
     "plugin_id": 1025,
     "category": "User Accounts",
     "name": "User Account Has a Stale AdminSDHolder Protection Marker",
-    "version": "1.5",
-    "revision_date": "2026-10-03",
+    "version": "1.6",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Investigate why this account is no longer a member of a "
         "privileged group despite carrying the AdminSDHolder protection "
@@ -138,5 +146,11 @@ PLUGIN = {
           -- established rename-resistant detection pattern used
           -- throughout this project.
           AND COALESCE(udo.object_sid, '') NOT LIKE '%%-502'
+          -- [v1.6] The built-in Administrator (RID 500) is itself an
+          -- AdminSDHolder-protected account: its marker is never stale.
+          AND COALESCE(udo.object_sid, '') NOT LIKE '%%-500'
+          -- [v1.6] A protected global group as primary group is current
+          -- protected-group membership (SDProp counts it).
+          AND COALESCE(u.primary_group_id, 0) NOT IN (512, 516, 518, 519, 521)
     """,
 }

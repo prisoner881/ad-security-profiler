@@ -41,14 +41,24 @@ Carried over from 4023: the PingCastle reference, the dns_hostname
 detail key and the promotion-residue explanation. detail gains
 owner_tier, owner_resolved and owner_privilege_sources. Owner data
 comes from adprofiler's targeted DC-only security descriptor read.
+
+[v1.2] Domain Admins is accepted as the default owner only when it is
+the DC's OWN domain's Domain Admins (owner SID = the DC's domain SID
+prefix + '-512'); another forest domain's Domain Admins is now reported
+in the Tier 0 builtin tier (LOW, 'warn') instead of passing silently.
+Enterprise Admins (-519) lives in the forest root domain, whose SID is
+not known here, so any -519 is still accepted. A deleted owner's stale
+sAMAccountName is no longer shown in the summary (the SID is, as for any
+unresolved owner). RODCs are covered since schema v36 (is_domain_controller
+includes PARTIAL_SECRETS_ACCOUNT).
 """
 
 PLUGIN = {
     "plugin_id": 2030,
     "category": "Computer Accounts",
     "name": "Domain Controller Computer Object Owned by an Unexpected Principal",
-    "version": "1.1",
-    "revision_date": "2026-10-03",
+    "version": "1.2",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Reassign ownership of this Domain Controller's computer object "
         "to Domain Admins (the dcpromo default): in Active Directory "
@@ -94,8 +104,9 @@ PLUGIN = {
               AND c.client_id = %(client_id)s
               AND c.is_domain_controller
               AND cdo.owner_sid IS NOT NULL
-              -- Domain Admins / Enterprise Admins: the dcpromo default.
-              AND cdo.owner_sid NOT LIKE '%%-512'
+              -- The DC's own domain's Domain Admins, or Enterprise Admins: the dcpromo default.
+              AND (cdo.object_sid IS NULL
+                   OR cdo.owner_sid IS DISTINCT FROM regexp_replace(cdo.object_sid, '-[0-9]+$', '') || '-512')
               AND cdo.owner_sid NOT LIKE '%%-519'
         ),
         dc_guids AS (
@@ -122,6 +133,7 @@ PLUGIN = {
                    CASE
                        WHEN d.owner_sid = 'S-1-5-32-544' OR d.owner_sid LIKE '%%-500'
                             OR d.owner_sid = 'S-1-5-18'
+                            OR d.owner_sid LIKE 'S-1-5-21-%%-512'   -- another domain's Domain Admins
                            THEN 'tier0_builtin'
                        WHEN o.object_guid IS NULL OR o.is_deleted THEN 'unresolved'
                        WHEN op.object_guid IS NOT NULL THEN 'privileged'
@@ -154,7 +166,7 @@ PLUGIN = {
                 ELSE 'critical'
             END AS fd_severity,
             'Domain Controller ' || k.sam_account_name || ' is owned by '
-                || COALESCE(k.owner_sam_account_name,
+                || COALESCE(CASE WHEN k.owner_resolved THEN k.owner_sam_account_name END,
                             CASE k.owner_sid
                                 WHEN 'S-1-5-32-544' THEN 'BUILTIN\\Administrators'
                                 WHEN 'S-1-5-18' THEN 'SYSTEM'

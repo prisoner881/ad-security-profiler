@@ -10,14 +10,17 @@ residue of something unusual, or a sign of direct low-level data
 manipulation that bypassed normal validation. Rare by design; this
 finding firing at all is itself the signal worth investigating,
 independent of what else the group looks like.
+
+[v1.3] NULL-safe summary: a group with no objectSid (which the WHERE
+clause deliberately still matches) previously produced a NULL summary.
 """
 
 PLUGIN = {
     "plugin_id": 3011,
     "category": "Groups",
     "name": "Group Has BUILTIN_LOCAL_GROUP Flag Set But Is Not a Genuine Built-in Group",
-    "version": "1.2",
-    "revision_date": "2026-07-15",
+    "version": "1.3",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Investigate immediately -- this flag is documented as reserved "
         "for system-created Builtin objects and is not something normal "
@@ -57,8 +60,8 @@ PLUGIN = {
             NULL AS tool_severity,
             NULL AS tool_reference,
             'high' AS fd_severity,
-            'Group ' || g.sam_account_name || ' has the BUILTIN_LOCAL_GROUP flag set '
-                '(groupType bit 0x1) but its SID (' || do2.object_sid || ') is not in '
+            'Group ' || COALESCE(g.sam_account_name, g.object_guid::text) || ' has the BUILTIN_LOCAL_GROUP flag set '
+                '(groupType bit 0x1) but its SID (' || COALESCE(do2.object_sid, 'unknown SID') || ') is not in '
                 'the well-known BUILTIN domain' AS summary,
             jsonb_build_object(
                 'sam_account_name', g.sam_account_name,

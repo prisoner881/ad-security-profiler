@@ -31,14 +31,29 @@ value, not a duplicate registration, and it has no effect on key selection.
 Distinct from plugin 4029, which covers the subtler case where an explicit SPN
 shadows a HOST-mapped *alias* rather than duplicating an SPN exactly. Together
 they cover both halves of the KerberLoss impact.
+
+[v1.1] Two changes. (1) Finding identity: this finding has no single
+object_guid, so its identity is md5(summary + detail). v1.0's detail
+carried each holder's distinguishedName, so moving or renaming a holder
+"resolved" the finding and opened a new one with nothing changed about
+the duplicate. The detail now identifies holders by objectGUID
+(whenCreated is kept -- it never changes -- for the migration-debris
+triage the remediation describes). (2) Severity: holders of differing
+object classes alone no longer raise it to critical, because the most
+common benign duplicate is exactly that (HTTP/<host> left on the
+computer after the same SPN was set on an app-pool/service user).
+Critical is now reserved for a domain controller among the holders, or
+a duplicate HOST/ SPN spanning object classes (a user or other
+non-computer holding a computer's HOST/ SPN -- the KerberLoss shape that
+takes every HOST-mapped service of that machine off Kerberos).
 """
 
 PLUGIN = {
     "plugin_id": 4028,
     "category": "Domain",
     "name": "Duplicate Service Principal Name Registered on Multiple Accounts",
-    "version": "1.0",
-    "revision_date": "2026-09-29",
+    "version": "1.1",
+    "revision_date": "2026-10-04",
     "remediation": (
         "Decide which account legitimately owns the service, then remove the "
         "SPN from every other holder with setspn -D <spn> <account>. "
@@ -86,8 +101,9 @@ PLUGIN = {
         "KerberLoss (CVE-2026-25177), from deliberate abuse by an attacker "
         "with write access to servicePrincipalName on any one account. "
         "Matching is case-insensitive; an SPN listed twice on the same "
-        "account is not reported. Severity is raised when the holders differ "
-        "in object class or when a domain controller is involved."
+        "account is not reported. Severity is raised to critical when a "
+        "domain controller is involved, or when a HOST/ SPN is duplicated "
+        "across object classes (e.g. a user holding a computer's HOST/ SPN)."
     ),
     "base_severity": "high",
     "query": """
@@ -114,16 +130,18 @@ PLUGIN = {
                    min(se.spn) AS spn_display,
                    bool_or(COALESCE(c.is_domain_controller, false)) AS involves_dc,
                    count(DISTINCT do2.object_class) AS distinct_classes,
+                   -- [v1.1] stable keys only (no DN): detail is part of the
+                   -- identity of this NULL-object_guid finding.
                    jsonb_agg(
                        jsonb_build_object(
+                           'object_guid', do2.object_guid,
                            'sam_account_name', do2.sam_account_name,
-                           'distinguished_name', do2.dn_current,
                            'object_class', do2.object_class,
                            'is_domain_controller',
                                COALESCE(c.is_domain_controller, false),
                            'when_created',
                                COALESCE(c.when_created, u.when_created)
-                       ) ORDER BY do2.sam_account_name
+                       ) ORDER BY do2.sam_account_name, do2.object_guid
                    ) AS holders
             FROM dup d
             JOIN holder h ON h.spn_key = d.spn_key
@@ -150,15 +168,16 @@ PLUGIN = {
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
+            -- [v1.1] differing classes alone is high, not critical
             CASE
                 WHEN r.involves_dc THEN 'critical'
-                WHEN r.distinct_classes > 1 THEN 'critical'
+                WHEN r.distinct_classes > 1 AND r.spn_key LIKE 'host/%%' THEN 'critical'
                 ELSE 'high'
             END AS fd_severity,
             'Service principal name "' || r.spn_display || '" is registered on '
                 || r.holder_count || ' accounts ('
-                || (SELECT string_agg(COALESCE(h.value ->> 'sam_account_name', '?'), ', ')
-                    FROM jsonb_array_elements(r.holders) AS h)
+                || (SELECT string_agg(COALESCE(h.value ->> 'sam_account_name', '?'), ', ' ORDER BY h.n)
+                    FROM jsonb_array_elements(r.holders) WITH ORDINALITY AS h(value, n))
                 || ') -- the KDC cannot select a key, so clients silently fall '
                    'back to NTLM for this service'
                 || CASE WHEN r.involves_dc
