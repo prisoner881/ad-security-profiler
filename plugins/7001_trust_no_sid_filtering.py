@@ -60,7 +60,19 @@ PLUGIN = {
         "that same trust boundary."
     ),
     "control_id": "TRUST-101",
-    "framework_tags": ["DISA-STIG"],
+    "framework_tags": [
+        "NIST-800-53-AC-4",
+        "NIST-800-53-AC-20",
+        "NIST-800-53-SC-7",
+        "NIST-CSF-2.0-PR.AA-05",
+        "CIS-CSC-8-12.2",
+        "ISO-27001-2022-A.8.20",
+        "ISO-27001-2022-A.8.22",
+        "SOC2-CC6.6",
+        "DISA-STIG",
+        "DISA-STIG-V-243484",
+        "MITRE-ATTCK-T1134.005",
+    ],
     "references": [
         {"title": "dirkjanm.io: Active Directory forest trusts -- How does SID filtering work?",
          "url": "https://dirkjanm.io/active-directory-forest-trusts-part-one-how-does-sid-filtering-work/"},

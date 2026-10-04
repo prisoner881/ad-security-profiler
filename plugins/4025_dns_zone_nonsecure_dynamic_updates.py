@@ -58,7 +58,19 @@ PLUGIN = {
         "afterward."
     ),
     "control_id": "DOM-425",
-    "framework_tags": [],
+    "framework_tags": [
+        "NIST-800-53-CM-6",
+        "NIST-800-53-CM-7",
+        "NIST-800-53-CM-2",
+        "NIST-CSF-2.0-PR.PS-01",
+        "PCI-DSS-4.0-2.2.1",
+        "PCI-DSS-4.0-2.2.6",
+        "CIS-CSC-8-4.1",
+        "ISO-27001-2022-A.8.9",
+        "SOC2-CC7.1",
+        "HIPAA-164.312(c)(1)",
+        "MITRE-ATTCK-T1557",
+    ],
     "references": [
         {"title": "Microsoft [MS-DNSP]: DNS_ZONE_UPDATE enumeration",
          "url": "https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-dnsp/d4b84209-f00c-478f-80d7-8dd0f1633d9e"},

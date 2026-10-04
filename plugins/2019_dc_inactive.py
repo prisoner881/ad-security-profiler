@@ -35,7 +35,23 @@ PLUGIN = {
         "independent of the security concern."
     ),
     "control_id": "STALE-201",
-    "framework_tags": [],
+    "framework_tags": [
+        "NIST-800-53-AC-2",
+        "NIST-800-53-AC-2(3)",
+        "NIST-800-53-CM-8",
+        "NIST-CSF-2.0-PR.AA-01",
+        "NIST-CSF-2.0-ID.AM-01",
+        "PCI-DSS-4.0-8.2.6",
+        "PCI-DSS-4.0-12.5.1",
+        "CIS-CSC-8-5.3",
+        "CIS-CSC-8-1.1",
+        "ISO-27001-2022-A.5.18",
+        "ISO-27001-2022-A.5.9",
+        "SOC2-CC6.2",
+        "SOC2-CC6.1",
+        "HIPAA-164.308(a)(3)(ii)(C)",
+        "MITRE-ATTCK-T1078.002",
+    ],
     "references": [],
     "description": (
         "Directly cited from PingCastle's S-DC-Inactive rule: \"While "

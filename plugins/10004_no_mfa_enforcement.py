@@ -59,7 +59,22 @@ PLUGIN = {
         "documented break-glass accounts."
     ),
     "control_id": "HYBRID-004",
-    "framework_tags": [],
+    "framework_tags": [
+        "NIST-800-53-IA-2(1)",
+        "NIST-800-53-IA-2(2)",
+        "NIST-CSF-2.0-PR.AA-03",
+        "PCI-DSS-4.0-8.4.1",
+        "PCI-DSS-4.0-8.4.2",
+        "PCI-DSS-4.0-8.4.3",
+        "CIS-CSC-8-6.3",
+        "CIS-CSC-8-6.4",
+        "CIS-CSC-8-6.5",
+        "ISO-27001-2022-A.8.5",
+        "SOC2-CC6.1",
+        "HIPAA-164.312(d)",
+        "CISA-SCUBA-MS.AAD.3.2",
+        "MITRE-ATTCK-T1078.004",
+    ],
     "references": [
         {"title": "Microsoft: What are security defaults?",
          "url": "https://learn.microsoft.com/en-us/entra/fundamentals/security-defaults"},

@@ -34,7 +34,20 @@ PLUGIN = {
         "`Set-ADComputer -Replace @{primaryGroupID=515}`."
     ),
     "control_id": "PRIV-203",
-    "framework_tags": ["ANSSI"],
+    "framework_tags": [
+        "NIST-800-53-AC-2(7)",
+        "NIST-800-53-AC-6(5)",
+        "NIST-800-53-AC-6(2)",
+        "NIST-CSF-2.0-PR.AA-05",
+        "PCI-DSS-4.0-7.2.1",
+        "PCI-DSS-4.0-7.2.2",
+        "CIS-CSC-8-5.4",
+        "CIS-CSC-8-6.8",
+        "ISO-27001-2022-A.8.2",
+        "SOC2-CC6.3",
+        "HIPAA-164.308(a)(4)(ii)(B)",
+        "MITRE-ATTCK-T1098",
+    ],
     "references": [],
     "description": (
         "Same technique as user-account plugin 1016, applied to computer "

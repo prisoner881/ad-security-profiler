@@ -38,7 +38,17 @@ PLUGIN = {
         "\"pre-Windows 2000 computer\" option."
     ),
     "control_id": "CRED-103",
-    "framework_tags": [],
+    "framework_tags": [
+        "NIST-800-53-IA-5",
+        "NIST-800-53-IA-5(1)",
+        "NIST-CSF-2.0-PR.AA-01",
+        "PCI-DSS-4.0-8.3.6",
+        "CIS-CSC-8-5.2",
+        "ISO-27001-2022-A.5.17",
+        "SOC2-CC6.1",
+        "HIPAA-164.308(a)(5)(ii)(D)",
+        "MITRE-ATTCK-T1078.002",
+    ],
     "references": [
         {"title": "Microsoft: User Account Control flags (PASSWD_NOTREQD)",
          "url": "https://learn.microsoft.com/en-us/troubleshoot/windows-server/active-directory/useraccountcontrol-manipulate-account-properties"},

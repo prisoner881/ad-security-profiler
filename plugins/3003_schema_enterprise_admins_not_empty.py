@@ -34,7 +34,22 @@ PLUGIN = {
         "that's rarely exercised."
     ),
     "control_id": "PRIV-302",
-    "framework_tags": [],
+    "framework_tags": [
+        "NIST-800-53-AC-2(7)",
+        "NIST-800-53-AC-6(5)",
+        "NIST-800-53-AC-6(2)",
+        "NIST-CSF-2.0-PR.AA-05",
+        "PCI-DSS-4.0-7.2.1",
+        "PCI-DSS-4.0-7.2.2",
+        "CIS-CSC-8-5.4",
+        "CIS-CSC-8-6.8",
+        "ISO-27001-2022-A.8.2",
+        "SOC2-CC6.3",
+        "HIPAA-164.308(a)(4)(ii)(B)",
+        "DISA-STIG",
+        "DISA-STIG-V-243502",
+        "MITRE-ATTCK-T1078.002",
+    ],
     "references": [
         {"title": "DISA STIG V-243502: Membership to the Schema Admins group must be limited",
          "url": "https://www.stigviewer.com/stigs/active_directory_forest/2025-05-15/finding/V-243502"},

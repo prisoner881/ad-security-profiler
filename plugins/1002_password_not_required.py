@@ -48,7 +48,17 @@ PLUGIN = {
     'exception rather than leaving it unexplained.'
 ),
     "control_id": "CRED-002",
-    "framework_tags": [],
+    "framework_tags": [
+        "NIST-800-53-IA-5",
+        "NIST-800-53-IA-5(1)",
+        "NIST-CSF-2.0-PR.AA-01",
+        "PCI-DSS-4.0-8.3.6",
+        "CIS-CSC-8-5.2",
+        "ISO-27001-2022-A.5.17",
+        "SOC2-CC6.1",
+        "HIPAA-164.308(a)(5)(ii)(D)",
+        "MITRE-ATTCK-T1078.002",
+    ],
     "references": [],
     "description": (
         "The PASSWD_NOTREQD flag (userAccountControl bit 0x0020) permits "

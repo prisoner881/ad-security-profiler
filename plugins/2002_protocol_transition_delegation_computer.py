@@ -38,7 +38,22 @@ PLUGIN = {
         "flag by default and are not reported."
     ),
     "control_id": "DELEG-004",
-    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1550.003"],
+    "framework_tags": [
+        "NIST-800-53-AC-3",
+        "NIST-800-53-AC-6",
+        "NIST-800-53-AC-6(1)",
+        "NIST-CSF-2.0-PR.AA-05",
+        "PCI-DSS-4.0-7.2.1",
+        "PCI-DSS-4.0-7.2.2",
+        "CIS-CSC-8-3.3",
+        "CIS-CSC-8-6.8",
+        "ISO-27001-2022-A.5.15",
+        "ISO-27001-2022-A.8.3",
+        "SOC2-CC6.3",
+        "HIPAA-164.312(a)(1)",
+        "MITRE-ATTCK-T1550.003",
+        "CISA-AA26-237A",
+    ],
     "references": [],
     "description": (
         "TRUSTED_TO_AUTH_FOR_DELEGATION (UAC bit 0x1000000) enables "

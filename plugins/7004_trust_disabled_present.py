@@ -30,7 +30,17 @@ PLUGIN = {
         "during a security review that only checks for active trusts."
     ),
     "control_id": "TRUST-104",
-    "framework_tags": [],
+    "framework_tags": [
+        "NIST-800-53-AC-4",
+        "NIST-800-53-AC-20",
+        "NIST-800-53-SC-7",
+        "NIST-CSF-2.0-PR.AA-05",
+        "CIS-CSC-8-12.2",
+        "ISO-27001-2022-A.8.20",
+        "ISO-27001-2022-A.8.22",
+        "SOC2-CC6.6",
+        "MITRE-ATTCK-T1484.002",
+    ],
     "references": [],
     "description": (
         "trustDirection=0 means this Trusted Domain Object (TDO) is "

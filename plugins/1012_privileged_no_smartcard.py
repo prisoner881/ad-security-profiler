@@ -40,7 +40,16 @@ PLUGIN = {
     'Business or FIDO2 security keys are the current standard alternatives).'
 ),
     "control_id": "PRIV-104",
-    "framework_tags": [],
+    "framework_tags": [
+        "NIST-800-53-IA-2(1)",
+        "NIST-CSF-2.0-PR.AA-03",
+        "PCI-DSS-4.0-8.4.1",
+        "CIS-CSC-8-6.5",
+        "ISO-27001-2022-A.8.5",
+        "SOC2-CC6.1",
+        "HIPAA-164.312(d)",
+        "MITRE-ATTCK-T1078.002",
+    ],
     "references": [],
     "description": (
         "Smartcard-required authentication is one of the few MFA-adjacent "

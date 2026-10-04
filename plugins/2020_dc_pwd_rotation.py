@@ -35,7 +35,22 @@ PLUGIN = {
         "as a hygiene issue."
     ),
     "control_id": "STALE-202",
-    "framework_tags": [],
+    "framework_tags": [
+        "NIST-800-53-AC-2",
+        "NIST-800-53-IA-5",
+        "NIST-800-53-IA-5(1)",
+        "NIST-CSF-2.0-PR.AA-01",
+        "PCI-DSS-4.0-8.6.1",
+        "PCI-DSS-4.0-8.6.3",
+        "PCI-DSS-4.0-7.2.5",
+        "PCI-DSS-4.0-8.3.9",
+        "CIS-CSC-8-5.5",
+        "CIS-CSC-8-5.2",
+        "ISO-27001-2022-A.5.17",
+        "SOC2-CC6.1",
+        "HIPAA-164.308(a)(5)(ii)(D)",
+        "MITRE-ATTCK-T1558.002",
+    ],
     "references": [
         {"title": "Microsoft: Machine Account Password Process",
          "url": "https://techcommunity.microsoft.com/blog/askds/machine-account-password-process/396026"},

@@ -21,7 +21,20 @@ PLUGIN = {
         "reconnaissance indicator requiring investigation."
     ),
     "control_id": "CRED-104",
-    "framework_tags": [],
+    "framework_tags": [
+        "NIST-800-53-IA-2(8)",
+        "NIST-800-53-IA-5(1)",
+        "NIST-800-53-SC-28",
+        "NIST-CSF-2.0-PR.DS-01",
+        "PCI-DSS-4.0-8.3.2",
+        "PCI-DSS-4.0-8.6.2",
+        "CIS-CSC-8-3.11",
+        "ISO-27001-2022-A.8.5",
+        "ISO-27001-2022-A.5.17",
+        "SOC2-CC6.1",
+        "HIPAA-164.312(a)(2)(iv)",
+        "MITRE-ATTCK-T1558.004",
+    ],
     "references": [
         {"title": "MITRE ATT&CK T1558.004: Steal or Forge Kerberos Tickets -- AS-REP Roasting",
          "url": "https://attack.mitre.org/techniques/T1558/004/"},

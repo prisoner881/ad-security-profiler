@@ -45,7 +45,22 @@ PLUGIN = {
         "responsibilities the two tiers exist to enforce."
     ),
     "control_id": "STIG-V-243466",
-    "framework_tags": ["DISA-STIG"],
+    "framework_tags": [
+        "NIST-800-53-AC-2(7)",
+        "NIST-800-53-AC-6(5)",
+        "NIST-800-53-AC-6(2)",
+        "NIST-CSF-2.0-PR.AA-05",
+        "PCI-DSS-4.0-7.2.1",
+        "PCI-DSS-4.0-7.2.2",
+        "CIS-CSC-8-5.4",
+        "CIS-CSC-8-6.8",
+        "ISO-27001-2022-A.8.2",
+        "SOC2-CC6.3",
+        "HIPAA-164.308(a)(4)(ii)(B)",
+        "DISA-STIG",
+        "DISA-STIG-V-243466",
+        "MITRE-ATTCK-T1078.002",
+    ],
     "references": [
         {"title": "DISA Active Directory Domain STIG V3R7: V-243466",
          "url": "https://cyber.trackr.live/stig/Active_Directory_Domain/3/7#V-243466"},

@@ -53,9 +53,24 @@ PLUGIN = {
         "this account for a real reason, not by accident."
     ),
     "control_id": "HYBRID-001",
-    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1078.004"],
+    "framework_tags": [
+        "NIST-800-53-AC-2(7)",
+        "NIST-800-53-AC-6(2)",
+        "NIST-800-53-AC-6(5)",
+        "NIST-CSF-2.0-PR.AA-05",
+        "PCI-DSS-4.0-7.2.1",
+        "PCI-DSS-4.0-7.2.2",
+        "CIS-CSC-8-5.4",
+        "CIS-CSC-8-6.8",
+        "ISO-27001-2022-A.8.2",
+        "SOC2-CC6.3",
+        "HIPAA-164.308(a)(4)(ii)(B)",
+        "MITRE-ATTCK-T1078.004",
+        "CISA-AA26-237A",
+    ],
     "references": [
-        "https://learn.microsoft.com/en-us/entra/architecture/protect-m365-from-on-premises-attacks",
+        {"title": "Microsoft: Protecting Microsoft 365 from on-premises attacks",
+         "url": "https://learn.microsoft.com/en-us/entra/architecture/protect-m365-from-on-premises-attacks"},
     ],
     "description": (
         "Informational: an enabled on-prem account holding current Tier 0 "

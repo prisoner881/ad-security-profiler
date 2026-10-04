@@ -119,6 +119,14 @@ PostgreSQL password unless it's already set via `PGPASSWORD` or a
   Governance); without that licence the collector records that
   eligibility couldn't be checked and carries on. `Directory.Read.All`
   covers expanding the members of groups that hold a directory role.
+  As of entra_graph_collector.py 0.7.0 no new permissions are needed:
+  `Policy.Read.All` also covers the tenant authorization policy (user
+  app registration/consent and guest settings), and
+  `RoleManagement.Read.Directory` also covers the active role
+  assignment schedules that say whether a role is held permanently,
+  time-bound or through a PIM activation -- these schedules need Entra
+  ID P2 (or ID Governance) like eligibility does, and without it the
+  collector records why and carries on.
 
 None of these need to be typed on the command line if you'd rather
 not -- every password/secret prompts securely (hidden input) if you
@@ -214,8 +222,21 @@ before), and additionally writes a timestamped Excel workbook:
   Accounts, etc.), listing only FAIL and WARN findings -- full
   PASS/FAIL/WARN detail for every plugin is still in the console
   output and its own timestamped log, unchanged.
+- A **Compliance Summary** tab (right after Summary) showing, per
+  framework (NIST SP 800-53, NIST CSF 2.0, PCI DSS 4.0, CIS Controls v8,
+  ISO 27001, SOC 2, HIPAA, CISA SCuBA, DISA STIG, MITRE ATT&CK, and
+  advisories/CVEs), how many controls the checks cover and how many of
+  them are failing, warning or passing.
+- One tab per framework listing each control, the checks mapped to it
+  and their result (FAIL/WARN/PASS/ERROR, or NOT ASSESSED when the
+  data it needs -- e.g. Entra ID -- wasn't collected) with open finding
+  counts. Which controls each check maps to is listed in
+  `COMPLIANCE_TAGS.md`.
 - Separate inventory tabs (User Inventory, Computer Inventory, Group
   Inventory) with the full, unfiltered data those plugins produce.
+
+To check only what a given framework covers, add `--framework` with its
+name or tag prefix (for example `--framework PCI-DSS-4.0 "SOC 2"`).
 
 `adaudit.py`'s exit status says whether the run is complete: `0` means
 every plugin ran; `3` means it finished but at least one plugin failed
@@ -258,3 +279,7 @@ troubleshooting if anything looked wrong during collection.
   database that already has data in it -- that file is for a
   brand-new, empty database only, and can fail or leave things in a
   mixed state against one that isn't.
+  After applying a migration, run `adprofiler.py` once with
+  `--full-rescan` so objects that haven't changed in AD still get the
+  columns the new version collects (otherwise some checks see them as
+  "not collected" until each object next changes).

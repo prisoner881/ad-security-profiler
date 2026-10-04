@@ -31,7 +31,18 @@ PLUGIN = {
         "passwords."
     ),
     "control_id": "POLICY-010",
-    "framework_tags": ["DISA-STIG"],
+    "framework_tags": [
+        "NIST-800-53-IA-5(1)",
+        "NIST-800-53-SC-28",
+        "NIST-CSF-2.0-PR.DS-01",
+        "PCI-DSS-4.0-8.3.2",
+        "CIS-CSC-8-3.11",
+        "ISO-27001-2022-A.5.17",
+        "SOC2-CC6.1",
+        "HIPAA-164.312(a)(2)(iv)",
+        "DISA-STIG-V-254293",
+        "MITRE-ATTCK-T1003",
+    ],
     "references": [
         {"title": "Microsoft: Store passwords using reversible encryption",
          "url": "https://learn.microsoft.com/en-us/windows/security/threat-protection/security-policy-settings/store-passwords-using-reversible-encryption"},

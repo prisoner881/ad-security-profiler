@@ -68,10 +68,30 @@ PLUGIN = {
         "elevated urgency given the combined blast radius."
     ),
     "control_id": "HYBRID-003",
-    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1078.004"],
+    "framework_tags": [
+        "NIST-800-53-AC-2(7)",
+        "NIST-800-53-AC-6",
+        "NIST-800-53-AC-6(2)",
+        "NIST-800-53-AC-6(5)",
+        "NIST-CSF-2.0-PR.AA-05",
+        "PCI-DSS-4.0-7.2.1",
+        "PCI-DSS-4.0-7.2.2",
+        "CIS-CSC-8-5.4",
+        "CIS-CSC-8-6.7",
+        "CIS-CSC-8-6.8",
+        "ISO-27001-2022-A.5.23",
+        "ISO-27001-2022-A.8.2",
+        "SOC2-CC6.3",
+        "HIPAA-164.308(a)(4)(ii)(B)",
+        "CISA-SCUBA-MS.AAD.7.3",
+        "MITRE-ATTCK-T1078.004",
+        "CISA-AA26-237A",
+    ],
     "references": [
-        "https://learn.microsoft.com/en-us/entra/architecture/protect-m365-from-on-premises-attacks",
-        "https://learn.microsoft.com/en-us/entra/identity/role-based-access-control/privileged-roles-permissions",
+        {"title": "Microsoft: Protecting Microsoft 365 from on-premises attacks",
+         "url": "https://learn.microsoft.com/en-us/entra/architecture/protect-m365-from-on-premises-attacks"},
+        {"title": "Microsoft: Privileged roles and permissions in Microsoft Entra ID",
+         "url": "https://learn.microsoft.com/en-us/entra/identity/role-based-access-control/privileged-roles-permissions"},
     ],
     "description": (
         "An account holding both current on-prem Tier 0 (Domain "

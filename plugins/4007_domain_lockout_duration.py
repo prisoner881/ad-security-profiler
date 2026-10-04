@@ -33,7 +33,18 @@ PLUGIN = {
         "auto-unlock and resumes."
     ),
     "control_id": "POLICY-007",
-    "framework_tags": ["DISA-STIG"],
+    "framework_tags": [
+        "NIST-800-53-AC-7",
+        "NIST-800-53-IA-5",
+        "NIST-CSF-2.0-PR.AA-01",
+        "PCI-DSS-4.0-8.3.4",
+        "CIS-CSC-8-5.2",
+        "ISO-27001-2022-A.5.17",
+        "SOC2-CC6.1",
+        "HIPAA-164.308(a)(5)(ii)(D)",
+        "DISA-STIG-V-254285",
+        "MITRE-ATTCK-T1110.001",
+    ],
     "references": [
         {"title": "Microsoft: Account lockout duration",
          "url": "https://learn.microsoft.com/en-us/windows/security/threat-protection/security-policy-settings/account-lockout-duration"},

@@ -33,7 +33,19 @@ PLUGIN = {
     'on the same account, not a standalone problem to fix in isolation.'
 ),
     "control_id": "OPS-002",
-    "framework_tags": [],
+    "framework_tags": [
+        "NIST-800-53-AC-7",
+        "NIST-800-53-SI-4",
+        "NIST-800-53-AU-6",
+        "NIST-CSF-2.0-PR.AA-01",
+        "NIST-CSF-2.0-DE.CM-03",
+        "PCI-DSS-4.0-8.3.4",
+        "CIS-CSC-8-8.11",
+        "ISO-27001-2022-A.8.16",
+        "SOC2-CC7.2",
+        "HIPAA-164.308(a)(1)(ii)(D)",
+        "MITRE-ATTCK-T1110",
+    ],
     "references": [],
     "description": (
         "Purely operational awareness, not a finding to act on by "

@@ -2,7 +2,7 @@
 """
 adaudit.py -- AD Security & Compliance Plugin Runner
 ======================================================
-VERSION: 0.7.6
+VERSION: 0.8.0
 
 Companion to adprofiler.py. Where adprofiler.py collects AD data,
 adaudit.py analyzes it: discovers every plugin file in plugins/, runs each
@@ -25,6 +25,26 @@ DESIGN:
       as: (status, object_guid, stig_severity, stig_reference,
       tool_severity, tool_reference, fd_severity, summary, detail).
       Zero rows returned = clean pass, nothing to report.
+    - [v0.8.0] Compliance-framework reporting. Each finding plugin's
+      framework_tags (format and allowed IDs: COMPLIANCE_TAGS.md) are
+      split by prefix into (framework, control id) via FRAMEWORKS /
+      split_framework_tag(). The workbook gains a "Compliance Summary"
+      sheet right after Summary (per framework: controls referenced,
+      failing, warning, passing, incomplete, plugins mapped) and one
+      sheet per framework listing every control -> plugin -> result, and
+      the console report ends with a short "Compliance coverage" block.
+      All of it is built from the same per-plugin rollups the Summary
+      sheet uses -- nothing is re-queried. framework_tags must be a list
+      of strings (else a load failure); a tag with an unknown prefix is
+      allowed but listed once as a warning after discovery, and left off
+      the compliance sheets. --framework restricts a run to plugins
+      carrying at least one tag of the named framework(s). A plugin that
+      reads Entra tables when no Entra ID collection exists for the client
+      is shown as NOT ASSESSED on the compliance sheets rather than as
+      passing (its zero rows mean "nothing to check"). references must be
+      a list of {"title", "url"} dicts (else a load failure): a bare URL
+      string passed every clean run and crashed the report the first time
+      the plugin fired.
     - [v0.7.4] Retiring a plugin: replace its file with a stub whose
       PLUGIN dict is {"plugin_id", "name", "retired": True,
       "superseded_by": <plugin_id>, "revision_date"}. The stub never
@@ -99,6 +119,7 @@ USAGE:
     python3 adaudit.py                          # run every plugin
     python3 adaudit.py --plugin-id 1001 1002     # run only these plugins
     python3 adaudit.py --category "User Accounts"  # run only this category
+    python3 adaudit.py --framework PCI-DSS-4.0 "SOC 2"  # only plugins tagged for these frameworks
     python3 adaudit.py --plugins-dir ./plugins   # override plugin location
     python3 adaudit.py --fail-on warn            # exit 4 if any open WARN/FAIL finding
 
@@ -132,7 +153,7 @@ from datetime import datetime, timezone
 import psycopg2
 import psycopg2.extras
 
-VERSION = "0.7.6"
+VERSION = "0.8.0"
 
 # [test-candidate-branch] Always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
@@ -174,6 +195,83 @@ REQUIRED_ROW_KEYS = {
 # as the "finding" default, so nothing about them needed to change.
 REQUIRED_INVENTORY_PLUGIN_KEYS = {"plugin_id", "plugin_type", "category", "name",
                                    "query", "version", "revision_date", "description"}
+
+# [v0.8.0] Compliance frameworks, in report order: (key, display name,
+# workbook sheet name, tag prefixes). A tag is "<prefix><control id>" --
+# see COMPLIANCE_TAGS.md. CISA-SCUBA- must be listed before the generic
+# CISA- advisory prefix, since split_framework_tag() takes the first
+# match. The advisory bucket keeps the whole tag as its control id
+# ("CVE-2021-42278"), since the bare number means nothing on its own.
+FRAMEWORKS = [
+    ("NIST-800-53", "NIST SP 800-53 Rev. 5", "NIST 800-53", ("NIST-800-53-",)),
+    ("NIST-CSF-2.0", "NIST CSF 2.0", "NIST CSF 2.0", ("NIST-CSF-2.0-",)),
+    ("PCI-DSS-4.0", "PCI DSS 4.0", "PCI DSS 4.0", ("PCI-DSS-4.0-",)),
+    ("CIS-CSC-8", "CIS Controls v8", "CIS v8", ("CIS-CSC-8-",)),
+    ("ISO-27001-2022", "ISO/IEC 27001:2022", "ISO 27001", ("ISO-27001-2022-",)),
+    ("SOC2", "SOC 2", "SOC 2", ("SOC2-",)),
+    ("HIPAA", "HIPAA Security Rule", "HIPAA", ("HIPAA-",)),
+    ("CISA-SCUBA", "CISA SCuBA (Entra ID)", "SCuBA", ("CISA-SCUBA-",)),
+    ("DISA-STIG", "DISA STIG", "DISA STIG", ("DISA-STIG",)),
+    ("MITRE-ATTCK", "MITRE ATT&CK", "MITRE ATT&CK", ("MITRE-ATTCK-",)),
+    ("ADVISORIES", "Advisories & CVEs", "Advisories", ("CVE-", "CISA-")),
+]
+FRAMEWORK_NAMES = {key: name for key, name, _, _ in FRAMEWORKS}
+SEVERITY_ORDER = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+
+
+def split_framework_tag(tag):
+    """Splits one framework tag into (framework key, control id), or
+    (None, tag) when no known prefix matches. DISA-STIG is the one prefix
+    without a trailing dash: "DISA-STIG-V-243503" -> "V-243503", and the
+    bare "DISA-STIG" (a STIG requirement covers it, no specific rule
+    cited) -> "(general)"."""
+    for key, _, _, prefixes in FRAMEWORKS:
+        for prefix in prefixes:
+            if key == "DISA-STIG":
+                if tag == prefix:
+                    return key, "(general)"
+                if tag.startswith(prefix + "-") and len(tag) > len(prefix) + 1:
+                    return key, tag[len(prefix) + 1:]
+            elif key == "ADVISORIES":
+                if tag.startswith(prefix) and len(tag) > len(prefix):
+                    return key, tag
+            elif tag.startswith(prefix) and len(tag) > len(prefix):
+                return key, tag[len(prefix):]
+    return None, tag
+
+
+def natural_sort_key(text):
+    """AC-2 < AC-2(3) < AC-10 and 8.2.1 < 8.2.10: digit runs compare as
+    numbers, everything else case-insensitively as text."""
+    return [(0, int(part), "") if part.isdigit() else (1, 0, part.lower())
+            for part in re.findall(r"\d+|\D+", text)]
+
+
+def resolve_framework(value):
+    """Maps a --framework argument (tag prefix with or without its
+    trailing dash, display name or sheet name, any case) to a framework
+    key; argparse type= callback, so an unknown value is a usage error."""
+    wanted = value.strip().lower()
+    for key, name, sheet, prefixes in FRAMEWORKS:
+        candidates = {key.lower(), name.lower(), sheet.lower()}
+        candidates.update(p.lower() for p in prefixes)
+        candidates.update(p.lower().rstrip("-") for p in prefixes)
+        if wanted in candidates:
+            return key
+    valid = "; ".join(f"{key} ({name})" for key, name, _, _ in FRAMEWORKS)
+    raise argparse.ArgumentTypeError(f"unknown framework '{value}'. Valid: {valid}")
+
+
+def unknown_framework_tags(plugins):
+    """[v0.8.0] {tag: [plugin_id, ...]} for every tag no FRAMEWORKS prefix
+    matches -- allowed (it's still copied to control_catalog), but left
+    off the compliance sheets, so main() warns about it once."""
+    unknown = {}
+    for plugin in plugins:
+        for tag in plugin.get("framework_tags") or []:
+            if split_framework_tag(tag)[0] is None:
+                unknown.setdefault(tag, []).append(plugin["plugin_id"])
+    return unknown
 
 
 def log(msg):
@@ -274,6 +372,24 @@ def discover_plugins(plugins_dir):
             fail(path, f"revision_date '{plugin['revision_date']}' is not in YYYY-MM-DD format", plugin)
             continue
 
+        # [v0.8.0] The compliance sheets iterate these; a bare string here
+        # would be split into one "tag" per character.
+        tags = plugin.get("framework_tags", [])
+        if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
+            fail(path, "framework_tags must be a list of strings", plugin)
+            continue
+
+        # [v0.8.0] print_report() and the workbook read ref["title"] /
+        # ref["url"] only when a plugin FAILs or WARNs -- a bare URL string
+        # here used to pass every clean run and then crash the report the
+        # first time the plugin fired.
+        refs = plugin.get("references") or []
+        if not isinstance(refs, list) or not all(
+                isinstance(r, dict) and isinstance(r.get("title"), str)
+                and isinstance(r.get("url"), str) for r in refs):
+            fail(path, 'references must be a list of {"title": ..., "url": ...} dicts', plugin)
+            continue
+
         pid = plugin["plugin_id"]
         if pid in seen_ids:
             fail(path, f"plugin_id {pid} already used by {seen_ids[pid]}", plugin)
@@ -283,7 +399,7 @@ def discover_plugins(plugins_dir):
         plugin = dict(plugin)  # copy, don't mutate the module's own dict
         plugin["plugin_type"] = plugin_type
         plugin.setdefault("control_id", None)
-        plugin.setdefault("framework_tags", [])
+        plugin["framework_tags"] = list(tags)
         plugin.setdefault("description", plugin["name"])
         plugin["_source_file"] = path.name
         plugins.append(plugin)
@@ -371,8 +487,9 @@ def connect_postgres():
 # against: v34 added v_privileged_principal and acl_edge.inherit_only
 # (used by many plugins), v35 the 'retired' change_status, v36 the RODC /
 # primary-group / template columns several plugins read, v37 KeyCredential /
-# dSHeuristics / sPNMappings / RBCD-by-SID / Entra eligibility columns.
-REQUIRED_SCHEMA_VERSION = 37
+# dSHeuristics / sPNMappings / RBCD-by-SID / Entra eligibility columns, v38
+# the columns and tables of the advisory/compliance gap round plugins.
+REQUIRED_SCHEMA_VERSION = 38
 
 
 def check_schema_version(conn):
@@ -804,6 +921,99 @@ def print_report(plugin_summaries, all_findings):
     print("=" * 78)
 
 
+def build_compliance(plugin_summaries, all_findings, not_assessed_plugin_ids=()):
+    """[v0.8.0] Regroups the per-plugin results print_report() and the
+    Summary sheet already use by framework and control -- nothing is
+    re-queried. plugin_summaries only ever holds finding plugins that
+    were selected and loaded this run, so inventory and retired plugins
+    are excluded by construction.
+
+    Returns {framework key: {"rows": [...], "summary": {...}}} for every
+    framework in FRAMEWORKS order. Each row is one (control, plugin)
+    pair with that plugin's rollup and its open (not remediated) FAIL/
+    WARN counts and highest open fd_severity. A control's summary state
+    is the worst of its plugins' results: failing > warning > incomplete
+    (a plugin errored, nothing worse seen) > passing, so the four counts
+    add up to controls_referenced.
+
+    not_assessed_plugin_ids: plugins whose source data was never collected
+    for this client (today: every plugin reading Entra tables when no Entra
+    ID collection exists). Their zero-row "pass" means "nothing to check",
+    not compliance, so it is recorded as 'not_assessed' -- the lowest
+    state: a control another plugin actually passed stays passing."""
+    not_assessed_plugin_ids = set(not_assessed_plugin_ids)
+    open_by_plugin = {}
+    for f in all_findings:
+        if f["change_status"] == "remediated" or f["status"] not in ("fail", "warn"):
+            continue
+        entry = open_by_plugin.setdefault(f["plugin_id"], {"fail": 0, "warn": 0, "severity": None})
+        entry[f["status"]] += 1
+        sev = f.get("fd_severity")
+        if sev in SEVERITY_ORDER and (entry["severity"] is None
+                                      or SEVERITY_ORDER[sev] > SEVERITY_ORDER[entry["severity"]]):
+            entry["severity"] = sev
+
+    result = {key: {"rows": [], "summary": None} for key, _, _, _ in FRAMEWORKS}
+    plugins_mapped = {key: set() for key, _, _, _ in FRAMEWORKS}
+    for p in plugin_summaries:
+        open_counts = open_by_plugin.get(p["plugin_id"], {"fail": 0, "warn": 0, "severity": None})
+        seen = set()
+        for tag in p.get("framework_tags") or []:
+            key, control = split_framework_tag(tag)
+            if key is None or (key, control) in seen:
+                continue
+            seen.add((key, control))
+            plugins_mapped[key].add(p["plugin_id"])
+            result[key]["rows"].append({
+                "control": control, "plugin_id": p["plugin_id"], "name": p["name"],
+                "category": p["category"],
+                "result": ("not_assessed" if p["rollup"] == "pass"
+                           and p["plugin_id"] in not_assessed_plugin_ids else p["rollup"]),
+                "open_fail": open_counts["fail"], "open_warn": open_counts["warn"],
+                "severity": open_counts["severity"],
+            })
+
+    for key, data in result.items():
+        data["rows"].sort(key=lambda r: (natural_sort_key(r["control"]), r["plugin_id"]))
+        by_control = {}
+        for row in data["rows"]:
+            by_control.setdefault(row["control"], set()).add(row["result"])
+        counts = {"fail": 0, "warn": 0, "error": 0, "pass": 0, "not_assessed": 0}
+        for results in by_control.values():
+            state = next((s for s in ("fail", "warn", "error", "pass") if s in results), "not_assessed")
+            counts[state] += 1
+        data["summary"] = {
+            "controls": len(by_control), "failing": counts["fail"], "warning": counts["warn"],
+            "incomplete": counts["error"], "passing": counts["pass"],
+            "not_assessed": counts["not_assessed"],
+            "plugins": len(plugins_mapped[key]),
+        }
+    return result
+
+
+def print_compliance_summary(compliance):
+    """[v0.8.0] One line per framework with any tagged plugin this run."""
+    lines = []
+    for key, name, _, _ in FRAMEWORKS:
+        s = compliance[key]["summary"]
+        if not s["controls"]:
+            continue
+        line = (f"  {name}: {s['controls']} controls — {s['failing']} failing, "
+                f"{s['warning']} warning, {s['passing']} passing")
+        if s["incomplete"]:
+            line += f", {s['incomplete']} incomplete (plugin errored)"
+        if s["not_assessed"]:
+            line += f", {s['not_assessed']} not assessed (source data not collected)"
+        lines.append(line)
+    if not lines:
+        return
+    print()
+    print("  Compliance coverage (each control rated by its worst plugin result):")
+    for line in lines:
+        print(line)
+    print("=" * 78)
+
+
 def print_inventory_report(inventory_results):
     """Deliberately not styled like print_report's [FAIL]/[WARN] finding
     output -- there's no status or severity to a listing. Each row is
@@ -844,7 +1054,7 @@ def print_inventory_report(inventory_results):
     print("=" * 78)
 
 
-def write_excel_report(plugin_summaries, all_findings, inventory_results, filename):
+def write_excel_report(plugin_summaries, all_findings, inventory_results, filename, compliance=None):
     """[test-candidate-branch] Excel companion to the console report,
     for a test client + reviewer going through results together --
     easier to filter/sort/skim in a spreadsheet than a scrollback
@@ -864,6 +1074,11 @@ def write_excel_report(plugin_summaries, all_findings, inventory_results, filena
     counts live, so nothing is actually lost, just not repeated
     per-category. Inventory tabs are the one exception: those get
     every row, unfiltered, since there's no status to filter by at all.
+
+    [v0.8.0] Also a "Compliance Summary" tab right after Summary and one
+    tab per framework that any plugin run this time is tagged for, built
+    by build_compliance() from the same plugin_summaries/all_findings
+    (pass its result as compliance to avoid building it twice).
     """
     import openpyxl
     from openpyxl.styles import Font, PatternFill
@@ -876,6 +1091,12 @@ def write_excel_report(plugin_summaries, all_findings, inventory_results, filena
     header_fill = PatternFill(start_color="404040", end_color="404040", fill_type="solid")
     fail_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
     warn_fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
+    pass_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+    error_fill = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
+    result_fill = {"fail": fail_fill, "warn": warn_fill, "pass": pass_fill, "error": error_fill,
+                   "not_assessed": error_fill}
+    if compliance is None:
+        compliance = build_compliance(plugin_summaries, all_findings)
 
     used_sheet_names = set()
 
@@ -927,6 +1148,24 @@ def write_excel_report(plugin_summaries, all_findings, inventory_results, filena
     for col_idx, width in enumerate([28, 8, 8, 8, 8, 14], start=1):
         ws_summary.column_dimensions[get_column_letter(col_idx)].width = width
 
+    # --- [v0.8.0] Compliance Summary tab: one row per framework ---
+    # Each control counts once, in the column of its worst plugin result
+    # (see build_compliance()), so the four state columns add up to
+    # "Controls Referenced".
+    ws_comp = wb.create_sheet(sheet_name("Compliance Summary"))
+    comp_headers = ["Framework", "Controls Referenced", "Controls Failing (any FAIL)",
+                    "Controls Warning (WARN, no FAIL)", "Controls Passing (all PASS)",
+                    "Controls Incomplete (plugin errored)",
+                    "Controls Not Assessed (source data not collected)", "Plugins Mapped"]
+    write_header_row(ws_comp, comp_headers)
+    for key, name, _, _ in FRAMEWORKS:
+        cs = compliance[key]["summary"]
+        ws_comp.append([name, cs["controls"], cs["failing"], cs["warning"], cs["passing"],
+                        cs["incomplete"], cs["not_assessed"], cs["plugins"]])
+    ws_comp.auto_filter.ref = ws_comp.dimensions
+    for col_idx, width in enumerate([26, 12, 14, 16, 14, 18, 20, 10], start=1):
+        ws_comp.column_dimensions[get_column_letter(col_idx)].width = width
+
     # --- One tab per category, FAIL/WARN findings only ---
     findings_by_plugin = {}
     for f in all_findings:
@@ -967,6 +1206,25 @@ def write_excel_report(plugin_summaries, all_findings, inventory_results, filena
             ws.append(["(no FAIL/WARN findings in this category this run)"])
         ws.auto_filter.ref = ws.dimensions
         for col_idx, width in enumerate([10, 45, 8, 8, 22, 14, 65, 55, 55], start=1):
+            ws.column_dimensions[get_column_letter(col_idx)].width = width
+
+    # --- [v0.8.0] One tab per framework with any tags this run: every
+    # (control, plugin) pair, PASS included -- the point is coverage. ---
+    framework_headers = ["Control ID", "Plugin ID", "Plugin Name", "Category", "Result",
+                         "Open FAIL", "Open WARN", "Highest Open Severity"]
+    for key, _, sheet, _ in FRAMEWORKS:
+        rows = compliance[key]["rows"]
+        if not rows:
+            continue
+        ws = wb.create_sheet(sheet_name(sheet))
+        write_header_row(ws, framework_headers)
+        for r in rows:
+            ws.append([r["control"], r["plugin_id"], r["name"], r["category"],
+                       r["result"].replace("_", " ").upper(),
+                       r["open_fail"], r["open_warn"], r["severity"] or ""])
+            ws.cell(row=ws.max_row, column=5).fill = result_fill[r["result"]]
+        ws.auto_filter.ref = ws.dimensions
+        for col_idx, width in enumerate([22, 10, 45, 22, 14, 10, 10, 20], start=1):
             ws.column_dimensions[get_column_letter(col_idx)].width = width
 
     # --- One tab per inventory plugin, full data, unfiltered ---
@@ -1019,6 +1277,11 @@ def main():
                          help="Run only these plugin IDs")
     parser.add_argument("--category", nargs="+", default=None,
                          help="Run only plugins in these categories")
+    parser.add_argument("--framework", type=resolve_framework, nargs="+", default=None,
+                         help="Run only finding plugins tagged with at least one control of "
+                              "these frameworks, given as tag prefix (e.g. PCI-DSS-4.0), "
+                              "display name (e.g. \"SOC 2\") or report sheet name, any case. "
+                              "Valid: " + ", ".join(key for key, _, _, _ in FRAMEWORKS))
     parser.add_argument("--fail-on", choices=["fail", "warn"], default=None,
                          help="Exit with status 4 if any current (not remediated) finding "
                               "is at or above this level: 'fail' = FAIL only, 'warn' = WARN "
@@ -1066,6 +1329,13 @@ def main():
     log(f"Loaded {len(plugins)} valid plugin(s)"
         + (f", {len(retired_plugins)} retired stub(s)" if retired_plugins else ""))
     log_load_failures(load_failures)
+    unknown_tags = unknown_framework_tags(plugins)
+    if unknown_tags:
+        log(f"[WARN] {len(unknown_tags)} framework tag(s) match no known framework prefix "
+            f"(see COMPLIANCE_TAGS.md); they are kept in control_catalog but left off the "
+            f"compliance sheets:")
+        for tag in sorted(unknown_tags):
+            log(f"    - {tag} (plugin(s) {', '.join(str(i) for i in sorted(unknown_tags[tag]))})")
 
     if args.plugin_id:
         plugins = [p for p in plugins if p["plugin_id"] in args.plugin_id]
@@ -1074,6 +1344,12 @@ def main():
         wanted = {c.lower() for c in args.category}
         plugins = [p for p in plugins if p["category"].lower() in wanted]
         log(f"Filtered to {len(plugins)} plugin(s) by --category")
+    if args.framework:
+        wanted = set(args.framework)
+        plugins = [p for p in plugins
+                   if any(split_framework_tag(t)[0] in wanted for t in p["framework_tags"])]
+        log(f"Filtered to {len(plugins)} plugin(s) by --framework "
+            f"({', '.join(FRAMEWORK_NAMES[k] for k in args.framework)})")
 
     if not plugins:
         log("No plugins to run.")
@@ -1092,7 +1368,7 @@ def main():
     # version opened or closed by this invocation is exactly attributable
     # to this run, not subject to within-run timing drift.
     run_timestamp = datetime.now(timezone.utc)
-    is_unfiltered_run = not args.plugin_id and not args.category
+    is_unfiltered_run = not args.plugin_id and not args.category and not args.framework
 
     with conn.cursor() as cur:
         cur.execute("""
@@ -1114,7 +1390,8 @@ def main():
         rows = run_plugin_query(conn, plugin, client_id, run_id)
         if rows is None:
             plugin_summaries.append({"plugin_id": plugin["plugin_id"], "category": plugin["category"],
-                                      "name": plugin["name"], "version": plugin["version"], "rollup": "error"})
+                                      "name": plugin["name"], "version": plugin["version"], "rollup": "error",
+                                      "framework_tags": plugin["framework_tags"]})
             conn.rollback()
             continue
 
@@ -1143,14 +1420,16 @@ def main():
                 log(f"  [ERROR] plugin {plugin['plugin_id']} ({plugin['name']}) "
                     f"failed while recording evidence: {exc}")
                 plugin_summaries.append({"plugin_id": plugin["plugin_id"], "category": plugin["category"],
-                                          "name": plugin["name"], "version": plugin["version"], "rollup": "error"})
+                                          "name": plugin["name"], "version": plugin["version"], "rollup": "error",
+                                          "framework_tags": plugin["framework_tags"]})
                 conn.commit()
                 continue
             cur.execute(f"RELEASE SAVEPOINT {savepoint};")
         conn.commit()
         plugin_summaries.append({"plugin_id": plugin["plugin_id"], "category": plugin["category"],
                                   "name": plugin["name"], "version": plugin["version"],
-                                  "rollup": rollup_status(rows)})
+                                  "rollup": rollup_status(rows),
+                                  "framework_tags": plugin["framework_tags"]})
         all_findings.extend(findings)
 
     if retired_plugins:
@@ -1182,11 +1461,27 @@ def main():
             log(f"Closed {closed} finding(s) from {stale_plugin_count} plugin(s) no longer present "
                 f"in plugins/ as remediated.")
     else:
-        log("Filtered run (--plugin-id/--category) -- skipping the stale-plugin safety net, "
+        log("Filtered run (--plugin-id/--category/--framework) -- skipping the stale-plugin safety net, "
             "since plugins not selected this run were deliberately skipped, not removed.")
 
+    # [v0.8.0] Entra plugins return zero rows ("pass") when there is no
+    # Entra data at all; on the compliance sheets that must read as "not
+    # assessed", not as SCuBA/MFA controls passing.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT EXISTS (SELECT 1 FROM entra_security_posture WHERE client_id = %(c)s) "
+            "    OR EXISTS (SELECT 1 FROM entra_user WHERE client_id = %(c)s);",
+            {"c": client_id},
+        )
+        entra_collected = cur.fetchone()[0]
+    conn.commit()
+    entra_plugin_ids = () if entra_collected else {
+        p["plugin_id"] for p in finding_plugins if "entra_" in p["query"]}
+    compliance = build_compliance(plugin_summaries, all_findings,
+                                  not_assessed_plugin_ids=entra_plugin_ids)
     if finding_plugins:
         print_report(plugin_summaries, all_findings)
+        print_compliance_summary(compliance)
 
     inventory_results = []
     if inventory_plugins:
@@ -1208,7 +1503,8 @@ def main():
     # matching only 8001, say) should still get a workbook.
     if finding_plugins or inventory_plugins:
         excel_filename = f"adaudit-findings_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-        write_excel_report(plugin_summaries, all_findings, inventory_results, excel_filename)
+        write_excel_report(plugin_summaries, all_findings, inventory_results, excel_filename,
+                           compliance)
         log(f"Wrote Excel findings report to {excel_filename}")
 
     # Repeated at the very end so it's the last thing on screen, not

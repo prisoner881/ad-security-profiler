@@ -40,7 +40,24 @@ PLUGIN = {
         "account to be here."
     ),
     "control_id": "PRIV-307",
-    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1078.002"],
+    "framework_tags": [
+        "NIST-800-53-AC-2(7)",
+        "NIST-800-53-AC-6(5)",
+        "NIST-800-53-AC-6(2)",
+        "NIST-800-53-SC-17",
+        "NIST-800-53-IA-5(2)",
+        "NIST-CSF-2.0-PR.AA-05",
+        "PCI-DSS-4.0-7.2.1",
+        "PCI-DSS-4.0-7.2.2",
+        "CIS-CSC-8-5.4",
+        "CIS-CSC-8-6.8",
+        "ISO-27001-2022-A.8.2",
+        "ISO-27001-2022-A.8.24",
+        "SOC2-CC6.3",
+        "HIPAA-164.308(a)(4)(ii)(B)",
+        "MITRE-ATTCK-T1078.002",
+        "CISA-AA26-237A",
+    ],
     "references": [],
     "description": (
         "The built-in Cert Publishers group exists so CA computer "

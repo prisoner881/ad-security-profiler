@@ -32,7 +32,18 @@ PLUGIN = {
         "easily defeated by rapid successive changes."
     ),
     "control_id": "POLICY-005",
-    "framework_tags": ["DISA-STIG"],
+    "framework_tags": [
+        "NIST-800-53-IA-5",
+        "NIST-800-53-IA-5(1)",
+        "NIST-CSF-2.0-PR.AA-01",
+        "PCI-DSS-4.0-8.3.7",
+        "CIS-CSC-8-5.2",
+        "ISO-27001-2022-A.5.17",
+        "SOC2-CC6.1",
+        "HIPAA-164.308(a)(5)(ii)(D)",
+        "DISA-STIG-V-254290",
+        "MITRE-ATTCK-T1078.002",
+    ],
     "references": [
         {"title": "Microsoft: Minimum password age",
          "url": "https://learn.microsoft.com/en-us/windows/security/threat-protection/security-policy-settings/minimum-password-age"},
