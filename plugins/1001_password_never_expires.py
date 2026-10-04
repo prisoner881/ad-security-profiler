@@ -38,7 +38,19 @@ PLUGIN = {
     # Optional -- used for compliance-framework mapping (control_catalog).
     # A plugin doesn't need one if it isn't tied to a formal control.
     "control_id": "CRED-001",
-    "framework_tags": ["DISA-STIG"],
+    "framework_tags": [
+        "NIST-800-53-IA-5",
+        "NIST-800-53-IA-5(1)",
+        "NIST-CSF-2.0-PR.AA-01",
+        "PCI-DSS-4.0-8.3.9",
+        "CIS-CSC-8-5.2",
+        "ISO-27001-2022-A.5.17",
+        "SOC2-CC6.1",
+        "HIPAA-164.308(a)(5)(ii)(D)",
+        "DISA-STIG",
+        "DISA-STIG-V-254289",
+        "MITRE-ATTCK-T1078.002",
+    ],
     "references": [],
     "description": (
         "Enabled user accounts configured to never require a password "

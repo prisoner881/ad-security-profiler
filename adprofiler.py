@@ -4,7 +4,7 @@
  adprofiler.py -- Active Directory Security & Compliance Profiler (Collector)
 ================================================================================
 
-VERSION: 0.5.16
+VERSION: 0.6.0
 
 PURPOSE:
     Connects to an on-premise Active Directory Domain Controller via LDAP,
@@ -180,7 +180,7 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
-VERSION = "0.5.16"
+VERSION = "0.6.0"
 # [client-test-branch] These are always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
 # connect_postgres() is ever called -- the values here are placeholders,
@@ -213,7 +213,33 @@ USER_ATTRS = [
     # persistence technique (plugin 1034); collect_delegation_edges()
     # already walks users and computers alike.
     "msDS-AllowedToActOnBehalfOfOtherIdentity",
+    # [v0.6.0] Explicit certificate mappings (ESC14 / KB5014754 weak
+    # mappings, plugins 1046/11019) and account expiry (plugin 1048).
+    # Both built-in since Windows 2000. accountExpires is set on every
+    # user, so the first 0.6.0 run writes one new version per user --
+    # run once with --full-rescan after upgrading (see changelog).
+    "altSecurityIdentities", "accountExpires",
 ]
+
+# [v0.6.0] Attributes that hold a password in a recoverable form when
+# populated: userPassword (when dSHeuristics fUserPwdSupport is on, or on
+# some third-party-provisioned accounts), and the Unix/SFU/AS400
+# attributes Identity Management for UNIX and older migration tools
+# write. They are requested only so the collector can tell WHICH are
+# populated (plugin 1044); build_attributes_full() replaces every value
+# with redact_secret_values()'s marker before anything is stored or
+# logged. Probed with ldap_attribute_exists() first: the SFU / os400
+# attributes are schema extensions.
+CLEARTEXT_PASSWORD_ATTRS = ("userPassword", "unixUserPassword", "msSFU30Password", "os400Password")
+_CLEARTEXT_PASSWORD_ATTRS_LOWER = {a.lower(): a for a in CLEARTEXT_PASSWORD_ATTRS}
+# [v0.6.0] Authentication policy silo/policy assignment (2012 R2 schema).
+USER_OPTIONAL_ATTRS = ("msDS-AssignedAuthNPolicySilo", "msDS-AssignedAuthNPolicy")
+# [v0.6.0] dMSA (Windows Server 2025 schema): the BadSuccessor link and
+# migration state (plugin 5017).
+COMPUTER_OPTIONAL_ATTRS = ("msDS-ManagedAccountPrecededByLink", "msDS-DelegatedMSAState")
+GMSA_CLASS = "msDS-GroupManagedServiceAccount"
+DMSA_CLASS = "msDS-DelegatedManagedServiceAccount"
+ACCOUNT_EXPIRES_NEVER = 0x7FFFFFFFFFFFFFFF
 
 COMPUTER_ATTRS = [
     "objectGUID", "objectSid", "distinguishedName", "sAMAccountName",
@@ -229,6 +255,13 @@ COMPUTER_ATTRS = [
     # "create a computer via MachineAccountQuota, set its UPN" path in
     # plugin 1043 was invisible without it.
     "userPrincipalName",
+    # [v0.6.0] Certificate mappings (ESC14), managedBy and the RODC's own
+    # krbtgt_NNNNN link (RODC checks, plugin 2037). Usually absent, so
+    # adding them doesn't version every computer. objectClass is
+    # deliberately NOT here (it would version every computer once and
+    # bloat attributes_full); is_gmsa / is_dmsa come from targeted
+    # searches instead, see update_managed_service_account_flags().
+    "altSecurityIdentities", "managedBy", "msDS-KrbTgtLink",
 ]
 # [v0.1.1] The two LAPS expiration attributes are deliberately NOT in this
 # static list. Unlike built-in AD attributes (pwdLastSet, userAccountControl,
@@ -264,6 +297,8 @@ DOMAIN_ATTRS = [
     "whenChanged", "whenCreated", "uSNChanged", "uSNCreated",
     "ms-DS-MachineAccountQuota", "gPLink", "gPOptions", "wellKnownObjects",
 ]
+# [v0.6.0] SCRIL NT-hash rolling (2016 schema) -- probed, appended at runtime.
+SMARTCARD_HASH_ROLLING_ATTR = "msDS-ExpirePasswordsOnSmartCardOnlyAccounts"
 
 # [v0.5.0] Organizational Units -- collected with the same typed-table
 # treatment as every other object class in this project (ad_user,
@@ -309,6 +344,10 @@ GPO_ATTRS = [
     "objectGUID", "distinguishedName", "displayName", "versionNumber",
     "cn", "whenChanged", "whenCreated", "uSNChanged", "uSNCreated",
     "msDS-ReplAttributeMetaData",
+    # [v0.6.0] SYSVOL path (a UNC outside the domain's SYSVOL share is a
+    # hijack path, plugin 9007) and the user/computer-settings-disabled
+    # flags (plugin 11013).
+    "gPCFileSysPath", "flags",
 ]
 GPO_FILTER = "(objectClass=groupPolicyContainer)"
 
@@ -322,6 +361,9 @@ CERT_TEMPLATE_ATTRS = [
     # required for issuance (plugins 6001, 6002, 6010) and the template's
     # own OID.
     "msPKI-RA-Signature", "msPKI-Cert-Template-OID",
+    # [v0.6.0] Minimum key size and private key flags (0x10 exportable
+    # key) for plugin 6012.
+    "msPKI-Minimal-Key-Size", "msPKI-Private-Key-Flag",
 ]
 CERT_TEMPLATE_FILTER = "(objectClass=pKICertificateTemplate)"
 
@@ -329,7 +371,13 @@ ENROLLMENT_SERVICE_ATTRS = [
     "objectGUID", "distinguishedName", "cn", "dNSHostName",
     "certificateTemplates", "whenChanged", "whenCreated",
     "uSNChanged", "uSNCreated",
+    # [v0.6.0] The CA's own certificate (key size / signature hash /
+    # expiry, plugin 6013). msPKI-Enrollment-Servers (CES URIs, plugin
+    # 6011) is a 2008 R2 schema attribute and is appended at runtime
+    # only when the schema defines it.
+    "cACertificate",
 ]
+ENROLLMENT_SERVERS_ATTR = "msPKI-Enrollment-Servers"
 ENROLLMENT_SERVICE_FILTER = "(objectClass=pKIEnrollmentService)"
 CT_FLAG_ENROLLEE_SUPPLIES_SUBJECT = 0x1  # bit in msPKI-Certificate-Name-Flag
 # Well-known EKU OIDs that make a certificate usable for client authentication.
@@ -379,7 +427,10 @@ SCHEMA_JAVA_FILTER = (
     "(lDAPDisplayName=javaCodeBase)(lDAPDisplayName=javaFactory)"
     "(lDAPDisplayName=javaObject)(lDAPDisplayName=javaSerializedObject)))"
 )
-SCHEMA_POSSSUPERIOR_ATTRS = ["objectGUID", "distinguishedName", "cn", "possSuperiors", "subClassOf"]
+# [v0.6.0] defaultSecurityDescriptor (SDDL every new object of the class
+# receives, plugin 5015) and lDAPDisplayName.
+SCHEMA_POSSSUPERIOR_ATTRS = ["objectGUID", "distinguishedName", "cn", "possSuperiors", "subClassOf",
+                             "defaultSecurityDescriptor", "lDAPDisplayName"]
 # possSuperiors is multi-valued, so filtering server-side for "contains
 # computer or user" isn't a single equality match -- collected broadly
 # (every classSchema object) and filtered in SQL instead, same
@@ -424,16 +475,62 @@ CERT_OID_FILTER = "(objectClass=msPKI-Enterprise-Oid)"
 # [v0.5.6] AD-integrated DNS zones. Lives in an entirely different
 # naming context from everything else this collector queries -- the
 # DomainDnsZones application partition, not the domain NC or the
-# Configuration NC. Deliberately scoped to domain-scoped zones only
-# (DC=DomainDnsZones,<domain>) -- forest-scoped zones
-# (DC=ForestDnsZones,<forest root>) would need the forest root's own
-# base DN, which can differ from the domain's in a multi-domain forest
-# and isn't currently resolved anywhere in this collector. A
+# Configuration NC. Originally scoped to domain-scoped zones only
+# (DC=DomainDnsZones,<domain>), since forest-scoped zones
+# (DC=ForestDnsZones,<forest root>) need the forest root's own base DN,
+# which can differ from the domain's in a multi-domain forest. A
 # non-AD-integrated (file-based) zone is invisible to LDAP entirely,
 # regardless of scope -- not a gap this collector can close.
+# [v0.6.0] Forest-scoped zones are collected too now: the forest root DN
+# comes from RootDSE rootDomainNamingContext (get_rootdse_info()).
 DNS_ZONE_ATTRS = ["objectGUID", "distinguishedName", "name"]
 DNS_ZONE_FILTER = "(objectClass=dnsZone)"
 DNSPROPERTY_ID_ALLOW_UPDATE = 2  # DSPROPERTY_ZONE_ALLOW_UPDATE, [MS-DNSP] 2.3.2.1.1
+# [v0.6.0] Synthetic attributes_full key on each DNS zone holding the
+# settings read from outside the zone's own collected attributes
+# (dNSProperty's allow-update value, wildcard / WPAD record presence), so
+# a change to them versions the zone. Before, allow_update was written by
+# an in-place UPDATE and a zone switched to nonsecure updates left no
+# history (change-detection plugin 11018 couldn't see it).
+DNS_ZONE_SETTINGS_KEY = "adprofiler:zoneSettings"
+# One-level search under a zone for a wildcard ("*") or WPAD node. The
+# '*' has to be the escaped value \2a -- a bare '*' would be a presence
+# filter matching every node. Tombstoned (deleted, aging-out) records
+# are excluded: they don't resolve.
+DNS_WILDCARD_WPAD_FILTER = "(&(objectClass=dnsNode)(!(dNSTombstoned=TRUE))(|(name=\\2a)(name=wpad)))"
+
+# [v0.6.0] KDS root keys (Golden gMSA, plugin 4034). Metadata only:
+# msKds-RootKeyData is never requested.
+KDS_ROOT_KEY_ATTRS = ["objectGUID", "distinguishedName", "cn", "msKds-CreateTime",
+                      "msKds-UseStartTime", "whenChanged", "whenCreated",
+                      "uSNChanged", "uSNCreated"]
+KDS_ROOT_KEY_FILTER = "(objectClass=msKds-ProvRootKey)"
+
+# [v0.6.0] AD FS Distributed Key Manager containers (plugin 5016). The
+# DKM master key lives in a contact object's thumbnailPhoto; it is never
+# requested -- only a presence filter on it is evaluated.
+ADFS_DKM_ATTRS = ["objectGUID", "distinguishedName", "objectClass", "cn",
+                  "whenChanged", "whenCreated", "uSNChanged", "uSNCreated"]
+ADFS_DKM_FILTER = "(objectClass=*)"
+ADFS_DKM_KEY_READABLE_FILTER = "(&(objectClass=contact)(thumbnailPhoto=*))"
+
+# [v0.6.0] Root CA / AIA certificate stores (plugin 6013).
+PKI_STORE_ATTRS = ["objectGUID", "distinguishedName", "cn", "cACertificate",
+                   "whenChanged", "whenCreated", "uSNChanged", "uSNCreated"]
+PKI_STORE_FILTER = "(objectClass=certificationAuthority)"
+
+# [v0.6.0] RODC password replication policy attributes -> rodc_prp_edge relation.
+RODC_PRP_ATTRS = (("msDS-RevealedList", "revealed"),
+                  ("msDS-RevealOnDemandGroup", "reveal_on_demand"),
+                  ("msDS-NeverRevealGroup", "never_reveal"))
+
+# [v0.6.0] Every LAPS attribute whose schemaIDGUID is recorded in
+# ad_domain.laps_attribute_guids (ACEs reference attributes by that GUID,
+# and legacy LAPS's differ per forest).
+LAPS_SCHEMA_ATTRS = ("ms-Mcs-AdmPwd", "ms-Mcs-AdmPwdExpirationTime", "msLAPS-Password",
+                     "msLAPS-EncryptedPassword", "msLAPS-EncryptedPasswordHistory",
+                     "msLAPS-EncryptedDSRMPassword", "msLAPS-EncryptedDSRMPasswordHistory",
+                     "msLAPS-PasswordExpirationTime")
 
 # [v0.5.14] Synthetic attributes_full key on the domain object holding the
 # domain-level settings read from OTHER objects (see the domain
@@ -467,9 +564,29 @@ class LDAPCollectionError(CollectorAbort):
     and syncing incomplete data closes real edges/rows as if they had
     been removed from AD. main() catches it, rolls the whole run back
     and marks sync_run 'failed'.
-    """
-    pass
 
+    [v0.6.0] .brief holds just the failure itself (no "Aborting" advice),
+    for the optional reads that log it and carry on -- see
+    describe_read_error().
+    """
+    def __init__(self, message, brief=None):
+        super().__init__(message)
+        self.brief = brief
+
+
+# [v0.6.0] Errors an OPTIONAL read added in 0.6.0 is allowed to survive:
+# every new LDAP read is non-fatal (logged; its value recorded as unknown
+# / its edges carried forward), including one that exhausted
+# ldap_search()'s retries -- the data it feeds is supplementary, and
+# losing the whole run over it would be worse than one unknown value.
+OPTIONAL_READ_ERRORS = (LDAPException, LDAPCollectionError)
+
+
+def describe_read_error(exc):
+    """[v0.6.0] Log text for an optional read that failed and was skipped:
+    LDAPCollectionError's full message tells the operator the run is
+    aborting, which is untrue there."""
+    return getattr(exc, "brief", None) or str(exc)
 
 PROTECTED_USERS_DN_FRAGMENT = "cn=protected users,"
 KNOWN_TYPED_TABLES = {"ad_user", "ad_group", "ad_computer", "ad_domain",
@@ -477,11 +594,13 @@ KNOWN_TYPED_TABLES = {"ad_user", "ad_group", "ad_computer", "ad_domain",
                        "ad_enrollment_service", "ad_foreign_security_principal",
                        "ad_ou", "ad_ntauth_store", "ad_site", "ad_subnet",
                        "ad_schema_object", "ad_display_specifier", "ad_cert_oid",
-                       "ad_dns_zone"}
+                       "ad_dns_zone", "ad_kds_root_key", "ad_adfs_dkm_object",
+                       "ad_pki_certificate_store"}
 KNOWN_EDGE_TABLES = {"group_member_edge", "spn_edge", "delegation_edge",
                       "fgpp_applies_to_edge", "cert_template_enabled_edge",
                       "acl_edge", "gpo_link_edge", "gmsa_password_reader_edge",
-                      "unresolved_delegation_target_edge", "rbcd_unresolved_trustee_edge"}
+                      "unresolved_delegation_target_edge", "rbcd_unresolved_trustee_edge",
+                      "rodc_prp_edge"}
 
 _USE_COLOR = sys.stdout.isatty()
 
@@ -752,20 +871,27 @@ def parse_security_descriptor(raw_sd_bytes):
     collection data, confirming owner SID, trustee SID, access mask, and
     object-type GUID resolution all round-trip correctly.
 
-    Returns (None, []) if raw_sd_bytes is empty/None, or if parsing
+    Returns (None, [], None) if raw_sd_bytes is empty/None, or if parsing
     itself fails -- callers should treat a parse failure as "could not
     determine ACLs for this object" (logged, not silently swallowed),
     never as "this object has no ACEs" (a materially different and
     dangerous conclusion to draw from a parse error).
+
+    [v0.6.0] Returns (owner_sid, aces, sd_control): sd_control is the SD
+    header's SECURITY_DESCRIPTOR_CONTROL field (see parse_sd_control()),
+    stored in directory_object.sd_control (schema v38) so plugins can see
+    a DACL with inheritance disabled (SE_DACL_PROTECTED, 0x1000) -- the
+    one fact about an ACL that no individual ACE records.
     """
     if not raw_sd_bytes:
-        return None, []
+        return None, [], None
     try:
         sd = ldaptypes.SR_SECURITY_DESCRIPTOR(data=raw_sd_bytes)
     except Exception as exc:
         log_warn(f"Could not parse security descriptor ({len(raw_sd_bytes)} bytes): {exc}")
-        return None, []
+        return None, [], None
 
+    sd_control = parse_sd_control(raw_sd_bytes)
     owner_sid = None
     if sd["OwnerSid"] != b"":
         owner_sid = sd["OwnerSid"].formatCanonical()
@@ -773,7 +899,7 @@ def parse_security_descriptor(raw_sd_bytes):
     aces = []
     dacl = sd["Dacl"]
     if dacl == b"":
-        return owner_sid, aces
+        return owner_sid, aces, sd_control
 
     for ace in dacl.aces:
         ace_type_byte = ace["AceType"]
@@ -812,7 +938,41 @@ def parse_security_descriptor(raw_sd_bytes):
             "inherited_object_type_guid": inherited_object_type_guid,
         })
 
-    return owner_sid, aces
+    return owner_sid, aces, sd_control
+
+
+# [v0.6.0] SECURITY_DESCRIPTOR_CONTROL bits plugins are expected to test
+# ([MS-DTYP] 2.4.6). Only the ones this collector itself mentions.
+SE_DACL_PRESENT = 0x0004
+SE_SELF_RELATIVE = 0x8000
+SE_DACL_PROTECTED = 0x1000
+
+
+def parse_sd_control(raw_sd_bytes):
+    """[v0.6.0] The Control field of a self-relative security descriptor:
+    a little-endian uint16 at offset 2, after the Revision and Sbz1
+    bytes ([MS-DTYP] 2.4.6). Read straight from the header rather than
+    from impacket's parsed structure so it doesn't depend on that
+    library's field naming. None when there is no header to read."""
+    if not raw_sd_bytes or len(raw_sd_bytes) < 4:
+        return None
+    return struct.unpack_from("<H", raw_sd_bytes, 2)[0]
+
+
+def store_owner_and_sd_control(pg_cur, client_id, object_guid, owner_sid, sd_control):
+    """[v0.6.0] Writes owner_sid and sd_control onto directory_object in
+    one statement -- every place that stored owner_sid now stores the SD
+    control flags from the same read. A value that couldn't be
+    determined this run (None) leaves the stored one unchanged, the same
+    "unknown is not empty" rule the ACL edges follow."""
+    if owner_sid is None and sd_control is None:
+        return
+    pg_cur.execute(
+        "UPDATE directory_object SET owner_sid = COALESCE(%s, owner_sid), "
+        "sd_control = COALESCE(%s, sd_control) "
+        "WHERE object_guid = %s AND client_id = %s",
+        (owner_sid, sd_control, object_guid, client_id),
+    )
 
 
 def resolve_object_type_name(object_type_guid):
@@ -898,21 +1058,25 @@ def build_acl_desired_edges(object_guid, raw_sd, label, desired_out, unreadable_
     trustee, type, mask, object type) while differing only in
     inheritance flags; the edge is inherit_only only if every one of them
     is, since any one that applies to the object itself makes the right
-    real on this object."""
+    real on this object.
+
+    [v0.6.0] Returns (ok, owner_sid, sd_control) -- see
+    parse_security_descriptor(); callers store the last two with
+    store_owner_and_sd_control()."""
     if raw_sd is None:
         log_warn(f"No security descriptor available for {label} -- "
                  f"keeping its previously collected ACL data unchanged this run.")
         if unreadable_out is not None:
             unreadable_out.add(object_guid)
-        return False, None
+        return False, None, None
 
-    owner_sid, aces = parse_security_descriptor(raw_sd)
+    owner_sid, aces, sd_control = parse_security_descriptor(raw_sd)
     if owner_sid is None and not aces:
         log_warn(f"Security descriptor for {label} could not be parsed -- "
                  f"keeping its previously collected ACL data unchanged this run.")
         if unreadable_out is not None:
             unreadable_out.add(object_guid)
-        return False, None
+        return False, None, None
 
     for ace in aces:
         key = (object_guid, ace["trustee_sid"], ace["ace_type"],
@@ -928,7 +1092,7 @@ def build_acl_desired_edges(object_guid, raw_sd, label, desired_out, unreadable_
         payload["inherit_only"] = payload["inherit_only"] and ace["inherit_only"]
         if payload["inherited_object_type_guid"] != ace["inherited_object_type_guid"]:
             payload["inherited_object_type_guid"] = None
-    return True, owner_sid
+    return True, owner_sid, sd_control
 
 
 def carry_forward_unreadable_acl_edges(pg_cur, client_id, unreadable_guids, desired_out):
@@ -1045,12 +1209,9 @@ def collect_well_known_container_acl(conn, pg_cur, client_id, run_id, dn, label,
     )
     pg_cur.fetchone()
 
-    _, owner_sid = build_acl_desired_edges(object_guid, raw_sd, label, desired_out, unreadable_out)
-    if owner_sid:
-        pg_cur.execute(
-            "UPDATE directory_object SET owner_sid = %s WHERE object_guid = %s AND client_id = %s",
-            (owner_sid, object_guid, client_id),
-        )
+    _, owner_sid, sd_control = build_acl_desired_edges(object_guid, raw_sd, label, desired_out,
+                                                       unreadable_out)
+    store_owner_and_sd_control(pg_cur, client_id, object_guid, owner_sid, sd_control)
     return object_guid
 
 
@@ -1292,6 +1453,9 @@ def get_rootdse_info(conn, base_dn_override=None):
     config_nc = (other.get("configurationNamingContext") or [None])[0]
     highest_usn = (other.get("highestCommittedUSN") or [None])[0]
     domain_functionality_raw = (other.get("domainFunctionality") or [None])[0]
+    # [v0.6.0] Forest root domain DN -- for ForestDnsZones and the forest
+    # root's backups. Differs from defaultNamingContext in a child domain.
+    forest_root_dn = (other.get("rootDomainNamingContext") or [None])[0]
 
     base_dn = base_dn_override or default_nc
     if not base_dn:
@@ -1318,6 +1482,7 @@ def get_rootdse_info(conn, base_dn_override=None):
         "highest_committed_usn": highest_usn,
         "domain_functionality": domain_functionality,
         "naming_contexts": info.naming_contexts or [],
+        "forest_root_dn": forest_root_dn,
     }
 
 
@@ -1586,7 +1751,7 @@ REQUIRED_SCHEMA_COLUMNS = {
     "directory_object": {"object_guid", "client_id", "object_sid", "dn_current",
                           "object_class", "sam_account_name", "first_seen_run_id",
                           "last_confirmed_run_id", "is_deleted", "deleted_run_id",
-                          "deleted_detected_at", "owner_sid"},
+                          "deleted_detected_at", "owner_sid", "sd_control"},
     "directory_object_current": {"object_guid", "client_id", "version_id", "valid_from"},
     "directory_object_version": {"version_id", "object_guid", "client_id",
                                   "run_id_valid_from", "run_id_valid_to", "valid_from",
@@ -1599,7 +1764,10 @@ REQUIRED_SCHEMA_COLUMNS = {
                 "lockout_time", "supported_encryption_types", "smartcard_required",
                 "reversible_encryption", "service_principal_names", "sid_history",
                 "protected_users_member", "description", "notes", "key_credential_count",
-                "mail", "proxy_addresses", "when_created"},
+                "mail", "proxy_addresses", "when_created",
+                # [v0.6.0, schema v38]
+                "alt_security_identities", "cleartext_password_attributes",
+                "account_expires", "assigned_authn_policy_silo", "assigned_authn_policy"},
     "ad_group": {"object_guid", "client_id", "version_id", "valid_from", "valid_to",
                  "sam_account_name", "group_type", "admin_count",
                  "is_protected_group", "member_count_direct",
@@ -1612,7 +1780,11 @@ REQUIRED_SCHEMA_COLUMNS = {
                      "laps_expiration_legacy", "laps_expiration_modern",
                      "pwd_last_set", "description", "notes", "key_credential_count",
                      "is_enabled", "primary_group_id", "sid_history", "when_created",
-                     "admin_count"},
+                     "admin_count",
+                     # [v0.6.0, schema v38]
+                     "alt_security_identities", "cleartext_password_attributes",
+                     "managed_by", "krbtgt_link", "is_gmsa", "is_dmsa",
+                     "dmsa_preceded_by", "dmsa_state"},
     "ad_domain": {"object_guid", "client_id", "version_id", "valid_from", "valid_to",
                   "dns_root", "functional_level", "tombstone_lifetime_days",
                   "tombstone_lifetime_is_default",
@@ -1624,7 +1796,12 @@ REQUIRED_SCHEMA_COLUMNS = {
                   "laps_schema_present", "pwd_no_clear_change", "pwd_allows_admin_lockout",
                   "dsheuristics_anonymous_access", "dsheuristics_uniqueness",
                   "block_inheritance",
-                  "well_known_objects", "dfsr_migration_flags"},
+                  "well_known_objects", "dfsr_migration_flags",
+                  # [v0.6.0, schema v38]
+                  "recycle_bin_enabled", "schema_object_version", "forest_updates_revision",
+                  "domain_updates_revision", "smartcard_hash_rolling_enabled",
+                  "kds_root_key_count", "laps_attribute_guids", "authn_silos",
+                  "authn_policy_count", "forest_root_dn"},
     "ad_ou": {"object_guid", "client_id", "version_id", "valid_from", "valid_to",
               "ou_name", "description", "block_inheritance", "when_created"},
     "ad_ntauth_store": {"object_guid", "client_id", "version_id", "valid_from",
@@ -1635,20 +1812,23 @@ REQUIRED_SCHEMA_COLUMNS = {
                   "valid_to", "subnet_name", "site_dn"},
     "ad_schema_object": {"object_guid", "client_id", "version_id", "valid_from",
                           "valid_to", "schema_cn", "schema_object_type",
-                          "poss_superiors", "sub_class_of"},
+                          "poss_superiors", "sub_class_of",
+                          "default_security_descriptor", "ldap_display_name"},
     "ad_display_specifier": {"object_guid", "client_id", "version_id", "valid_from",
                               "valid_to", "schema_cn", "admin_context_menu"},
     "ad_cert_oid": {"object_guid", "client_id", "version_id", "valid_from",
                      "valid_to", "schema_cn", "oid_to_group_link"},
     "ad_dns_zone": {"object_guid", "client_id", "version_id", "valid_from",
-                     "valid_to", "zone_name", "allow_update"},
+                     "valid_to", "zone_name", "allow_update",
+                     "partition", "has_wildcard_record", "has_wpad_record"},
     "ad_trust": {"object_guid", "client_id", "version_id", "valid_from", "valid_to",
                  "trust_partner", "trust_direction", "trust_type",
-                 "trust_attributes", "sid_filtering_enabled"},
+                 "trust_attributes", "sid_filtering_enabled", "supported_encryption_types"},
     "ad_foreign_security_principal": {"object_guid", "client_id", "version_id",
                                        "valid_from", "valid_to", "well_known_name"},
     "ad_gpo": {"object_guid", "client_id", "version_id", "valid_from", "valid_to",
-               "display_name", "gpo_guid", "version_number"},
+               "display_name", "gpo_guid", "version_number",
+               "gpc_file_sys_path", "gpo_flags"},
     "ad_fgpp": {"object_guid", "client_id", "version_id", "valid_from", "valid_to",
                 "policy_name", "precedence", "min_pwd_length",
                 "pwd_complexity_enabled", "reversible_encryption_enabled",
@@ -1660,9 +1840,11 @@ REQUIRED_SCHEMA_COLUMNS = {
                           "enrollment_flags", "certificate_name_flags",
                           "enrollee_supplies_subject", "extended_key_usage",
                           "client_authentication_capable", "is_enabled",
-                          "certificate_policy_oids", "schema_version"},
+                          "certificate_policy_oids", "schema_version",
+                          "minimal_key_size", "private_key_flag"},
     "ad_enrollment_service": {"object_guid", "client_id", "version_id", "valid_from",
-                               "valid_to", "ca_name", "dns_hostname"},
+                               "valid_to", "ca_name", "dns_hostname",
+                               "enrollment_servers", "ca_certificates"},
     "group_member_edge": {"edge_id", "client_id", "group_guid", "member_guid",
                            "is_direct", "valid_from", "valid_to",
                            "run_id_valid_from", "run_id_valid_to"},
@@ -1686,6 +1868,18 @@ REQUIRED_SCHEMA_COLUMNS = {
     "cert_template_enabled_edge": {"edge_id", "client_id", "ca_guid", "template_guid",
                                     "valid_from", "valid_to", "run_id_valid_from",
                                     "run_id_valid_to"},
+    # [v0.6.0, schema v38]
+    "rodc_prp_edge": {"edge_id", "client_id", "rodc_guid", "principal_guid", "relation",
+                      "valid_from", "valid_to", "run_id_valid_from", "run_id_valid_to"},
+    "ad_backup_status": {"client_id", "naming_context", "last_backup_at", "read_status",
+                         "run_id", "collected_at"},
+    "ad_kds_root_key": {"object_guid", "client_id", "version_id", "valid_from", "valid_to",
+                        "key_id", "create_time", "use_start_time"},
+    "ad_adfs_dkm_object": {"object_guid", "client_id", "version_id", "valid_from", "valid_to",
+                           "object_class_name", "is_key_object", "key_readable_by_collector"},
+    "ad_pki_certificate_store": {"object_guid", "client_id", "version_id", "valid_from",
+                                 "valid_to", "store", "ca_name", "certificates",
+                                 "certificate_count"},
 }
 REQUIRED_SCHEMA_FUNCTIONS = {"upsert_directory_object", "set_current_version"}
 
@@ -1705,6 +1899,7 @@ REQUIRED_SCHEMA_FUNCTIONS = {"upsert_directory_object", "set_current_version"}
 # columns worth double-checking this way.
 REQUIRED_IDENTITY_COLUMNS = {
     ("unresolved_delegation_target_edge", "edge_id"),
+    ("rodc_prp_edge", "edge_id"),  # [v0.6.0]
 }
 
 # [v0.5.8] Bump alongside VERSION whenever a release needs new schema.
@@ -1718,7 +1913,7 @@ REQUIRED_IDENTITY_COLUMNS = {
 # the structural check remains the backstop for a schema altered
 # outside the approved migration files, where the version number could
 # claim to be current while the actual structure doesn't match it.
-EXPECTED_SCHEMA_VERSION = 37
+EXPECTED_SCHEMA_VERSION = 38
 
 
 def check_schema_version(pg_conn):
@@ -2137,7 +2332,8 @@ def _ldap_search_with_retry(conn, what, search_kwargs, on_reconnect=None):
                 raise LDAPCollectionError(
                     f"LDAP search for {what} failed with {problem}. Aborting: continuing "
                     f"would record incomplete data for this step as if it were complete. "
-                    f"Check the bind account's read access and the DC's health, then re-run."
+                    f"Check the bind account's read access and the DC's health, then re-run.",
+                    brief=f"LDAP search for {what} failed with {problem}",
                 )
         except (LDAPCommunicationError, LDAPResponseTimeoutError) as exc:
             problem = f"connection error: {exc}"
@@ -2148,7 +2344,9 @@ def _ldap_search_with_retry(conn, what, search_kwargs, on_reconnect=None):
                 f"LDAP search for {what} still failing after {LDAP_MAX_ATTEMPTS} attempts "
                 f"(last error: {problem}). Aborting rather than recording incomplete data -- "
                 f"re-run once the domain controller is reachable and responsive, or point "
-                f"--dc-host at a different DC."
+                f"--dc-host at a different DC.",
+                brief=f"LDAP search for {what} still failing after {LDAP_MAX_ATTEMPTS} attempts "
+                      f"(last error: {problem})",
             )
         delay = LDAP_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)) + random.uniform(0, 1)
         log_warn(f"  LDAP search for {what} failed ({problem}); retrying in {delay:.0f}s "
@@ -2271,6 +2469,14 @@ def build_attributes_full(dn, attributes, raw_attributes):
     for key, value in attributes.items():
         if key == "objectGUID":
             continue
+        canonical_secret = _CLEARTEXT_PASSWORD_ATTRS_LOWER.get(key.lower())
+        if canonical_secret:
+            # [v0.6.0] Never stored, logged or hashed -- only the fact
+            # that the attribute is populated survives. Keyed by the
+            # canonical name so typed columns don't depend on the case
+            # the server used.
+            full[canonical_secret] = redact_secret_values(value)
+            continue
         if key == "objectSid":
             raw = raw_attributes.get("objectSid")
             full["objectSid"] = sid_bytes_to_str(raw[0]) if raw else None
@@ -2328,6 +2534,29 @@ def build_attributes_full(dn, attributes, raw_attributes):
             # this explicit path.
             raw = raw_attributes.get(key) or []
             full[key] = [base64.b64encode(v).decode("ascii") for v in raw] or None
+            continue
+        if key == "accountExpires":
+            # [v0.6.0] Raw value, like pwdLastSet below (ldap3 would turn
+            # it into a datetime -- or datetime.max for "never"). 0 and
+            # 0x7FFFFFFFFFFFFFFF both mean "never expires" and are
+            # stored as None.
+            raw = raw_attributes.get(key)
+            raw_val = raw[0] if raw else None
+            if isinstance(raw_val, bytes):
+                raw_val = raw_val.decode("utf-8", errors="replace")
+            dt = account_expires_to_datetime(raw_val)
+            full[key] = dt.isoformat() if dt else None
+            continue
+        if key in ("msKds-CreateTime", "msKds-UseStartTime"):
+            # [v0.6.0] KDS root key times: Large Integer FILETIMEs, which
+            # ldap3 doesn't format. Stored as ISO strings, like the
+            # FILETIME attributes below.
+            raw = raw_attributes.get(key)
+            raw_val = raw[0] if raw else None
+            if isinstance(raw_val, bytes):
+                raw_val = raw_val.decode("utf-8", errors="replace")
+            dt = filetime_to_datetime(_as_int(raw_val))
+            full[key] = dt.isoformat() if dt else None
             continue
         if key in ("pwdLastSet", "lastLogonTimestamp", "lockoutTime",
                     "ms-Mcs-AdmPwdExpirationTime", "msLAPS-PasswordExpirationTime"):
@@ -2395,6 +2624,49 @@ def build_attributes_full(dn, attributes, raw_attributes):
     return object_guid, full
 
 
+def redact_secret_values(value):
+    """[v0.6.0] Deterministic stand-in for a secret-bearing attribute's
+    values: the number of values only -- no length, no hash, nothing
+    derived from the content. None when the attribute is absent (ldap3
+    returns [] for a requested-but-absent attribute)."""
+    if value is None or value == [] or value == b"" or value == "":
+        return None
+    count = len(value) if isinstance(value, (list, tuple)) else 1
+    return f"<redacted: {count} value(s)>"
+
+
+def account_expires_to_datetime(value):
+    """[v0.6.0] accountExpires -> datetime; None for "never" (0 or
+    0x7FFFFFFFFFFFFFFF) and for absent/unparseable values. Accepts the
+    raw integer (or its string form), or an ISO string already produced
+    by build_attributes_full()."""
+    if value in (None, "", b""):
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        ticks = int(value)
+    except (TypeError, ValueError):
+        try:
+            return datetime.fromisoformat(str(value))
+        except ValueError:
+            return None
+    if ticks <= 0 or ticks >= ACCOUNT_EXPIRES_NEVER:
+        return None
+    return filetime_to_datetime(ticks)
+
+
+def populated_cleartext_password_attrs(full):
+    """[v0.6.0] Sorted names of the populated cleartext-password
+    attributes ([] when none)."""
+    return sorted(name for name in CLEARTEXT_PASSWORD_ATTRS if full.get(name))
+
+
+def _list_or_none(value):
+    values = [v for v in _as_list(value) if v not in (None, "")]
+    return values or None
+
+
 class CollectionStats:
     def __init__(self, full_rescan=False):
         self.seen = 0
@@ -2420,8 +2692,13 @@ class CollectionStats:
 def collect_object_class(conn, pg_cur, client_id, run_id, dc_host, base_dn,
                           object_filter, attrs, page_size, label,
                           typed_table, typed_column_fn, dn_to_guid, stats,
-                          run_timestamp, extra_attributes=None):
+                          run_timestamp, extra_attributes=None, extra_attributes_for=None):
     """
+    [v0.6.0] extra_attributes_for: optional per-entry counterpart of
+    extra_attributes -- called with each entry's DN, its dict merged the
+    same way (before change detection). Used for the DNS zones' settings
+    (DNS_ZONE_SETTINGS_KEY), which differ per zone.
+
     [v0.5.14] extra_attributes: values merged into every collected
     object's attributes_full BEFORE change detection, so that facts read
     from somewhere other than the object itself still version it when
@@ -2471,6 +2748,8 @@ def collect_object_class(conn, pg_cur, client_id, run_id, dc_host, base_dn,
             continue
         if extra_attributes:
             attributes_full.update(extra_attributes)
+        if extra_attributes_for:
+            attributes_full.update(extra_attributes_for(dn) or {})
 
         dn_to_guid[dn.lower()] = object_guid
         stats.seen += 1
@@ -2570,6 +2849,10 @@ def label_to_object_class(label):
         "schema (possSuperiors check)": "other",
         "DisplaySpecifiers": "other", "certificate OIDs": "other",
         "DNS zones": "other",
+        # [v0.6.0]
+        "DNS zones (forest)": "other", "KDS root keys": "other",
+        "AD FS DKM objects": "other", "PKI root CA store": "other",
+        "PKI AIA store": "other",
     }[label]
 
 
@@ -2619,6 +2902,12 @@ def user_typed_columns(full):
         "mail": full.get("mail"),
         "proxy_addresses": proxy_addresses or None,
         "when_created": full.get("whenCreated"),
+        # [v0.6.0, schema v38]
+        "alt_security_identities": _list_or_none(full.get("altSecurityIdentities")),
+        "cleartext_password_attributes": populated_cleartext_password_attrs(full),
+        "account_expires": account_expires_to_datetime(full.get("accountExpires")),
+        "assigned_authn_policy_silo": full.get("msDS-AssignedAuthNPolicySilo"),
+        "assigned_authn_policy": full.get("msDS-AssignedAuthNPolicy"),
     }
 
 
@@ -2678,6 +2967,15 @@ def computer_typed_columns(full):
         "sid_history": sid_history or None,
         "when_created": full.get("whenCreated"),
         "admin_count": _as_int(full.get("adminCount")),
+        # [v0.6.0, schema v38] is_gmsa / is_dmsa are NOT here: they come
+        # from objectClass, which isn't collected -- see
+        # update_managed_service_account_flags().
+        "alt_security_identities": _list_or_none(full.get("altSecurityIdentities")),
+        "cleartext_password_attributes": populated_cleartext_password_attrs(full),
+        "managed_by": full.get("managedBy"),
+        "krbtgt_link": full.get("msDS-KrbTgtLink"),
+        "dmsa_preceded_by": full.get("msDS-ManagedAccountPrecededByLink"),
+        "dmsa_state": _as_int(full.get("msDS-DelegatedMSAState")),
     }
 
 
@@ -2732,7 +3030,8 @@ def ou_typed_columns(full):
 
 def domain_typed_columns(full, functional_level, tombstone_lifetime_days, tombstone_lifetime_is_default,
                           laps_schema_present, dsheuristics_anonymous_access,
-                          dfsr_migration_flags, dsheuristics_uniqueness=None, ds_extra=None):
+                          dfsr_migration_flags, dsheuristics_uniqueness=None, ds_extra=None,
+                          extra_settings=None):
     """[v0.1.3 fix] minPwdAge/maxPwdAge/lockoutDuration/lockOutObservationWindow
     were never collected for the domain-wide DEFAULT password policy, even
     though the equivalent fields were built for Fine-Grained Password
@@ -2750,6 +3049,7 @@ def domain_typed_columns(full, functional_level, tombstone_lifetime_days, tombst
     passed straight through.
     """
     pwd_props = _as_int(full.get("pwdProperties")) or 0
+    ex = extra_settings or {}
     raw_wko = full.get("wellKnownObjects") or []
     if isinstance(raw_wko, str):
         raw_wko = [raw_wko]
@@ -2782,6 +3082,21 @@ def domain_typed_columns(full, functional_level, tombstone_lifetime_days, tombst
         "block_inheritance": gpoptions_block_inheritance(full),
         "well_known_objects": json.dumps(list(raw_wko)) if raw_wko else None,
         "dfsr_migration_flags": dfsr_migration_flags,
+        # [v0.6.0, schema v38] extra_settings: collect_domain_extra_settings()
+        # (+ kds_root_key_count), folded into the domain's derived settings.
+        "smartcard_hash_rolling_enabled": _as_bool_or_none(
+            full.get(SMARTCARD_HASH_ROLLING_ATTR)),
+        "recycle_bin_enabled": ex.get("recycle_bin_enabled"),
+        "schema_object_version": ex.get("schema_object_version"),
+        "forest_updates_revision": ex.get("forest_updates_revision"),
+        "domain_updates_revision": ex.get("domain_updates_revision"),
+        "kds_root_key_count": ex.get("kds_root_key_count"),
+        "laps_attribute_guids": (json.dumps(ex["laps_attribute_guids"])
+                                 if ex.get("laps_attribute_guids") is not None else None),
+        "authn_silos": (json.dumps(ex["authn_silos"])
+                        if ex.get("authn_silos") is not None else None),
+        "authn_policy_count": ex.get("authn_policy_count"),
+        "forest_root_dn": ex.get("forest_root_dn"),
     }
 
 
@@ -2796,6 +3111,9 @@ def trust_typed_columns(full):
         "trust_type": _as_int(full.get("trustType")),
         "trust_attributes": trust_attrs,
         "sid_filtering_enabled": bool(trust_attrs & TRUST_ATTR_FILTER_SIDS),
+        # [v0.6.0, schema v38] Already collected (plugin 7003 read it from
+        # attributes_full); now a column for plugin 7007.
+        "supported_encryption_types": _as_int(full.get("msDS-SupportedEncryptionTypes")),
     }
 
 
@@ -2815,6 +3133,9 @@ def gpo_typed_columns(full):
         "display_name": full.get("displayName"),
         "gpo_guid": gpo_guid,
         "version_number": _as_int(full.get("versionNumber")),
+        # [v0.6.0, schema v38]
+        "gpc_file_sys_path": full.get("gPCFileSysPath"),
+        "gpo_flags": _as_int(full.get("flags")),
     }
 
 
@@ -2879,13 +3200,20 @@ def cert_template_typed_columns(full):
         # and the template's own OID.
         "ra_signature_count": _as_int(full.get("msPKI-RA-Signature")),
         "template_oid": full.get("msPKI-Cert-Template-OID"),
+        # [v0.6.0, schema v38]
+        "minimal_key_size": _as_int(full.get("msPKI-Minimal-Key-Size")),
+        "private_key_flag": _as_int(full.get("msPKI-Private-Key-Flag")),
     }
 
 
 def enrollment_service_typed_columns(full):
+    ca_certs = parse_certificates(full.get("cACertificate"))
     return {
         "ca_name": full.get("cn"),
         "dns_hostname": full.get("dNSHostName"),
+        # [v0.6.0, schema v38] Same shape as ad_ntauth_store.certificates.
+        "ca_certificates": json.dumps(ca_certs) if ca_certs else None,
+        "enrollment_servers": _list_or_none(full.get(ENROLLMENT_SERVERS_ATTR)),
     }
 
 
@@ -2910,27 +3238,11 @@ def ntauth_typed_columns(full):
     with parse_error set and every other field None, rather than
     silently dropped -- its mere presence and inability to parse is
     itself informative.
+
+    [v0.6.0] The parsing itself moved to parse_certificates(), shared
+    with the enrollment services and the root CA / AIA stores.
     """
-    certs_b64 = full.get("cACertificate") or []
-    if isinstance(certs_b64, str):
-        certs_b64 = [certs_b64]
-    parsed_certs = []
-    for cert_b64 in certs_b64:
-        entry = {"parse_error": None, "subject_cn": None, "issuer_cn": None,
-                  "not_valid_after": None, "serial_number": None, "thumbprint_sha1": None}
-        try:
-            der = base64.b64decode(cert_b64)
-            cert = x509.load_der_x509_certificate(der)
-            subj_cn = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
-            issuer_cn = cert.issuer.get_attributes_for_oid(NameOID.COMMON_NAME)
-            entry["subject_cn"] = subj_cn[0].value if subj_cn else None
-            entry["issuer_cn"] = issuer_cn[0].value if issuer_cn else None
-            entry["not_valid_after"] = cert.not_valid_after_utc.isoformat()
-            entry["serial_number"] = format(cert.serial_number, "x")
-            entry["thumbprint_sha1"] = cert.fingerprint(hashes.SHA1()).hex()
-        except Exception as exc:
-            entry["parse_error"] = str(exc)
-        parsed_certs.append(entry)
+    parsed_certs = parse_certificates(full.get("cACertificate"))
     return {
         # [v0.5.3 fix] write_typed_row() is generic and passes values
         # through to psycopg2 unmodified -- it has no special handling
@@ -2943,6 +3255,119 @@ def ntauth_typed_columns(full):
         # mock harness, not assumed.
         "certificates": json.dumps(parsed_certs),
         "certificate_count": len(parsed_certs),
+    }
+
+
+def _public_key_info(public_key):
+    """[v0.6.0] (key_algorithm, key_size) for a certificate's public key.
+    key_size is the modulus size for RSA/DSA and the curve size for EC."""
+    from cryptography.hazmat.primitives.asymmetric import rsa, ec, dsa, ed25519, ed448
+    if isinstance(public_key, rsa.RSAPublicKey):
+        return "RSA", public_key.key_size
+    if isinstance(public_key, ec.EllipticCurvePublicKey):
+        return "EC", public_key.curve.key_size
+    if isinstance(public_key, dsa.DSAPublicKey):
+        return "DSA", public_key.key_size
+    if isinstance(public_key, ed25519.Ed25519PublicKey):
+        return "Ed25519", 256
+    if isinstance(public_key, ed448.Ed448PublicKey):
+        return "Ed448", 448
+    return type(public_key).__name__, None
+
+
+def parse_certificates(certs_b64):
+    """[v0.5.3, generalised in v0.6.0] Parses base64 DER certificates (as
+    build_attributes_full() stores cACertificate) into the dict shape
+    shared by ad_ntauth_store / ad_pki_certificate_store /
+    ad_enrollment_service.ca_certificates: subject_cn, issuer_cn,
+    not_valid_before, not_valid_after, serial_number, thumbprint_sha1,
+    key_algorithm ('RSA', 'EC', 'DSA', 'Ed25519', ...), key_size (bits;
+    the curve size for EC), signature_hash_algorithm ('sha1', 'sha256',
+    ...; None when the signature has no separate hash, e.g. Ed25519, or
+    it isn't recognised) and parse_error. An entry that fails to parse
+    is kept with parse_error set, never dropped (see
+    ntauth_typed_columns())."""
+    if isinstance(certs_b64, str):
+        certs_b64 = [certs_b64]
+    parsed_certs = []
+    for cert_b64 in certs_b64 or []:
+        entry = {"parse_error": None, "subject_cn": None, "issuer_cn": None,
+                 "not_valid_before": None, "not_valid_after": None,
+                 "serial_number": None, "thumbprint_sha1": None,
+                 "key_algorithm": None, "key_size": None,
+                 "signature_hash_algorithm": None}
+        try:
+            der = base64.b64decode(cert_b64)
+            cert = x509.load_der_x509_certificate(der)
+            subj_cn = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+            issuer_cn = cert.issuer.get_attributes_for_oid(NameOID.COMMON_NAME)
+            entry["subject_cn"] = subj_cn[0].value if subj_cn else None
+            entry["issuer_cn"] = issuer_cn[0].value if issuer_cn else None
+            entry["not_valid_before"] = cert.not_valid_before_utc.isoformat()
+            entry["not_valid_after"] = cert.not_valid_after_utc.isoformat()
+            entry["serial_number"] = format(cert.serial_number, "x")
+            entry["thumbprint_sha1"] = cert.fingerprint(hashes.SHA1()).hex()
+            try:
+                entry["key_algorithm"], entry["key_size"] = _public_key_info(cert.public_key())
+            except Exception:
+                pass  # unsupported key type: leave both None, keep the rest
+            try:
+                hash_alg = cert.signature_hash_algorithm
+                entry["signature_hash_algorithm"] = hash_alg.name if hash_alg else None
+            except Exception:
+                pass  # UnsupportedAlgorithm: unknown signature hash
+        except Exception as exc:
+            entry["parse_error"] = str(exc)
+        parsed_certs.append(entry)
+    return parsed_certs
+
+
+def pki_certificate_store_typed_columns(full, store):
+    """[v0.6.0] certificationAuthority objects under CN=Certification
+    Authorities (store 'root') or CN=AIA (store 'aia')."""
+    certs = parse_certificates(full.get("cACertificate"))
+    return {
+        "store": store,
+        "ca_name": full.get("cn"),
+        "certificates": json.dumps(certs),
+        "certificate_count": len(certs),
+    }
+
+
+def filetime_or_generalized_to_datetime(value):
+    """[v0.6.0] msKds-CreateTime / msKds-UseStartTime are Large Integer
+    FILETIMEs; build_attributes_full() stores them as ISO strings. A
+    Generalized-Time string is accepted too, in case a DC returns one."""
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value
+    as_int = _as_int(value)
+    if as_int is not None:
+        return filetime_to_datetime(as_int)
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        return parse_generalized_time(str(value))
+
+
+def kds_root_key_typed_columns(full):
+    return {
+        "key_id": full.get("cn"),
+        "create_time": filetime_or_generalized_to_datetime(full.get("msKds-CreateTime")),
+        "use_start_time": filetime_or_generalized_to_datetime(full.get("msKds-UseStartTime")),
+    }
+
+
+def adfs_dkm_typed_columns(full):
+    """[v0.6.0] AD returns objectClass in hierarchy order, most specific
+    last. key_readable_by_collector is filled afterwards in place (see
+    update_adfs_key_readability()): it comes from a filter evaluation,
+    not from the object's attributes."""
+    classes = [str(c) for c in _as_list(full.get("objectClass"))]
+    return {
+        "object_class_name": classes[-1] if classes else None,
+        "is_key_object": any(c.lower() == "contact" for c in classes),
     }
 
 
@@ -2969,6 +3394,7 @@ def schema_java_typed_columns(full):
         "schema_object_type": "attributeSchema",
         "poss_superiors": None,
         "sub_class_of": None,
+        "ldap_display_name": full.get("lDAPDisplayName"),
     }
 
 
@@ -2988,6 +3414,9 @@ def schema_posssuperior_typed_columns(full):
         "schema_object_type": "classSchema",
         "poss_superiors": json.dumps(list(poss_superiors)) if poss_superiors else None,
         "sub_class_of": full.get("subClassOf"),
+        # [v0.6.0, schema v38] plugin 5015
+        "default_security_descriptor": full.get("defaultSecurityDescriptor"),
+        "ldap_display_name": full.get("lDAPDisplayName"),
     }
 
 
@@ -3027,16 +3456,49 @@ def dns_zone_typed_columns(full):
     struct's byte alignment before this function would ever see it. A
     real construct-parse round-trip test caught this before it shipped
     -- allow_update ended up None for every zone until the read moved
-    to raw_attributes."""
+    to raw_attributes.
+
+    [v0.6.0] allow_update / has_wildcard_record / has_wpad_record now
+    come from attributes_full's DNS_ZONE_SETTINGS_KEY (read before the
+    zone is versioned, see read_dns_zone_settings()), and partition from
+    the zone's DN."""
+    settings = full.get(DNS_ZONE_SETTINGS_KEY) or {}
     return {
         "zone_name": full.get("name") or full.get("cn"),
+        "allow_update": settings.get("allow_update"),
+        "has_wildcard_record": settings.get("has_wildcard_record"),
+        "has_wpad_record": settings.get("has_wpad_record"),
+        "partition": dns_zone_partition(full.get("distinguishedName")),
     }
+
+
+def dns_zone_partition(dn):
+    """[v0.6.0] 'DomainDnsZones' / 'ForestDnsZones' from a zone DN."""
+    lowered = (dn or "").lower()
+    if ",dc=forestdnszones," in lowered:
+        return "ForestDnsZones"
+    if ",dc=domaindnszones," in lowered:
+        return "DomainDnsZones"
+    return None
 
 
 def _as_list(value):
     if value is None:
         return []
     return [value] if isinstance(value, str) else list(value)
+
+
+def _as_bool_or_none(value):
+    """[v0.6.0] LDAP Boolean ("TRUE"/"FALSE", or a bool once ldap3 has
+    formatted it) -> bool; None when absent or unrecognised."""
+    if isinstance(value, (list, tuple)):
+        value = value[0] if value else None
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().upper()
+    return True if text == "TRUE" else False if text == "FALSE" else None
 
 
 def _as_int(value):
@@ -3449,7 +3911,7 @@ def collect_delegation_edges(pg_cur, client_id, run_id, entries, spn_to_guid, st
         raw_rbcd_b64 = full.get("msDS-AllowedToActOnBehalfOfOtherIdentity")
         if raw_rbcd_b64:
             raw_rbcd_sd = base64.b64decode(raw_rbcd_b64)
-            _, rbcd_aces = parse_security_descriptor(raw_rbcd_sd)
+            _, rbcd_aces, _ = parse_security_descriptor(raw_rbcd_sd)
             for ace in rbcd_aces:
                 # [v0.5.15] A deny ACE in this descriptor forbids, not
                 # grants, delegation -- it was being recorded as a trustee.
@@ -3532,7 +3994,7 @@ def resolve_gmsa_password_readers(pg_cur, client_id, run_id, computer_entries, s
             continue
         gmsa_count += 1
         raw_membership_sd = base64.b64decode(raw_membership_b64)
-        _, membership_aces = parse_security_descriptor(raw_membership_sd)
+        _, membership_aces, _ = parse_security_descriptor(raw_membership_sd)
         for ace in membership_aces:
             trustee_guid = sid_to_guid.get(ace["trustee_sid"])
             desired[(object_guid, ace["trustee_sid"])] = {
@@ -3783,6 +4245,500 @@ def repair_orphaned_deleted_typed_rows(pg_cur, client_id, run_timestamp):
                  f"was never closed (orphaned by the pre-v0.1.8 deletion bug, or any future "
                  f"equivalent gap this check exists to catch).")
     return repaired
+
+
+# ============================================================================
+# [v0.6.0] Collection added for schema v38. Every read here is optional
+# data: failures are logged and recorded as unknown (None / carried-forward
+# edges), never fatal -- see OPTIONAL_READ_ERRORS.
+# ============================================================================
+
+def probe_schema_name(conn, config_nc, ldap_display_name):
+    """[v0.6.0] ldap_attribute_exists() for a 0.6.0 optional attribute or
+    class (its lDAPDisplayName search matches classSchema objects as well
+    as attributeSchema ones), except that a search that fails even after
+    retries counts as "not present" with a warning instead of aborting:
+    nothing 0.6.0 adds is worth losing the run over."""
+    try:
+        return ldap_attribute_exists(conn, config_nc, ldap_display_name)
+    except LDAPCollectionError as exc:
+        log_warn(f"Could not check the schema for {ldap_display_name} (treated as absent): {describe_read_error(exc)}")
+        return False
+
+
+def _raw_values(raw_attributes, attr_name):
+    """[v0.6.0] An attribute's raw values, looked up case-insensitively
+    (the server's spelling of the name can differ from the request's)."""
+    wanted = attr_name.lower()
+    for key, values in (raw_attributes or {}).items():
+        if key.lower() == wanted:
+            return list(values or [])
+    return []
+
+
+def _decode(value):
+    return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value
+
+
+def _raw_ranged_values(conn, dn, raw_attributes, attr_name):
+    """[v0.6.0] All values of a possibly range-retrieved attribute
+    ("attr;range=0-1499") from a BASE read's raw_attributes."""
+    for key, values in (raw_attributes or {}).items():
+        if key.lower().startswith(attr_name.lower() + ";range="):
+            server_name = key.split(";", 1)[0]
+            return resolve_ranged_attribute(conn, dn, server_name, [key], list(values or []))
+    return _raw_values(raw_attributes, attr_name)
+
+
+def object_acl_reads(conn, pg_cur, client_id, entries, acl_desired, acl_unreadable):
+    """[v0.6.0] Targeted security-descriptor read for each (guid, full) in
+    entries, merged into the run's single acl_desired dict (see
+    build_acl_desired_edges() for why there is exactly one acl_edge
+    sync), with owner_sid + sd_control stored. Returns the number of
+    objects whose SD couldn't be read or parsed (their ACL edges are
+    carried forward unchanged)."""
+    failures = 0
+    for object_guid, full in entries:
+        dn = full.get("distinguishedName")
+        if not dn:
+            continue
+        try:
+            raw_sd = get_object_security_descriptor(conn, dn)
+        except LDAPCollectionError as exc:
+            log_warn(f"Could not read security descriptor for {dn}: {describe_read_error(exc)}")
+            raw_sd = None
+        ok, owner_sid, sd_control = build_acl_desired_edges(
+            object_guid, raw_sd, dn, acl_desired, acl_unreadable)
+        if not ok:
+            failures += 1
+            continue
+        store_owner_and_sd_control(pg_cur, client_id, object_guid, owner_sid, sd_control)
+    return failures
+
+
+def update_managed_service_account_flags(conn, pg_cur, client_id, base_dn, config_nc, page_size):
+    """[v0.6.0] ad_computer.is_gmsa / is_dmsa (BadSuccessor, plugin 5017).
+    objectClass isn't in COMPUTER_ATTRS (it would version every computer
+    once), so each flag comes from a targeted search returning objectGUID
+    only, applied to the current rows in place -- the same non-versioned
+    refresh as is_enabled on certificate templates. The class can't
+    change on an existing object, so nothing is lost by not versioning
+    it. dMSAs need the Windows Server 2025 schema: when the class isn't
+    defined, no object can be one. A failed search leaves the flag as it
+    was. Returns {column: count or None}."""
+    results = {}
+    for column, object_class, needs_probe in (("is_gmsa", GMSA_CLASS, False),
+                                              ("is_dmsa", DMSA_CLASS, True)):
+        guids = set()
+        if not needs_probe or probe_schema_name(conn, config_nc, object_class):
+            try:
+                for _dn, _attrs, raw in ldap_paged_search(
+                        conn, base_dn, f"(objectClass={object_class})", ["objectGUID"], page_size):
+                    raw_guid = raw.get("objectGUID")
+                    if raw_guid:
+                        guids.add(guid_bytes_to_str(raw_guid[0]))
+            except OPTIONAL_READ_ERRORS as exc:
+                log_warn(f"Could not search for {object_class} objects ({column} left unchanged): {describe_read_error(exc)}")
+                results[column] = None
+                continue
+        flag = sql.SQL("(object_guid = ANY(%s::uuid[]))")
+        pg_cur.execute(
+            sql.SQL("UPDATE ad_computer SET {col} = {flag} WHERE client_id = %s AND valid_to IS NULL "
+                    "AND {col} IS DISTINCT FROM {flag}").format(col=sql.Identifier(column), flag=flag),
+            (sorted(guids), client_id, sorted(guids)),
+        )
+        results[column] = len(guids)
+    return results
+
+
+_DN_WITH_DATA_RE = re.compile(r"^([SB]):(\d+):", re.IGNORECASE)
+
+
+def extract_dn_from_dn_value(value):
+    """[v0.6.0] The DN part of an Object(DN-String) / Object(DN-Binary)
+    value ("S:<char count>:<string>:<DN>" / "B:<hex char count>:<hex>:<DN>"),
+    or the value itself when it's already a plain DN (ldap3 may return
+    either, depending on its schema info). The count is honoured, so a
+    ':' inside the string part can't shift the split; a count that
+    doesn't line up falls back to splitting on the third ':'."""
+    value = _decode(value)
+    if value is None:
+        return None
+    value = str(value).strip()
+    match = _DN_WITH_DATA_RE.match(value)
+    if not match:
+        return value or None
+    count = int(match.group(2))
+    rest = value[match.end():]
+    if len(rest) > count and rest[count] == ":":
+        return rest[count + 1:] or None
+    parts = value.split(":", 3)
+    return parts[3] if len(parts) == 4 and parts[3] else None
+
+
+def collect_rodc_prp_edges(conn, pg_cur, client_id, run_id, computer_entries, dn_to_guid,
+                           stats, run_timestamp):
+    """[v0.6.0] RODC password replication policy -> rodc_prp_edge (plugin
+    2037). For each RODC (PARTIAL_SECRETS_ACCOUNT), one BASE read of
+    msDS-RevealedList (accounts whose secrets are cached on it),
+    msDS-RevealOnDemandGroup (allowed) and msDS-NeverRevealGroup
+    (denied). msDS-RevealedList holds one value per (account, revealed
+    attribute), hence the per-RODC/relation dedupe. Must run after
+    users, computers and groups are in dn_to_guid. One sync_edges() call
+    for the whole table (see build_acl_desired_edges() for why per-object
+    calls are a bug); an RODC whose read fails keeps its open edges."""
+    desired = {}
+    unreadable = set()
+    unresolved = 0
+    rodcs = 0
+    attr_names = [attr for attr, _ in RODC_PRP_ATTRS]
+    for rodc_guid, full in computer_entries:
+        if not (int(full.get("userAccountControl") or 0) & UAC_PARTIAL_SECRETS_ACCOUNT):
+            continue
+        rodc_dn = full.get("distinguishedName")
+        if not rodc_dn:
+            continue
+        rodcs += 1
+        this_rodc = {}
+        this_unresolved = 0
+        try:
+            entries = ldap_search(conn, rodc_dn, "(objectClass=*)", ldap3.BASE, attr_names,
+                                  what=f"the password replication policy of {rodc_dn}")
+            if not entries:
+                unreadable.add(rodc_guid)
+                continue
+            raw = entries[0].get("raw_attributes", {})
+            for attr, relation in RODC_PRP_ATTRS:
+                seen = set()
+                for value in _raw_ranged_values(conn, rodc_dn, raw, attr):
+                    principal_dn = extract_dn_from_dn_value(value)
+                    if not principal_dn or principal_dn.lower() in seen:
+                        continue
+                    seen.add(principal_dn.lower())
+                    principal_guid = dn_to_guid.get(principal_dn.lower())
+                    if principal_guid is None:
+                        this_unresolved += 1
+                        continue
+                    this_rodc[(rodc_guid, principal_guid, relation)] = {}
+        except OPTIONAL_READ_ERRORS as exc:
+            log_warn(f"Could not read the password replication policy of {rodc_dn} "
+                     f"(its edges are kept unchanged this run): {exc}")
+            unreadable.add(rodc_guid)
+            continue
+        desired.update(this_rodc)
+        unresolved += this_unresolved
+
+    carried = 0
+    if unreadable:
+        pg_cur.execute(
+            "SELECT rodc_guid, principal_guid, relation FROM rodc_prp_edge "
+            "WHERE client_id = %s AND valid_to IS NULL AND rodc_guid = ANY(%s::uuid[])",
+            (client_id, sorted(unreadable)),
+        )
+        for row in pg_cur.fetchall():
+            desired[(str(row[0]), str(row[1]), row[2])] = {}
+            carried += 1
+
+    opened, closed = sync_edges(
+        pg_cur, "rodc_prp_edge", client_id, run_id, run_timestamp,
+        ["rodc_guid", "principal_guid", "relation"], desired,
+    )
+    stats.edges_opened += opened
+    stats.edges_closed += closed
+    log_success(f"RODC password replication policy: {rodcs} RODC(s), {len(desired)} edge(s) "
+                f"current ({opened} opened, {closed} closed), {unresolved} principal(s) not a "
+                f"collected object"
+                + (f", {len(unreadable)} RODC(s) unreadable ({carried} edge(s) kept)"
+                   if unreadable else ""))
+
+
+def _base_read(conn, dn, attrs, what):
+    """[v0.6.0] BASE read returning the entry or None when the object
+    doesn't exist. Raises OPTIONAL_READ_ERRORS on failure."""
+    entries = ldap_search(conn, dn, "(objectClass=*)", ldap3.BASE, attrs, what=what)
+    return entries[0] if entries else None
+
+
+def _read_int_attribute(conn, dn, attr, what):
+    """[v0.6.0] Single integer attribute of one object; None when the
+    object or attribute is absent or the read fails (logged)."""
+    try:
+        entry = _base_read(conn, dn, [attr], what)
+    except OPTIONAL_READ_ERRORS as exc:
+        log_warn(f"Could not read {what} (non-fatal): {describe_read_error(exc)}")
+        return None
+    if entry is None:
+        return None
+    values = _raw_values(entry.get("raw_attributes"), attr)
+    return _as_int(_decode(values[0])) if values else None
+
+
+def read_laps_attribute_guids(conn, config_nc):
+    """[v0.6.0] {lDAPDisplayName: schemaIDGUID} for every LAPS attribute
+    in this forest's schema, one search on the schema NC. The GUID string
+    is formatted exactly like acl_edge.object_type_guid (impacket's
+    bin_to_string(), lower-cased: the standard hyphenated form of the
+    little-endian GUID), so plugins can compare with =. None on error."""
+    schema_nc = f"CN=Schema,{config_nc}"
+    search_filter = "(|" + "".join(f"(lDAPDisplayName={name})" for name in LAPS_SCHEMA_ATTRS) + ")"
+    try:
+        entries = ldap_search(conn, schema_nc, search_filter, ldap3.LEVEL,
+                              ["lDAPDisplayName", "schemaIDGUID"], what="LAPS schema attributes")
+    except OPTIONAL_READ_ERRORS as exc:
+        log_warn(f"Could not read LAPS attribute GUIDs from the schema (non-fatal): {describe_read_error(exc)}")
+        return None
+    canonical = {name.lower(): name for name in LAPS_SCHEMA_ATTRS}
+    guids = {}
+    for entry in entries:
+        raw = entry.get("raw_attributes", {})
+        names = _raw_values(raw, "lDAPDisplayName")
+        guid_bytes = _raw_values(raw, "schemaIDGUID")
+        name = canonical.get(str(_decode(names[0])).lower()) if names else None
+        if name and guid_bytes and len(guid_bytes[0]) == 16:
+            guids[name] = bin_to_string(guid_bytes[0]).lower()
+    return dict(sorted(guids.items()))
+
+
+def read_authn_silos(conn, config_nc):
+    """[v0.6.0] (authn_silos, authn_policy_count) for plugin 4036.
+    Pre-2012 R2 schema (no silo attributes) or no container: ([], 0).
+    Read error: (None, None)."""
+    if not probe_schema_name(conn, config_nc, "msDS-AuthNPolicySiloMembers"):
+        return [], 0
+    base = f"CN=AuthN Policy Configuration,CN=Services,{config_nc}"
+    silo_attrs = ["cn", "distinguishedName", "msDS-AuthNPolicySiloEnforced",
+                  "msDS-AuthNPolicySiloMembers", "msDS-UserAuthNPolicy",
+                  "msDS-ComputerAuthNPolicy", "msDS-ServiceAuthNPolicy"]
+    try:
+        silo_entries = ldap_search(conn, f"CN=AuthN Silos,{base}", "(objectClass=msDS-AuthNPolicySilo)",
+                                   ldap3.SUBTREE, silo_attrs, what="authentication policy silos")
+        policy_entries = ldap_search(conn, f"CN=AuthN Policies,{base}", "(objectClass=msDS-AuthNPolicy)",
+                                     ldap3.SUBTREE, ["objectGUID"], what="authentication policies")
+    except OPTIONAL_READ_ERRORS as exc:
+        log_warn(f"Could not read authentication policy silos (non-fatal): {describe_read_error(exc)}")
+        return None, None
+
+    def first(raw, name):
+        values = _raw_values(raw, name)
+        return _decode(values[0]) if values else None
+
+    silos = []
+    for entry in silo_entries:
+        raw = entry.get("raw_attributes", {})
+        silos.append({
+            "name": first(raw, "cn"),
+            "dn": entry.get("dn") or first(raw, "distinguishedName"),
+            "enforced": _as_bool_or_none(first(raw, "msDS-AuthNPolicySiloEnforced")),
+            "member_dns": sorted(_decode(v) for v in _raw_values(raw, "msDS-AuthNPolicySiloMembers")),
+            "user_policy_dn": first(raw, "msDS-UserAuthNPolicy"),
+            "computer_policy_dn": first(raw, "msDS-ComputerAuthNPolicy"),
+            "service_policy_dn": first(raw, "msDS-ServiceAuthNPolicy"),
+        })
+    silos.sort(key=lambda silo: (str(silo["dn"]).lower(), str(silo["name"])))
+    return silos, len(policy_entries)
+
+
+def collect_domain_extra_settings(conn, base_dn, config_nc, forest_root_dn):
+    """[v0.6.0] Forest/domain-level facts that live outside the domain
+    object, for ad_domain (schema v38). Folded into the domain's derived
+    settings (DERIVED_DOMAIN_SETTINGS_KEY) so any change versions the
+    domain. Every value is deterministic (sorted lists, sorted dict) so
+    an unchanged forest never produces a new version; a failed read is
+    None (logged)."""
+    settings = {"forest_root_dn": forest_root_dn}
+
+    recycle_bin = None
+    try:
+        entry = _base_read(conn, f"CN=Partitions,{config_nc}", ["msDS-EnabledFeature"],
+                           "optional features on CN=Partitions")
+        if entry is not None:
+            features = [str(_decode(v)).lower()
+                        for v in _raw_values(entry.get("raw_attributes"), "msDS-EnabledFeature")]
+            recycle_bin = any(f.startswith("cn=recycle bin feature,") for f in features)
+    except OPTIONAL_READ_ERRORS as exc:
+        log_warn(f"Could not read the Recycle Bin feature state (non-fatal): {describe_read_error(exc)}")
+    settings["recycle_bin_enabled"] = recycle_bin
+
+    settings["schema_object_version"] = _read_int_attribute(
+        conn, f"CN=Schema,{config_nc}", "objectVersion", "the schema version (objectVersion)")
+    settings["forest_updates_revision"] = _read_int_attribute(
+        conn, f"CN=ActiveDirectoryUpdate,CN=ForestUpdates,{config_nc}", "revision",
+        "the forest updates revision")
+    settings["domain_updates_revision"] = _read_int_attribute(
+        conn, f"CN=ActiveDirectoryUpdate,CN=DomainUpdates,CN=System,{base_dn}", "revision",
+        "the domain updates revision")
+    settings["laps_attribute_guids"] = read_laps_attribute_guids(conn, config_nc)
+    settings["authn_silos"], settings["authn_policy_count"] = read_authn_silos(conn, config_nc)
+    return settings
+
+
+def _repl_meta_time(value):
+    """ftimeLastOriginatingChange ("2024-05-01T12:00:00Z") -> datetime."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def backup_status_from_metadata(metadata_values):
+    """[v0.6.0] (read_status, last_backup_at) from an NC head's
+    msDS-ReplAttributeMetaData values. Every backup through the Windows
+    backup API writes dSASignature; dwVersion 1 is its creation-time
+    write only, i.e. never backed up. No values at all = unreadable (the
+    attribute is constructed and always present when readable)."""
+    if not metadata_values:
+        return "unreadable", None
+    parsed = parse_repl_attr_meta_data([_decode(v) for v in metadata_values])
+    if parsed is None:
+        return "unreadable", None
+    for item in parsed:
+        if (item.get("attributeName") or "").lower() == "dsasignature":
+            if _as_int(item.get("version")) in (None, 0, 1):
+                return "never_backed_up", None
+            when = _repl_meta_time(item.get("lastOriginatingChangeTime"))
+            return ("ok", when) if when else ("unreadable", None)
+    return "never_backed_up", None
+
+
+def collect_backup_status(conn, pg_cur, client_id, run_id, run_timestamp, naming_contexts):
+    """[v0.6.0] ad_backup_status (plugin 4032): one row per naming
+    context, overwritten every run (it changes with every backup, so
+    versioning it would only add noise). An NC that doesn't exist on
+    this DC (e.g. no DNS application partitions) gets no row, and rows
+    for NCs not seen this run are removed."""
+    seen = []
+    counts = {"ok": 0, "never_backed_up": 0, "unreadable": 0}
+    for nc in naming_contexts:
+        if not nc:
+            continue
+        try:
+            entry = _base_read(conn, nc, ["msDS-ReplAttributeMetaData"],
+                               f"replication metadata of {nc}")
+            if entry is None:
+                continue
+            values = _raw_ranged_values(conn, nc, entry.get("raw_attributes"),
+                                        "msDS-ReplAttributeMetaData")
+            status, last_backup_at = backup_status_from_metadata(values)
+        except OPTIONAL_READ_ERRORS as exc:
+            log_warn(f"Could not read backup status of {nc} (non-fatal): {describe_read_error(exc)}")
+            status, last_backup_at = "unreadable", None
+        seen.append(nc)
+        counts[status] += 1
+        pg_cur.execute(
+            """
+            INSERT INTO ad_backup_status
+                (client_id, naming_context, last_backup_at, read_status, run_id, collected_at)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (client_id, naming_context) DO UPDATE
+               SET last_backup_at = EXCLUDED.last_backup_at,
+                   read_status = EXCLUDED.read_status,
+                   run_id = EXCLUDED.run_id,
+                   collected_at = EXCLUDED.collected_at;
+            """,
+            (client_id, nc, last_backup_at, status, run_id, run_timestamp),
+        )
+    pg_cur.execute(
+        "DELETE FROM ad_backup_status WHERE client_id = %s AND NOT (naming_context = ANY(%s))",
+        (client_id, seen),
+    )
+    log_success(f"Backup status: {len(seen)} naming context(s) -- {counts['ok']} backed up, "
+                f"{counts['never_backed_up']} never backed up, {counts['unreadable']} unreadable")
+
+
+def read_dns_zone_settings(conn, zones_container, page_size):
+    """[v0.6.0] {zone DN (lower-case): {allow_update, has_wildcard_record,
+    has_wpad_record}} for every zone under zones_container, read BEFORE
+    the zones are collected so the values can be folded into each zone's
+    attributes_full (DNS_ZONE_SETTINGS_KEY) and version it.
+    dNSProperty comes from raw_attributes -- see dns_zone_typed_columns()
+    for why it must never go through normalize_value(). Wildcard/WPAD:
+    one one-level search per zone returning name only; None when that
+    search failed, False when it ran and found nothing. Returns {} (every
+    value unknown) if the zone enumeration itself fails."""
+    settings = {}
+    try:
+        for zone_dn, _attrs, raw in ldap_paged_search(
+                conn, zones_container, DNS_ZONE_FILTER, ["dNSProperty"], page_size):
+            zone_settings = {
+                "allow_update": parse_dns_zone_allow_update(_raw_values(raw, "dNSProperty")),
+                "has_wildcard_record": None,
+                "has_wpad_record": None,
+            }
+            try:
+                nodes = ldap_search(conn, zone_dn, DNS_WILDCARD_WPAD_FILTER, ldap3.LEVEL, ["name"],
+                                    what=f"wildcard/WPAD records in {zone_dn}")
+                names = set()
+                for node in nodes:
+                    names.update(str(_decode(v)).lower()
+                                 for v in _raw_values(node.get("raw_attributes"), "name"))
+                zone_settings["has_wildcard_record"] = "*" in names
+                zone_settings["has_wpad_record"] = "wpad" in names
+            except OPTIONAL_READ_ERRORS as exc:
+                log_warn(f"Could not search {zone_dn} for wildcard/WPAD records (non-fatal): {describe_read_error(exc)}")
+            settings[zone_dn.lower()] = zone_settings
+    except OPTIONAL_READ_ERRORS as exc:
+        log_warn(f"Could not read DNS zone settings under {zones_container} (non-fatal): {describe_read_error(exc)}")
+        return {}
+    return settings
+
+
+def collect_dns_zone_partition(conn, pg_cur, client_id, run_id, dc_host, zones_container,
+                               label, page_size, dn_to_guid, stats, run_timestamp,
+                               acl_desired, acl_unreadable):
+    """[v0.6.0] One DNS application partition's zones: settings pre-read,
+    collection (settings folded into attributes_full), deletion check for
+    this container only, and each zone's ACL into acl_desired. Returns
+    the collected entries ([] when the partition isn't there)."""
+    zone_settings = read_dns_zone_settings(conn, zones_container, page_size)
+    unknown = {"allow_update": None, "has_wildcard_record": None, "has_wpad_record": None}
+    entries = collect_object_class(
+        conn, pg_cur, client_id, run_id, dc_host, zones_container,
+        DNS_ZONE_FILTER, DNS_ZONE_ATTRS, page_size, label, "ad_dns_zone",
+        dns_zone_typed_columns, dn_to_guid, stats, run_timestamp,
+        extra_attributes_for=lambda dn: {
+            DNS_ZONE_SETTINGS_KEY: zone_settings.get(dn.lower(), unknown)},
+    )
+    reconcile_absent_objects(conn, pg_cur, client_id, run_id, dc_host, "ad_dns_zone",
+                             zones_container, entries, label, stats, run_timestamp)
+    failures = object_acl_reads(conn, pg_cur, client_id, entries, acl_desired, acl_unreadable)
+    with_wpad = sum(1 for s in zone_settings.values() if s.get("has_wpad_record"))
+    with_wildcard = sum(1 for s in zone_settings.values() if s.get("has_wildcard_record"))
+    log_success(f"{label}: {len(entries)} zone(s), {with_wildcard} with a wildcard record, "
+                f"{with_wpad} with a WPAD record, {failures} ACL read failure(s)")
+    return entries
+
+
+def update_adfs_key_readability(conn, pg_cur, client_id, adfs_container, entries, page_size):
+    """[v0.6.0] ad_adfs_dkm_object.key_readable_by_collector: TRUE for key
+    objects (contacts) the collection account matched with a presence
+    filter on thumbnailPhoto -- i.e. it could read the DKM key -- FALSE
+    for the other key objects, NULL for non-key objects. Only objectGUID
+    is requested; thumbnailPhoto itself is never read. A failed search
+    leaves every key object NULL (unknown)."""
+    readable = None
+    try:
+        readable = set()
+        for _dn, _attrs, raw in ldap_paged_search(conn, adfs_container, ADFS_DKM_KEY_READABLE_FILTER,
+                                                 ["objectGUID"], page_size):
+            raw_guid = raw.get("objectGUID")
+            if raw_guid:
+                readable.add(guid_bytes_to_str(raw_guid[0]))
+    except OPTIONAL_READ_ERRORS as exc:
+        log_warn(f"Could not check AD FS DKM key readability (non-fatal): {describe_read_error(exc)}")
+        readable = None
+    guids = sorted(guid for guid, _ in entries)
+    pg_cur.execute(
+        "UPDATE ad_adfs_dkm_object SET key_readable_by_collector = "
+        "  CASE WHEN NOT is_key_object THEN NULL "
+        "       WHEN %s THEN NULL "
+        "       ELSE object_guid = ANY(%s::uuid[]) END "
+        "WHERE client_id = %s AND valid_to IS NULL AND object_guid = ANY(%s::uuid[])",
+        (readable is None, sorted(readable or []), client_id, guids),
+    )
+    return None if readable is None else len(readable)
 
 
 def parse_args():
@@ -4064,11 +5020,35 @@ def main():
         ]))
         log_info(f"LAPS schema detected: {laps_detected or 'none (LAPS schema extension not present on this forest)'}")
 
+        # [v0.6.0] Optional attributes (schema extensions / newer schema
+        # versions) probed the same way before they're requested. The
+        # cleartext-password attributes are requested only to learn
+        # whether they're populated -- see CLEARTEXT_PASSWORD_ATTRS.
+        config_nc = rootdse["config_nc"]
+        cleartext_attrs = [a for a in CLEARTEXT_PASSWORD_ATTRS
+                           if probe_schema_name(ldap_conn, config_nc, a)]
+        user_attrs = list(USER_ATTRS) + cleartext_attrs + [
+            a for a in USER_OPTIONAL_ATTRS if probe_schema_name(ldap_conn, config_nc, a)]
+        computer_attrs += cleartext_attrs + [
+            a for a in COMPUTER_OPTIONAL_ATTRS if probe_schema_name(ldap_conn, config_nc, a)]
+        domain_attrs = list(DOMAIN_ATTRS)
+        if probe_schema_name(ldap_conn, config_nc, SMARTCARD_HASH_ROLLING_ATTR):
+            domain_attrs.append(SMARTCARD_HASH_ROLLING_ATTR)
+        enrollment_service_attrs = list(ENROLLMENT_SERVICE_ATTRS)
+        if probe_schema_name(ldap_conn, config_nc, ENROLLMENT_SERVERS_ATTR):
+            enrollment_service_attrs.append(ENROLLMENT_SERVERS_ATTR)
+        optional_present = (cleartext_attrs
+                            + [a for a in user_attrs + computer_attrs if a in USER_OPTIONAL_ATTRS + COMPUTER_OPTIONAL_ATTRS]
+                            + [a for a in (SMARTCARD_HASH_ROLLING_ATTR, ENROLLMENT_SERVERS_ATTR)
+                               if a in domain_attrs + enrollment_service_attrs])
+        log_info(f"Optional 0.6.0 attributes present in the schema: "
+                 f"{', '.join(dict.fromkeys(optional_present)) or 'none'}")
+
         with pg_conn.cursor() as cur:
             user_filter = "(&(objectClass=user)(objectCategory=person))"
             users = collect_object_class(
                 ldap_conn, cur, client_id, run_id, args.dc_host, base_dn,
-                user_filter, USER_ATTRS, args.page_size, "users",
+                user_filter, user_attrs, args.page_size, "users",
                 "ad_user", user_typed_columns, dn_to_guid, stats, run_timestamp,
             )
 
@@ -4078,6 +5058,12 @@ def main():
                 "computers", "ad_computer", computer_typed_columns,
                 dn_to_guid, stats, run_timestamp,
             )
+            msa_counts = update_managed_service_account_flags(
+                ldap_conn, cur, client_id, base_dn, config_nc, args.page_size)
+            log_success("Managed service accounts: "
+                        + ", ".join(f"{col.replace('is_', '')}: "
+                                    f"{'unknown' if n is None else n}"
+                                    for col, n in msa_counts.items()))
 
             groups = collect_object_class(
                 ldap_conn, cur, client_id, run_id, args.dc_host, base_dn,
@@ -4127,6 +5113,44 @@ def main():
             except LDAPException as exc:
                 log_warn(f"Could not read DFSR-GlobalSettings (non-fatal): {exc}")
 
+            # [v0.6.0] KDS root keys (plugin 4034). Collected before the
+            # domain object because their count is one of the domain's
+            # derived settings; their ACLs are read later, with the other
+            # ACLs, before the single acl_edge sync. A low-privileged
+            # collection account may not be able to see the key objects
+            # at all (they are normally readable by Domain Admins /
+            # Enterprise Admins / DCs only), so kds_root_key_count = 0
+            # means "none visible to the collector", not necessarily
+            # "none exist". Pre-2012 schema (no KDS classes): 0.
+            kds_container = (f"CN=Master Root Keys,CN=Group Key Distribution Service,"
+                             f"CN=Services,{config_nc}")
+            kds_entries = []
+            kds_root_key_count = None
+            if probe_schema_name(ldap_conn, config_nc, "msKds-UseStartTime"):
+                try:
+                    kds_entries = collect_object_class(
+                        ldap_conn, cur, client_id, run_id, args.dc_host, kds_container,
+                        KDS_ROOT_KEY_FILTER, KDS_ROOT_KEY_ATTRS, args.page_size,
+                        "KDS root keys", "ad_kds_root_key", kds_root_key_typed_columns,
+                        dn_to_guid, stats, run_timestamp,
+                    )
+                    reconcile_absent_objects(
+                        ldap_conn, cur, client_id, run_id, args.dc_host, "ad_kds_root_key",
+                        kds_container, kds_entries, "KDS root keys", stats, run_timestamp,
+                    )
+                    kds_root_key_count = len(kds_entries)
+                except OPTIONAL_READ_ERRORS as exc:
+                    log_warn(f"KDS root key collection failed (non-fatal): {describe_read_error(exc)}")
+                    kds_entries = []
+            else:
+                kds_root_key_count = 0
+
+            # [v0.6.0] Forest/domain facts stored on ad_domain (schema v38),
+            # versioned with the domain object through its derived settings.
+            domain_extra_settings = collect_domain_extra_settings(
+                ldap_conn, base_dn, config_nc, rootdse.get("forest_root_dn"))
+            domain_extra_settings["kds_root_key_count"] = kds_root_key_count
+
             # [v0.5.14] Every input to ad_domain's typed columns that is
             # NOT an attribute of the domain object itself (dSHeuristics
             # and tombstone lifetime live on CN=Directory Service in the
@@ -4151,16 +5175,19 @@ def main():
                 "spn_mappings": ds_extra["spn_mappings"],
                 "laps_schema_present": bool(laps_legacy_present or laps_modern_present),
                 "dfsr_migration_flags": dfsr_migration_flags,
+                # [v0.6.0] Expect one "modified" domain version on the first
+                # 0.6.0 run: these keys are new.
+                **domain_extra_settings,
             }
             domain_entries = collect_object_class(
                 ldap_conn, cur, client_id, run_id, args.dc_host, base_dn,
-                "(objectClass=domain)", DOMAIN_ATTRS, args.page_size,
+                "(objectClass=domain)", domain_attrs, args.page_size,
                 "domain", "ad_domain",
                 lambda full: domain_typed_columns(
                     full, rootdse.get("domain_functionality"), tombstone_lifetime,
                     tombstone_lifetime_is_default, laps_legacy_present or laps_modern_present,
                     dsheuristics_anonymous_access, dfsr_migration_flags,
-                    dsheuristics_uniqueness, ds_extra,
+                    dsheuristics_uniqueness, ds_extra, domain_extra_settings,
                 ),
                 dn_to_guid, stats, run_timestamp,
                 extra_attributes={DERIVED_DOMAIN_SETTINGS_KEY: derived_domain_settings},
@@ -4212,14 +5239,11 @@ def main():
             domain_root_guid = dn_to_guid.get(base_dn.lower())
             if domain_root_guid:
                 raw_domain_sd = get_object_security_descriptor(ldap_conn, base_dn)
-                _, domain_owner_sid = build_acl_desired_edges(
+                _, domain_owner_sid, domain_sd_control = build_acl_desired_edges(
                     domain_root_guid, raw_domain_sd, "domain root", acl_desired, acl_unreadable,
                 )
-                if domain_owner_sid:
-                    cur.execute(
-                        "UPDATE directory_object SET owner_sid = %s WHERE object_guid = %s AND client_id = %s",
-                        (domain_owner_sid, domain_root_guid, client_id),
-                    )
+                store_owner_and_sd_control(cur, client_id, domain_root_guid,
+                                           domain_owner_sid, domain_sd_control)
             else:
                 log_warn("Domain root object_guid not resolved -- skipping its ACL collection.")
 
@@ -4235,17 +5259,13 @@ def main():
                 if not ou_dn:
                     continue
                 raw_ou_sd = get_object_security_descriptor(ldap_conn, ou_dn)
-                ok, ou_owner_sid = build_acl_desired_edges(
+                ok, ou_owner_sid, ou_sd_control = build_acl_desired_edges(
                     ou_guid, raw_ou_sd, ou_dn, acl_desired, acl_unreadable,
                 )
                 if not ok:
                     ou_acl_read_failures += 1
                     continue
-                if ou_owner_sid:
-                    cur.execute(
-                        "UPDATE directory_object SET owner_sid = %s WHERE object_guid = %s AND client_id = %s",
-                        (ou_owner_sid, ou_guid, client_id),
-                    )
+                store_owner_and_sd_control(cur, client_id, ou_guid, ou_owner_sid, ou_sd_control)
 
             # [v0.5.5] Domain controller computer-object ownership. Not
             # part of the bulk computer collection (COMPUTER_ATTRS
@@ -4270,17 +5290,13 @@ def main():
                     continue
                 raw_dc_sd = get_object_security_descriptor(ldap_conn, comp_dn)
                 _scratch_edges = {}
-                ok, dc_owner_sid = build_acl_desired_edges(
+                ok, dc_owner_sid, dc_sd_control = build_acl_desired_edges(
                     comp_guid, raw_dc_sd, comp_dn, _scratch_edges,
                 )
                 if not ok:
                     dc_owner_read_failures += 1
                     continue
-                if dc_owner_sid:
-                    cur.execute(
-                        "UPDATE directory_object SET owner_sid = %s WHERE object_guid = %s AND client_id = %s",
-                        (dc_owner_sid, comp_guid, client_id),
-                    )
+                store_owner_and_sd_control(cur, client_id, comp_guid, dc_owner_sid, dc_sd_control)
             log_success(f"DC computer object ownership: scanned, "
                         f"{dc_owner_read_failures} read failure(s)")
 
@@ -4298,16 +5314,13 @@ def main():
                 obj_dn = obj_full.get("distinguishedName")
                 if not obj_dn:
                     continue
-                owner_sid, _ = parse_security_descriptor(
+                owner_sid, _, obj_sd_control = parse_security_descriptor(
                     get_object_security_descriptor(ldap_conn, obj_dn))
                 if owner_sid is None:
                     protected_owner_failures += 1
                     continue
                 protected_owner_reads += 1
-                cur.execute(
-                    "UPDATE directory_object SET owner_sid = %s WHERE object_guid = %s AND client_id = %s",
-                    (owner_sid, obj_guid, client_id),
-                )
+                store_owner_and_sd_control(cur, client_id, obj_guid, owner_sid, obj_sd_control)
             log_success(f"Protected (adminCount=1) object ownership: {protected_owner_reads} read, "
                         f"{protected_owner_failures} read failure(s)")
 
@@ -4340,6 +5353,9 @@ def main():
                                       spn_to_guid, stats, run_timestamp,
                                       spn_mappings=ds_extra["spn_mappings"])
             resolve_gmsa_password_readers(cur, client_id, run_id, computers, stats, run_timestamp)
+            # [v0.6.0] Needs users, computers and groups in dn_to_guid.
+            collect_rodc_prp_edges(ldap_conn, cur, client_id, run_id, computers, dn_to_guid,
+                                   stats, run_timestamp)
 
             # --- v0.1.0: trusts, GPOs, FGPP, ADCS templates -----------------
             # Each wrapped independently: none of these containers is
@@ -4359,14 +5375,22 @@ def main():
             except LDAPException as exc:
                 log_warn(f"Trust collection failed (non-fatal): {exc}")
 
+            gpo_entries = []
             try:
-                collect_object_class(
+                gpo_entries = collect_object_class(
                     ldap_conn, cur, client_id, run_id, args.dc_host, base_dn,
                     GPO_FILTER, GPO_ATTRS, args.page_size, "GPOs",
                     "ad_gpo", gpo_typed_columns, dn_to_guid, stats, run_timestamp,
                 )
             except LDAPException as exc:
                 log_warn(f"GPO collection failed (non-fatal): {exc}")
+            # [v0.6.0] GPO security descriptors (plugin 5012: who can edit a
+            # GPO controls every computer/user it applies to). Read here,
+            # before the single acl_edge sync further down.
+            gpo_acl_read_failures = object_acl_reads(
+                ldap_conn, cur, client_id, gpo_entries, acl_desired, acl_unreadable)
+            log_success(f"GPO ACLs: {len(gpo_entries)} GPO(s) scanned, "
+                        f"{gpo_acl_read_failures} read failure(s)")
 
             # [v0.5.0] Must run after GPO collection, not before -- gPLink
             # entries reference GPO container DNs, and dn_to_guid only
@@ -4435,7 +5459,7 @@ def main():
                 )
                 ca_entries = collect_object_class(
                     ldap_conn, cur, client_id, run_id, args.dc_host, enrollment_service_container,
-                    ENROLLMENT_SERVICE_FILTER, ENROLLMENT_SERVICE_ATTRS, args.page_size,
+                    ENROLLMENT_SERVICE_FILTER, enrollment_service_attrs, args.page_size,
                     "enrollment services", "ad_enrollment_service",
                     enrollment_service_typed_columns, dn_to_guid, stats, run_timestamp,
                 )
@@ -4517,9 +5541,12 @@ def main():
                 ntauth_guid = dn_to_guid.get(ntauth_dn.lower())
                 if ntauth_guid:
                     raw_ntauth_sd = get_object_security_descriptor(ldap_conn, ntauth_dn)
-                    build_acl_desired_edges(
+                    _, ntauth_owner_sid, ntauth_sd_control = build_acl_desired_edges(
                         ntauth_guid, raw_ntauth_sd, "NTAuthCertificates", acl_desired, acl_unreadable,
                     )
+                    # [v0.6.0] Owner was discarded here before; stored now with sd_control.
+                    store_owner_and_sd_control(cur, client_id, ntauth_guid,
+                                               ntauth_owner_sid, ntauth_sd_control)
 
                 # ESC4: each individual certificate template's own ACL.
                 cert_template_acl_failures = 0
@@ -4528,15 +5555,12 @@ def main():
                     if not template_dn:
                         continue
                     raw_template_sd = get_object_security_descriptor(ldap_conn, template_dn)
-                    ok, template_owner_sid = build_acl_desired_edges(
+                    ok, template_owner_sid, template_sd_control = build_acl_desired_edges(
                         template_guid, raw_template_sd, template_dn, acl_desired, acl_unreadable,
                     )
-                    if template_owner_sid:
-                        # [v0.5.15] Owner kept, not discarded (plugins 6006/6008 owner checks).
-                        cur.execute(
-                            "UPDATE directory_object SET owner_sid = %s WHERE object_guid = %s AND client_id = %s",
-                            (template_owner_sid, template_guid, client_id),
-                        )
+                    # [v0.5.15] Owner kept, not discarded (plugins 6006/6008 owner checks).
+                    store_owner_and_sd_control(cur, client_id, template_guid,
+                                               template_owner_sid, template_sd_control)
                     if not ok:
                         cert_template_acl_failures += 1
 
@@ -4554,14 +5578,10 @@ def main():
                     ca_dn = ca_full.get("distinguishedName")
                     if ca_dn:
                         raw_ca_sd = get_object_security_descriptor(ldap_conn, ca_dn)
-                        ok, ca_owner_sid = build_acl_desired_edges(ca_guid, raw_ca_sd, ca_dn, acl_desired,
-                                                                   acl_unreadable)
-                        if ca_owner_sid:
-                            # [v0.5.15] Owner kept, not discarded (plugins 6006/6008 owner checks).
-                            cur.execute(
-                                "UPDATE directory_object SET owner_sid = %s WHERE object_guid = %s AND client_id = %s",
-                                (ca_owner_sid, ca_guid, client_id),
-                            )
+                        ok, ca_owner_sid, ca_sd_control = build_acl_desired_edges(
+                            ca_guid, raw_ca_sd, ca_dn, acl_desired, acl_unreadable)
+                        # [v0.5.15] Owner kept, not discarded (plugins 6006/6008 owner checks).
+                        store_owner_and_sd_control(cur, client_id, ca_guid, ca_owner_sid, ca_sd_control)
                         if not ok:
                             ca_acl_failures += 1
 
@@ -4575,10 +5595,12 @@ def main():
                         )
                         if computer_dn:
                             raw_ca_computer_sd = get_object_security_descriptor(ldap_conn, computer_dn)
-                            build_acl_desired_edges(
+                            _, cac_owner_sid, cac_sd_control = build_acl_desired_edges(
                                 ca_computer_guid, raw_ca_computer_sd,
                                 f"CA computer object ({ca_hostname})", acl_desired, acl_unreadable,
                             )
+                            store_owner_and_sd_control(cur, client_id, ca_computer_guid,
+                                                       cac_owner_sid, cac_sd_control)
 
                 log_success(
                     f"ADCS ACLs: {len(cert_template_entries)} template(s) scanned "
@@ -4590,6 +5612,88 @@ def main():
                 )
             except LDAPException as exc:
                 log_warn(f"Certificate template/enrollment service collection failed (non-fatal): {exc}")
+
+            # [v0.6.0] KDS root key, AD FS DKM, PKI certificate store and
+            # DNS zone collection -- all before the acl_edge sync, because
+            # their ACLs go into the same single acl_desired dict.
+            kds_acl_failures = 0
+            if kds_entries:
+                collect_well_known_container_acl(
+                    ldap_conn, cur, client_id, run_id, kds_container,
+                    "KDS Master Root Keys container", run_timestamp, acl_desired, acl_unreadable,
+                )
+                kds_acl_failures = object_acl_reads(
+                    ldap_conn, cur, client_id, kds_entries, acl_desired, acl_unreadable)
+            log_success(f"KDS root keys: {kds_root_key_count if kds_root_key_count is not None else 'unknown'} "
+                        f"visible to the collector, {kds_acl_failures} ACL read failure(s)")
+
+            adfs_entries = []
+            adfs_container = f"CN=ADFS,CN=Microsoft,CN=Program Data,{base_dn}"
+            try:
+                if _base_read(ldap_conn, adfs_container, ["objectGUID"], "the AD FS container") is None:
+                    log_info("AD FS DKM: no CN=ADFS container (AD FS not deployed with a DKM "
+                             "in this domain) -- skipped.")
+                else:
+                    adfs_entries = collect_object_class(
+                        ldap_conn, cur, client_id, run_id, args.dc_host, adfs_container,
+                        ADFS_DKM_FILTER, ADFS_DKM_ATTRS, args.page_size, "AD FS DKM objects",
+                        "ad_adfs_dkm_object", adfs_dkm_typed_columns, dn_to_guid, stats,
+                        run_timestamp,
+                    )
+                    reconcile_absent_objects(
+                        ldap_conn, cur, client_id, run_id, args.dc_host, "ad_adfs_dkm_object",
+                        adfs_container, adfs_entries, "AD FS DKM objects", stats, run_timestamp,
+                    )
+                    readable = update_adfs_key_readability(
+                        ldap_conn, cur, client_id, adfs_container, adfs_entries, args.page_size)
+                    adfs_acl_failures = object_acl_reads(
+                        ldap_conn, cur, client_id, adfs_entries, acl_desired, acl_unreadable)
+                    key_objects = sum(1 for _, f in adfs_entries if adfs_dkm_typed_columns(f)["is_key_object"])
+                    log_success(f"AD FS DKM: {len(adfs_entries)} object(s), {key_objects} key object(s), "
+                                f"{'unknown' if readable is None else readable} key(s) readable by the "
+                                f"collection account, {adfs_acl_failures} ACL read failure(s)")
+            except OPTIONAL_READ_ERRORS as exc:
+                log_warn(f"AD FS DKM collection failed (non-fatal): {describe_read_error(exc)}")
+
+            for store, store_label, store_cn in (("root", "PKI root CA store", "Certification Authorities"),
+                                                 ("aia", "PKI AIA store", "AIA")):
+                store_container = f"CN={store_cn},CN=Public Key Services,CN=Services,{config_nc}"
+                try:
+                    store_entries = collect_object_class(
+                        ldap_conn, cur, client_id, run_id, args.dc_host, store_container,
+                        PKI_STORE_FILTER, PKI_STORE_ATTRS, args.page_size, store_label,
+                        "ad_pki_certificate_store",
+                        lambda full, _store=store: pki_certificate_store_typed_columns(full, _store),
+                        dn_to_guid, stats, run_timestamp,
+                    )
+                    reconcile_absent_objects(
+                        ldap_conn, cur, client_id, run_id, args.dc_host, "ad_pki_certificate_store",
+                        store_container, store_entries, store_label, stats, run_timestamp,
+                    )
+                except OPTIONAL_READ_ERRORS as exc:
+                    log_warn(f"{store_label} collection failed (non-fatal): {describe_read_error(exc)}")
+
+            # [v0.6.0] DNS zones moved here (from after the ACL sync) so their
+            # ACLs join the single acl_edge sync, and extended to the
+            # forest-wide ForestDnsZones partition. Each partition is
+            # reconciled separately. The zone settings (allow_update,
+            # wildcard/WPAD records) are now versioned with the zone --
+            # expect one "modified" version per zone on the first 0.6.0 run.
+            dns_zone_partitions = [(f"CN=MicrosoftDNS,DC=DomainDnsZones,{base_dn}", "DNS zones")]
+            if rootdse.get("forest_root_dn"):
+                dns_zone_partitions.append(
+                    (f"CN=MicrosoftDNS,DC=ForestDnsZones,{rootdse['forest_root_dn']}", "DNS zones (forest)"))
+            dns_zone_count = 0
+            for dns_zones_container, dns_label in dns_zone_partitions:
+                try:
+                    dns_zone_count += len(collect_dns_zone_partition(
+                        ldap_conn, cur, client_id, run_id, args.dc_host, dns_zones_container,
+                        dns_label, args.page_size, dn_to_guid, stats, run_timestamp,
+                        acl_desired, acl_unreadable,
+                    ))
+                except OPTIONAL_READ_ERRORS as exc:
+                    log_warn(f"{dns_label} collection failed (non-fatal, possibly no "
+                             f"AD-integrated DNS zones or no such partition): {exc}")
 
             # [v0.5.4] Moved here from right after the OU ACL loop -- see
             # the comment left in that spot for why. acl_desired now holds
@@ -4616,7 +5720,9 @@ def main():
             )
             log_success(f"ACLs: {acl_opened} edge(s) opened, {acl_closed} closed "
                         f"(domain root + AdminSDHolder + {len(ou_entries)} OU(s) + "
-                        f"ADCS objects, {ou_acl_read_failures} OU ACL read failure(s)"
+                        f"{len(gpo_entries)} GPO(s) + ADCS objects + {len(kds_entries)} KDS key(s) + "
+                        f"{len(adfs_entries)} AD FS object(s) + {dns_zone_count} DNS zone(s), "
+                        f"{ou_acl_read_failures} OU ACL read failure(s)"
                         + (f", {acl_inheritance_changed} with changed inheritance flags"
                            if acl_inheritance_changed else "") + ")")
 
@@ -4698,61 +5804,15 @@ def main():
             except LDAPException as exc:
                 log_warn(f"Certificate OID collection failed (non-fatal): {exc}")
 
-            try:
-                # [v0.5.6] Domain-scoped AD-integrated DNS zones live in
-                # their own application partition, not the domain NC or
-                # Configuration NC anything else here queries -- see
-                # DNS_ZONE_ATTRS's own comment for why this is
-                # deliberately scoped to domain-scoped zones only, not
-                # forest-scoped ones too.
-                dns_zones_container = f"CN=MicrosoftDNS,DC=DomainDnsZones,{base_dn}"
-                dns_zone_entries = collect_object_class(
-                    ldap_conn, cur, client_id, run_id, args.dc_host, dns_zones_container,
-                    DNS_ZONE_FILTER, DNS_ZONE_ATTRS, args.page_size,
-                    "DNS zones", "ad_dns_zone",
-                    dns_zone_typed_columns, dn_to_guid, stats, run_timestamp,
-                )
-                reconcile_absent_objects(
-                    ldap_conn, cur, client_id, run_id, args.dc_host, "ad_dns_zone",
-                    dns_zones_container, dns_zone_entries, "DNS zones", stats, run_timestamp,
-                )
-                # [v0.5.6] dNSProperty is read separately, per zone, via
-                # a targeted raw_attributes search -- NOT through the
-                # bulk collect_object_class() path above, which routes
-                # everything through normalize_value()'s generic
-                # bytes-handling. That path silently corrupts this
-                # specific attribute's packed binary structure (see
-                # dns_zone_typed_columns's own docstring for the
-                # mechanism, found via real testing, not assumed). Same
-                # small-object-count, targeted-read pattern already
-                # used for domain root/AdminSDHolder/DC ownership above.
-                dns_property_read_failures = 0
-                for zone_guid, zone_full in dns_zone_entries:
-                    zone_dn = zone_full.get("distinguishedName")
-                    if not zone_dn:
-                        continue
-                    try:
-                        zone_entries = ldap_search(ldap_conn, zone_dn, "(objectClass=*)", ldap3.BASE,
-                                                   ["dNSProperty"], what=f"dNSProperty of {zone_dn}")
-                        if not zone_entries:
-                            dns_property_read_failures += 1
-                            continue
-                        raw_props = zone_entries[0]["raw_attributes"].get("dNSProperty") or []
-                        allow_update = parse_dns_zone_allow_update(raw_props)
-                    except LDAPException as exc:
-                        log_warn(f"Could not read dNSProperty for {zone_dn}: {exc}")
-                        dns_property_read_failures += 1
-                        continue
-                    cur.execute(
-                        "UPDATE ad_dns_zone SET allow_update = %s "
-                        "WHERE object_guid = %s AND client_id = %s AND valid_to IS NULL",
-                        (allow_update, zone_guid, client_id),
-                    )
-                log_success(f"DNS zone dynamic-update settings: {len(dns_zone_entries)} zone(s), "
-                            f"{dns_property_read_failures} read failure(s)")
-            except LDAPException as exc:
-                log_warn(f"DNS zone collection failed (non-fatal, possibly no "
-                          f"AD-integrated DNS zones or no DomainDnsZones partition): {exc}")
+            # [v0.5.6] DNS zones used to be collected here; moved before the
+            # acl_edge sync in v0.6.0 (see collect_dns_zone_partition()).
+
+            # [v0.6.0] Last backup per naming context (plugin 4032).
+            backup_ncs = [base_dn, config_nc, f"CN=Schema,{config_nc}",
+                          f"DC=DomainDnsZones,{base_dn}"]
+            if rootdse.get("forest_root_dn"):
+                backup_ncs.append(f"DC=ForestDnsZones,{rootdse['forest_root_dn']}")
+            collect_backup_status(ldap_conn, cur, client_id, run_id, run_timestamp, backup_ncs)
 
             if run_type == "delta":
                 collect_deleted_objects(

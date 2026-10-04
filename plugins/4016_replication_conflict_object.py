@@ -44,7 +44,14 @@ PLUGIN = {
         "prevent recurrence."
     ),
     "control_id": "HYGIENE-401",
-    "framework_tags": [],
+    "framework_tags": [
+        "NIST-800-53-IA-2",
+        "NIST-800-53-IA-4",
+        "PCI-DSS-4.0-8.2.1",
+        "ISO-27001-2022-A.5.16",
+        "SOC2-CC6.1",
+        "HIPAA-164.312(a)(2)(i)",
+    ],
     "references": [
         {"title": "PingCastle: Replication rules -- S-Duplicate",
          "url": "https://pingcastle.com/PingCastleFiles/ad_hc_rules_list.html"},

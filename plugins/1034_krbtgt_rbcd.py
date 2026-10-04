@@ -57,7 +57,23 @@ PLUGIN = {
         "already exploited."
     ),
     "control_id": "ANOM-101",
-    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1098", "MITRE-ATTCK-T1003.006"],
+    "framework_tags": [
+        "NIST-800-53-AC-3",
+        "NIST-800-53-AC-6",
+        "NIST-800-53-AC-6(1)",
+        "NIST-CSF-2.0-PR.AA-05",
+        "PCI-DSS-4.0-7.2.1",
+        "PCI-DSS-4.0-7.2.2",
+        "CIS-CSC-8-6.8",
+        "CIS-CSC-8-3.3",
+        "ISO-27001-2022-A.5.15",
+        "ISO-27001-2022-A.8.3",
+        "SOC2-CC6.3",
+        "HIPAA-164.312(a)(1)",
+        "MITRE-ATTCK-T1003.006",
+        "MITRE-ATTCK-T1098",
+        "CISA-AA26-237A",
+    ],
     "references": [],
     "description": (
         "Resource-based constrained delegation lets a computer/service "

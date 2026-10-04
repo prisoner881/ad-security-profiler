@@ -49,7 +49,17 @@ PLUGIN = {
         "UPN-based mapping."
     ),
     "control_id": "ADCS-103",
-    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1649"],
+    "framework_tags": [
+        "NIST-800-53-SC-17",
+        "NIST-800-53-IA-5(2)",
+        "NIST-CSF-2.0-PR.DS-02",
+        "PCI-DSS-4.0-4.2.1.1",
+        "ISO-27001-2022-A.8.24",
+        "SOC2-CC6.1",
+        "MITRE-ATTCK-T1649",
+        "CVE-2022-26923",
+        "CISA-AA26-237A",
+    ],
     "references": [
         {"title": "Certipy Wiki: Privilege Escalation -- ESC9 (No Security Extension)",
          "url": "https://github.com/ly4k/Certipy/wiki/06-%E2%80%90-Privilege-Escalation"},

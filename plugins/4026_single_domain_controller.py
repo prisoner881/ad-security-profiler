@@ -50,7 +50,13 @@ PLUGIN = {
         "this as acceptable risk."
     ),
     "control_id": "STIG-V-243500",
-    "framework_tags": ["DISA-STIG"],
+    "framework_tags": [
+        "NIST-800-53-CP-10",
+        "NIST-CSF-2.0-PR.DS-11",
+        "ISO-27001-2022-A.8.13",
+        "SOC2-A1.2",
+        "DISA-STIG-V-243500",
+    ],
     "references": [
         {"title": "DISA Active Directory Domain STIG V3R7: V-243500",
          "url": "https://cyber.trackr.live/stig/Active_Directory_Domain/3/7#V-243500"},

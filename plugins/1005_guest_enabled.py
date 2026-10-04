@@ -21,7 +21,20 @@ PLUGIN = {
     'additional access is a separate finding worth investigating on its own.'
 ),
     "control_id": "PRIV-102",
-    "framework_tags": ["DISA-STIG"],
+    "framework_tags": [
+        "NIST-800-53-IA-2",
+        "NIST-800-53-IA-4",
+        "NIST-800-53-AC-2(9)",
+        "PCI-DSS-4.0-8.2.1",
+        "PCI-DSS-4.0-8.2.2",
+        "PCI-DSS-4.0-2.2.2",
+        "CIS-CSC-8-4.7",
+        "ISO-27001-2022-A.5.16",
+        "SOC2-CC6.1",
+        "HIPAA-164.312(a)(2)(i)",
+        "DISA-STIG",
+        "MITRE-ATTCK-T1078.001",
+    ],
     "references": [],
     "description": (
         "The built-in Guest account (RID 501) should always be disabled; "

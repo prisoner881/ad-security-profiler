@@ -35,7 +35,17 @@ PLUGIN = {
     'than left as an ordinary dormant user account.'
 ),
     "control_id": "LIFECYCLE-001",
-    "framework_tags": [],
+    "framework_tags": [
+        "NIST-800-53-AC-2(3)",
+        "NIST-800-53-AC-2",
+        "NIST-CSF-2.0-PR.AA-01",
+        "PCI-DSS-4.0-8.2.6",
+        "CIS-CSC-8-5.3",
+        "ISO-27001-2022-A.5.18",
+        "SOC2-CC6.2",
+        "HIPAA-164.308(a)(3)(ii)(C)",
+        "MITRE-ATTCK-T1078.002",
+    ],
     "references": [],
     "description": (
         "An enabled account with no recent authentication activity is "

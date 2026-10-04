@@ -28,7 +28,17 @@ PLUGIN = {
         "specifically still need coverage once this is addressed."
     ),
     "control_id": "POLICY-012",
-    "framework_tags": [],
+    "framework_tags": [
+        "NIST-800-53-IA-5",
+        "NIST-800-53-IA-5(1)",
+        "NIST-CSF-2.0-PR.AA-01",
+        "PCI-DSS-4.0-2.2.2",
+        "CIS-CSC-8-5.2",
+        "ISO-27001-2022-A.5.17",
+        "SOC2-CC6.1",
+        "HIPAA-164.308(a)(5)(ii)(D)",
+        "MITRE-ATTCK-T1550.002",
+    ],
     "references": [
         {"title": "Microsoft: Windows LAPS overview",
          "url": "https://learn.microsoft.com/en-us/windows-server/identity/laps/laps-overview"},

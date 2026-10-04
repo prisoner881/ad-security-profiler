@@ -53,7 +53,20 @@ PLUGIN = {
         "in a lab first and confirm no legitimate dependency exists."
     ),
     "control_id": "DOM-422",
-    "framework_tags": [],
+    "framework_tags": [
+        "NIST-800-53-CM-6",
+        "NIST-800-53-CM-7",
+        "NIST-800-53-CM-2",
+        "NIST-CSF-2.0-PR.PS-01",
+        "PCI-DSS-4.0-2.2.1",
+        "PCI-DSS-4.0-2.2.4",
+        "PCI-DSS-4.0-2.2.6",
+        "CIS-CSC-8-4.1",
+        "CIS-CSC-8-4.8",
+        "ISO-27001-2022-A.8.9",
+        "SOC2-CC7.1",
+        "HIPAA-164.312(c)(1)",
+    ],
     "references": [
         {"title": "PingCastle: Stale Objects rules -- S-JavaSchema",
          "url": "https://www.pingcastle.com/PingCastleFiles/ad_hc_rules_list.html"},

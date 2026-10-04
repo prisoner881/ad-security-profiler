@@ -41,7 +41,17 @@ PLUGIN = {
     'before the second reset.'
 ),
     "control_id": "CRED-004",
-    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1558.001"],
+    "framework_tags": [
+        "NIST-800-53-AC-2",
+        "NIST-800-53-IA-5",
+        "NIST-800-53-SC-12",
+        "PCI-DSS-4.0-8.6.3",
+        "ISO-27001-2022-A.5.17",
+        "ISO-27001-2022-A.8.24",
+        "SOC2-CC6.1",
+        "MITRE-ATTCK-T1558.001",
+        "CISA-AA26-237A",
+    ],
     "references": [
         {"title": "MITRE ATT&CK T1558.001: Steal or Forge Kerberos Tickets -- Golden Ticket",
          "url": "https://attack.mitre.org/techniques/T1558/001/"},

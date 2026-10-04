@@ -47,7 +47,17 @@ PLUGIN = {
         "accumulating indefinitely."
     ),
     "control_id": "HYBRID-005",
-    "framework_tags": [],
+    "framework_tags": [
+        "NIST-800-53-AC-2",
+        "NIST-800-53-IA-5",
+        "PCI-DSS-4.0-7.2.5",
+        "PCI-DSS-4.0-8.6.1",
+        "PCI-DSS-4.0-8.6.3",
+        "CIS-CSC-8-5.5",
+        "ISO-27001-2022-A.5.17",
+        "SOC2-CC6.1",
+        "MITRE-ATTCK-T1078.004",
+    ],
     "references": [
         {"title": "Microsoft: Best practices for Microsoft identity platform -- credentials",
          "url": "https://learn.microsoft.com/en-us/entra/identity-platform/security-best-practices-for-app-registration"},

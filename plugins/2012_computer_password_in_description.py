@@ -33,7 +33,19 @@ PLUGIN = {
         "gets documented once and copied elsewhere."
     ),
     "control_id": "CRED-106",
-    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1552.001"],
+    "framework_tags": [
+        "NIST-800-53-IA-5(1)",
+        "NIST-800-53-SC-28",
+        "NIST-CSF-2.0-PR.DS-01",
+        "PCI-DSS-4.0-8.3.2",
+        "PCI-DSS-4.0-8.6.2",
+        "CIS-CSC-8-3.11",
+        "ISO-27001-2022-A.5.17",
+        "SOC2-CC6.1",
+        "HIPAA-164.312(a)(2)(iv)",
+        "MITRE-ATTCK-T1552.001",
+        "CISA-AA26-237A",
+    ],
     "references": [],
     "description": (
         "The description and info (\"Notes\" in ADUC) attributes are free "

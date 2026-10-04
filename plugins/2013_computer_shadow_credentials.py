@@ -55,7 +55,13 @@ PLUGIN = {
         "attribute."
     ),
     "control_id": "CRED-107",
-    "framework_tags": ["MITRE-ATTCK-T1556"],
+    "framework_tags": [
+        "NIST-800-53-IA-5",
+        "NIST-CSF-2.0-PR.AA-01",
+        "ISO-27001-2022-A.5.17",
+        "SOC2-CC6.1",
+        "MITRE-ATTCK-T1556",
+    ],
     "references": [
         {"title": "MITRE ATT&CK T1556: Modify Authentication Process",
          "url": "https://attack.mitre.org/techniques/T1556/"},

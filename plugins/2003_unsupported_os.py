@@ -70,7 +70,20 @@ PLUGIN = {
         "planning now rather than waiting until the deadline."
     ),
     "control_id": "OS-001",
-    "framework_tags": [],
+    "framework_tags": [
+        "NIST-800-53-SI-2",
+        "NIST-800-53-RA-5",
+        "NIST-800-53-SA-22",
+        "NIST-CSF-2.0-ID.RA-01",
+        "NIST-CSF-2.0-PR.PS-02",
+        "PCI-DSS-4.0-6.3.3",
+        "PCI-DSS-4.0-12.3.4",
+        "CIS-CSC-8-2.2",
+        "CIS-CSC-8-7.3",
+        "ISO-27001-2022-A.8.8",
+        "SOC2-CC7.1",
+        "MITRE-ATTCK-T1210",
+    ],
     "references": [
         {"title": "Microsoft Lifecycle Policy",
          "url": "https://learn.microsoft.com/en-us/lifecycle/"},

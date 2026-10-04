@@ -61,7 +61,15 @@ PLUGIN = {
         "routine cleanup."
     ),
     "control_id": "ADCS-105",
-    "framework_tags": [],
+    "framework_tags": [
+        "NIST-800-53-SC-17",
+        "NIST-800-53-IA-5(2)",
+        "NIST-CSF-2.0-PR.DS-02",
+        "PCI-DSS-4.0-4.2.1.1",
+        "ISO-27001-2022-A.8.24",
+        "SOC2-CC6.1",
+        "MITRE-ATTCK-T1649",
+    ],
     "references": [
         {"title": "Microsoft: Import third-party certification authorities (CAs) into Enterprise NTAuth store",
          "url": "https://learn.microsoft.com/en-us/troubleshoot/windows-server/certificates-and-public-key-infrastructure-pki/import-third-party-ca-to-enterprise-ntauth-store"},

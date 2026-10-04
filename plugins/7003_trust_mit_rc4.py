@@ -44,7 +44,16 @@ PLUGIN = {
         "dependency and prioritize upgrading the realm."
     ),
     "control_id": "TRUST-103",
-    "framework_tags": [],
+    "framework_tags": [
+        "NIST-800-53-SC-13",
+        "NIST-CSF-2.0-PR.DS-02",
+        "PCI-DSS-4.0-12.3.3",
+        "CIS-CSC-8-3.10",
+        "ISO-27001-2022-A.8.24",
+        "SOC2-CC6.1",
+        "HIPAA-164.312(e)(1)",
+        "MITRE-ATTCK-T1558",
+    ],
     "references": [
         {"title": "Microsoft: [MS-ADTS] trustAttributes",
          "url": "https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-adts/e9a2d23c-c31e-4a6f-88a0-6646fdb51a3c"},

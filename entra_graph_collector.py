@@ -2,9 +2,28 @@
 """
 entra_graph_collector.py -- Microsoft Entra ID / Graph API Email Collector
 
-VERSION: 0.6.0
+VERSION: 0.7.0
 
 CHANGELOG:
+    0.7.0 - Requires schema v38. Active directory role rows now say how
+            the role is held (assignment_kind 'permanent', 'time_bound'
+            or 'activated', with assignment_start/assignment_end), from
+            roleAssignmentScheduleInstances; like eligibility this needs
+            Entra ID P2, and when Graph refuses it the kind stays NULL and
+            the reason goes to entra_security_posture.role_schedule_status.
+            The tenant authorization policy (user app registration and
+            consent, guest invitation/access settings, MSOnline PowerShell
+            block) is stored in entra_security_posture.authorization_policy
+            (status in authorization_policy_status; NULL when unreadable).
+            ca_policies now also keeps each policy's conditions and
+            session_controls (existing keys unchanged; grant_controls keeps
+            authenticationStrength trimmed to id/displayName/
+            allowedCombinations). Every (role, member, assignment type)
+            seen is upserted into entra_role_assignment_history
+            (first_seen_at kept, last_seen_at advanced, never deleted), so
+            newly granted privileged roles can be reported (plugin 11020).
+            No new Graph permissions: RoleManagement.Read.Directory and
+            Policy.Read.All already cover the new reads.
     0.6.0 - Requires schema v37. Directory role membership now includes
             PIM-eligible assignments (roleEligibilityScheduleInstances;
             assignment_type 'eligible') and the transitive members of
@@ -146,7 +165,7 @@ PG_DBNAME = "adprofiler"
 PG_USER = None
 PG_PASSWORD = None
 
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 
 # [v0.5.0] Retry policy shared by every Graph/token request (see
 # _send_with_retry()). 429 and transient 5xx responses, plus network
@@ -192,6 +211,15 @@ GRAPH_ROLE_ELIGIBILITY_URL = (
     "?$expand=principal,roleDefinition"
 )
 GRAPH_GROUPS_URL = "https://graph.microsoft.com/v1.0/groups"
+# [v0.7.0] Active role assignment schedule instances -- one per active
+# assignment, with assignmentType 'Assigned' (a standing assignment, with or
+# without an end date) or 'Activated' (a PIM-eligible principal's current
+# activation). Used only to classify the active rows already read from
+# /directoryRoles (assignment_kind). Same permission and licensing as
+# eligibility: RoleManagement.Read.Directory, Entra ID P2 / ID Governance.
+GRAPH_ROLE_ASSIGNMENT_SCHEDULE_URL = (
+    "https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignmentScheduleInstances"
+)
 # Fixed, immutable across every tenant -- confirmed against Microsoft's
 # own documentation and cross-checked against multiple independent
 # sources, not tenant-specific the way a role's own "id" is.
@@ -201,6 +229,20 @@ GLOBAL_ADMIN_ROLE_TEMPLATE_ID = "62e90394-69f5-4237-9190-012177145e10"
 # Policy.Read.All, a new permission alongside RoleManagement.Read.Directory.
 GRAPH_SECURITY_DEFAULTS_URL = "https://graph.microsoft.com/v1.0/policies/identitySecurityDefaultsEnforcementPolicy"
 GRAPH_CA_POLICIES_URL = "https://graph.microsoft.com/v1.0/identity/conditionalAccess/policies"
+# [v0.7.0] Tenant-wide authorization policy (who may register apps, consent
+# to apps, create tenants/groups, invite guests; guest user role; MSOnline
+# PowerShell block). Also Policy.Read.All. A single object in v1.0.
+GRAPH_AUTHORIZATION_POLICY_URL = "https://graph.microsoft.com/v1.0/policies/authorizationPolicy"
+# The fields stored in entra_security_posture.authorization_policy (the v38
+# column comment is the contract); anything Graph omits is stored as null.
+AUTHORIZATION_POLICY_FIELDS = (
+    "allowInvitesFrom", "guestUserRoleId", "allowedToSignUpEmailBasedSubscriptions",
+    "allowEmailVerifiedUsersToJoinOrganization", "blockMsolPowerShell",
+)
+AUTHORIZATION_POLICY_DEFAULT_USER_FIELDS = (
+    "allowedToCreateApps", "allowedToCreateSecurityGroups", "allowedToCreateTenants",
+    "allowedToReadOtherUsers", "permissionGrantPoliciesAssigned",
+)
 
 # [v0.3.0] Application registrations -- read via Application.Read.All, a
 # new permission. Scoped deliberately to client secret expiry only, not
@@ -653,6 +695,79 @@ def expand_group_role_members(graph, role_members):
     return expanded, status
 
 
+def fetch_role_assignment_schedules(graph):
+    """[v0.7.0] Active role assignment schedule instances, as a list of
+    {principal_id, role_definition_id, directory_scope_id, assignment_type,
+    start, end, member_type}. Returns (instances, status); instances is None
+    (not []) when they couldn't be read -- typically no Entra ID P2 --
+    so the caller leaves assignment_kind NULL rather than treating every
+    active row as unmatched."""
+    instances = []
+    url = GRAPH_ROLE_ASSIGNMENT_SCHEDULE_URL
+    while url:
+        body, status = graph_get_optional(graph, url, "active role assignment schedules")
+        if body is None:
+            log_warn(f"  Active role assignment schedules could not be read ({status}); "
+                     f"whether active role holders are permanent, time-bound or PIM "
+                     f"activations will not be recorded.")
+            return None, status
+        for inst in body.get("value", []):
+            if not inst.get("principalId") or not inst.get("roleDefinitionId"):
+                continue
+            instances.append({
+                "principal_id": inst["principalId"].lower(),
+                "role_definition_id": inst["roleDefinitionId"].lower(),
+                "directory_scope_id": inst.get("directoryScopeId") or "/",
+                "assignment_type": inst.get("assignmentType"),
+                "start": inst.get("startDateTime"),
+                "end": inst.get("endDateTime"),
+                "member_type": inst.get("memberType"),
+            })
+        url = body.get("@odata.nextLink")
+    log_info(f"  {len(instances)} active role assignment schedule instance(s) found")
+    return instances, "ok"
+
+
+# [v0.7.0] When one principal has more than one instance for the same role
+# and scope, the most durable kind wins (a standing assignment outlives a
+# temporary activation).
+_ASSIGNMENT_KIND_RANK = {"permanent": 0, "time_bound": 1, "activated": 2}
+
+
+def _assignment_kind(inst):
+    if (inst.get("assignment_type") or "").lower() == "activated":
+        return "activated"
+    return "permanent" if not inst.get("end") else "time_bound"
+
+
+def apply_assignment_kinds(role_members, instances):
+    """[v0.7.0] Sets assignment_kind/assignment_start/assignment_end on
+    every active entry from the schedule instance matching (principal,
+    role template, directory scope). Entries held through a group take the
+    kind of the group's own instance. Eligible entries, and active ones with
+    no matching instance, are left without a kind (stored as NULL). Returns
+    the number of active entries classified."""
+    best = {}
+    for inst in instances or []:
+        key = (inst["principal_id"], inst["role_definition_id"], inst["directory_scope_id"])
+        kind = _assignment_kind(inst)
+        current = best.get(key)
+        if current is None or _ASSIGNMENT_KIND_RANK[kind] < _ASSIGNMENT_KIND_RANK[current[0]]:
+            best[key] = (kind, inst.get("start"), inst.get("end"))
+    classified = 0
+    for rm in role_members:
+        if rm.get("assignment_type", "active") != "active":
+            continue
+        holder = (rm.get("via_group") or rm["member"]).get("id") or ""
+        template = rm["role"].get("roleTemplateId") or ""
+        key = (holder.lower(), template.lower(), rm.get("directory_scope_id", "/"))
+        match = best.get(key)
+        if match:
+            rm["assignment_kind"], rm["assignment_start"], rm["assignment_end"] = match
+            classified += 1
+    return classified
+
+
 def fetch_security_defaults(graph):
     """A single object, no pagination -- confirmed against Microsoft's
     own documentation, {"isEnabled": bool, "displayName": ..., "id": ...}."""
@@ -701,7 +816,38 @@ def fetch_conditional_access_policies(graph):
             "<tenant>'."
         ),
     )
-    return body.get("value", [])
+    policies = body.get("value", [])
+    # [v0.7.0] Follow @odata.nextLink if Graph ever sends one -- costs
+    # nothing when absent, and a truncated list would hide policies.
+    url = body.get("@odata.nextLink")
+    while url:
+        body = graph.get(url, "Conditional Access policies (next page)")
+        policies.extend(body.get("value", []))
+        url = body.get("@odata.nextLink")
+    return policies
+
+
+def fetch_authorization_policy(graph):
+    """[v0.7.0] GET /policies/authorizationPolicy (Policy.Read.All).
+    Returns (policy_dict, status): the fields named in
+    AUTHORIZATION_POLICY_FIELDS / AUTHORIZATION_POLICY_DEFAULT_USER_FIELDS
+    (missing ones as None), or (None, "<reason>") when Graph refused --
+    the run carries on either way."""
+    body, status = graph_get_optional(graph, GRAPH_AUTHORIZATION_POLICY_URL, "authorization policy")
+    if body is None:
+        log_warn(f"  Authorization policy could not be read ({status}); user consent / "
+                 f"app registration / guest settings will not be reported.")
+        return None, status
+    # v1.0 returns the single policy object; older responses wrapped it in a
+    # one-element "value" collection -- accept either.
+    if isinstance(body.get("value"), list):
+        body = body["value"][0] if body["value"] else {}
+    policy = {field: body.get(field) for field in AUTHORIZATION_POLICY_FIELDS}
+    defaults = body.get("defaultUserRolePermissions") or {}
+    policy["defaultUserRolePermissions"] = {
+        field: defaults.get(field) for field in AUTHORIZATION_POLICY_DEFAULT_USER_FIELDS
+    }
+    return policy, "ok"
 
 
 def fetch_applications(graph):
@@ -931,14 +1077,15 @@ def sync_entra_users(pg_conn, client_id, users):
     return len(users), matched
 
 
-def sync_directory_role_members(pg_conn, client_id, role_members):
+def sync_directory_role_members(pg_conn, client_id, role_members, collected_at=None):
     """Same whole-snapshot-replace pattern as sync_entra_users, same
     reasoning. A member can be a user, group, or service principal --
     @odata.type distinguishes them; only users carry
     onPremisesSecurityIdentifier at all, so on-prem correlation is
     naturally None for the other two rather than needing special-cased
-    logic to skip them."""
-    now = datetime.now(timezone.utc)
+    logic to skip them. [v0.7.0] Also writes assignment_kind/start/end
+    (set by apply_assignment_kinds(); NULL when not determined)."""
+    now = collected_at or datetime.now(timezone.utc)
     rows = []
 
     with pg_conn.cursor() as cur:
@@ -972,6 +1119,7 @@ def sync_directory_role_members(pg_conn, client_id, role_members):
                 on_prem_sid, member.get("accountEnabled"), now,
                 rm.get("assignment_type", "active"), via.get("id"), via.get("displayName"),
                 rm.get("directory_scope_id", "/"),
+                rm.get("assignment_kind"), rm.get("assignment_start"), rm.get("assignment_end"),
             ))
 
         cur.execute("DELETE FROM entra_directory_role_member WHERE client_id = %s;", (client_id,))
@@ -984,7 +1132,8 @@ def sync_directory_role_members(pg_conn, client_id, role_members):
                      member_id, member_type, member_display_name, member_upn,
                      on_prem_object_guid, on_premises_security_identifier,
                      account_enabled, collected_at,
-                     assignment_type, via_group_id, via_group_display_name, directory_scope_id)
+                     assignment_type, via_group_id, via_group_display_name, directory_scope_id,
+                     assignment_kind, assignment_start, assignment_end)
                 VALUES %s
                 """,
                 rows,
@@ -993,26 +1142,105 @@ def sync_directory_role_members(pg_conn, client_id, role_members):
     return len(rows)
 
 
+def sync_role_assignment_history(pg_conn, client_id, role_members, collected_at):
+    """[v0.7.0] Upserts one entra_role_assignment_history row per distinct
+    (role template, member, assignment type) in this run's role-member data
+    -- direct members, groups that hold a role, and the groups' members
+    alike. first_seen_at is set only when the row is new; last_seen_at and
+    the display fields are refreshed every run. Rows are never deleted, so
+    "first seen recently" means a newly granted assignment (plugin 11020).
+    Only called after role membership was read and stored successfully: an
+    aborted read never reaches here, so it can't make every assignment look
+    new (or old) on the next run."""
+    distinct = {}
+    for rm in role_members:
+        role, member = rm["role"], rm["member"]
+        if not role.get("roleTemplateId") or not member.get("id"):
+            continue
+        key = (role["roleTemplateId"].lower(), member["id"].lower(),
+               rm.get("assignment_type", "active"))
+        if key not in distinct:
+            distinct[key] = (client_id, key[0], role.get("displayName"), key[1],
+                             member.get("displayName"), member.get("userPrincipalName"),
+                             member.get("@odata.type"), key[2], collected_at, collected_at)
+    with pg_conn.cursor() as cur:
+        cur.execute("SET search_path TO ad_intel, public;")
+        if distinct:
+            psycopg2.extras.execute_values(
+                cur,
+                """
+                INSERT INTO entra_role_assignment_history
+                    (client_id, role_template_id, role_display_name, member_id,
+                     member_display_name, member_upn, member_type, assignment_type,
+                     first_seen_at, last_seen_at)
+                VALUES %s
+                ON CONFLICT (client_id, role_template_id, member_id, assignment_type) DO UPDATE SET
+                    last_seen_at = EXCLUDED.last_seen_at,
+                    role_display_name = COALESCE(EXCLUDED.role_display_name,
+                                                 entra_role_assignment_history.role_display_name),
+                    member_display_name = COALESCE(EXCLUDED.member_display_name,
+                                                   entra_role_assignment_history.member_display_name),
+                    member_upn = COALESCE(EXCLUDED.member_upn,
+                                          entra_role_assignment_history.member_upn),
+                    member_type = COALESCE(EXCLUDED.member_type,
+                                           entra_role_assignment_history.member_type)
+                """,
+                list(distinct.values()),
+            )
+    pg_conn.commit()
+    return len(distinct)
+
+
+def _strip_odata_annotations(value):
+    """[v0.7.0] Drops Graph's "@odata.*" / "x@odata.context" annotation keys
+    (response metadata, not policy content) from nested dicts/lists."""
+    if isinstance(value, dict):
+        return {k: _strip_odata_annotations(v) for k, v in value.items() if "@odata." not in k}
+    if isinstance(value, list):
+        return [_strip_odata_annotations(v) for v in value]
+    return value
+
+
+def _slim_ca_policy(p):
+    """[v0.7.0] One stored ca_policies element: id, display_name, state,
+    grant_controls (unchanged shape -- plugin 10004 reads builtInControls,
+    operator, authenticationStrength, customAuthenticationFactors), plus
+    conditions and session_controls as Graph returns them. Graph's own
+    timestamps (createdDateTime/modifiedDateTime) are left out so an
+    unchanged policy stores identically run to run."""
+    grant = _strip_odata_annotations(p.get("grantControls"))
+    if isinstance(grant, dict) and isinstance(grant.get("authenticationStrength"), dict):
+        strength = grant["authenticationStrength"]
+        grant["authenticationStrength"] = {
+            "id": strength.get("id"), "displayName": strength.get("displayName"),
+            "allowedCombinations": strength.get("allowedCombinations"),
+        }
+    return {
+        "id": p.get("id"), "display_name": p.get("displayName"), "state": p.get("state"),
+        "grant_controls": grant,
+        "conditions": _strip_odata_annotations(p.get("conditions")),
+        "session_controls": _strip_odata_annotations(p.get("sessionControls")),
+    }
+
+
 def sync_security_posture(pg_conn, client_id, security_defaults_enabled, ca_policies,
-                          role_eligibility_status=None, group_expansion_status=None):
+                          role_eligibility_status=None, group_expansion_status=None,
+                          authorization_policy=None, authorization_policy_status=None,
+                          role_schedule_status=None):
     """Combines both into one row per client, same snapshot-replace
     philosophy as entra_user -- these two facts are only ever meaningful
     together (see plugin 10004's own docstring for why), so storing them
     jointly avoids a join for what's fundamentally one finding's worth
-    of input. ca_policies stored as a JSONB array of the fields actually
-    needed (id, displayName, state, grantControls) rather than the full
-    Graph response -- full condition/application/location targeting is
-    out of scope for this pass (see GRAPH_CA_POLICIES_URL's own
-    reasoning); storing more than what's used risks implying a precision
-    this collector doesn't actually have."""
+    of input. ca_policies stored as a JSONB array of the fields plugins
+    use (see _slim_ca_policy()) rather than the full Graph response.
+    [v0.7.0] Each policy now also keeps its conditions (users,
+    applications, client app types, platforms, locations, risk levels...)
+    and session controls, so plugins can tell who and what a policy
+    actually covers. Also stores the authorization policy (NULL when it
+    couldn't be read) and the read status of it and of the active role
+    assignment schedules."""
     now = datetime.now(timezone.utc)
-    slim_policies = [
-        {
-            "id": p.get("id"), "display_name": p.get("displayName"), "state": p.get("state"),
-            "grant_controls": p.get("grantControls"),
-        }
-        for p in ca_policies
-    ]
+    slim_policies = [_slim_ca_policy(p) for p in ca_policies]
     with pg_conn.cursor() as cur:
         cur.execute("SET search_path TO ad_intel, public;")
         cur.execute("DELETE FROM entra_security_posture WHERE client_id = %s;", (client_id,))
@@ -1020,11 +1248,14 @@ def sync_security_posture(pg_conn, client_id, security_defaults_enabled, ca_poli
             """
             INSERT INTO entra_security_posture
                 (client_id, security_defaults_enabled, ca_policies, collected_at,
-                 role_eligibility_status, group_expansion_status)
-            VALUES (%s, %s, %s, %s, %s, %s);
+                 role_eligibility_status, group_expansion_status,
+                 authorization_policy, authorization_policy_status, role_schedule_status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s);
             """,
             (client_id, security_defaults_enabled, json.dumps(slim_policies), now,
-             role_eligibility_status, group_expansion_status),
+             role_eligibility_status, group_expansion_status,
+             json.dumps(authorization_policy) if authorization_policy is not None else None,
+             authorization_policy_status, role_schedule_status),
         )
     pg_conn.commit()
     return len(slim_policies)
@@ -1180,6 +1411,9 @@ def parse_args():
 COLLECTION_STEPS = [
     ("users", ["entra_user"]),
     ("directory role membership", ["entra_directory_role_member"]),
+    # [v0.7.0] Upserted, never replaced: a step that didn't run just leaves
+    # last_seen_at at the previous run's time.
+    ("role assignment history", ["entra_role_assignment_history"]),
     ("security posture", ["entra_security_posture"]),
     ("application registrations", ["entra_application"]),
     ("dangerous Graph permission grants", ["entra_dangerous_permission_grant"]),
@@ -1275,8 +1509,22 @@ def main():
         role_members += eligible_members
         group_members, group_expansion_status = expand_group_role_members(graph, role_members)
         role_members += group_members
-        role_member_count = sync_directory_role_members(pg_conn, client_id, role_members)
+        # [v0.7.0] Classify active rows (permanent / time-bound / PIM
+        # activation). Optional: without P2 the kinds stay NULL.
+        schedule_instances, role_schedule_status = fetch_role_assignment_schedules(graph)
+        if schedule_instances is not None:
+            classified = apply_assignment_kinds(role_members, schedule_instances)
+            log_info(f"  {classified} active role membership(s) matched to an assignment schedule")
+        role_collected_at = datetime.now(timezone.utc)
+        role_member_count = sync_directory_role_members(pg_conn, client_id, role_members,
+                                                        collected_at=role_collected_at)
         completed_steps.append("directory role membership")
+        # [v0.7.0] Only reached when the role read above succeeded (any
+        # failure there aborts first), so history never sees a failed read.
+        history_count = sync_role_assignment_history(pg_conn, client_id, role_members,
+                                                     role_collected_at)
+        completed_steps.append("role assignment history")
+        log_info(f"  {history_count} distinct role assignment(s) recorded in assignment history")
         global_admin_count = len({
             rm["member"]["id"] for rm in role_members
             if rm["role"].get("roleTemplateId") == GLOBAL_ADMIN_ROLE_TEMPLATE_ID
@@ -1284,11 +1532,14 @@ def main():
         log_success(f"Recorded {role_member_count} role membership(s), "
                     f"including {global_admin_count} Global Administrator member(s).")
 
-        log_header("Collecting Security Posture (Security Defaults + Conditional Access)")
+        log_header("Collecting Security Posture (Security Defaults, Conditional Access, Authorization Policy)")
         security_defaults_enabled = fetch_security_defaults(graph)
         ca_policies = fetch_conditional_access_policies(graph)
+        authorization_policy, authorization_policy_status = fetch_authorization_policy(graph)
         ca_policy_count = sync_security_posture(pg_conn, client_id, security_defaults_enabled, ca_policies,
-                                                role_eligibility_status, group_expansion_status)
+                                                role_eligibility_status, group_expansion_status,
+                                                authorization_policy, authorization_policy_status,
+                                                role_schedule_status)
         completed_steps.append("security posture")
         log_success(f"Security Defaults enabled: {security_defaults_enabled}. "
                     f"{ca_policy_count} Conditional Access polic{'y' if ca_policy_count == 1 else 'ies'} recorded.")
@@ -1315,6 +1566,8 @@ def main():
         print(f"  {_C.WHITE}Directory role memberships:{_C.RESET}    {role_member_count}")
         print(f"  {_C.WHITE}Security Defaults enabled:{_C.RESET}     {security_defaults_enabled}")
         print(f"  {_C.WHITE}Conditional Access policies:{_C.RESET}   {ca_policy_count}")
+        print(f"  {_C.WHITE}Role assignment schedules:{_C.RESET}     {role_schedule_status}")
+        print(f"  {_C.WHITE}Authorization policy:{_C.RESET}          {authorization_policy_status}")
         print(f"  {_C.WHITE}Application registrations:{_C.RESET}     {app_count}")
         print(f"  {_C.WHITE}Dangerous permission grants:{_C.RESET}   {grant_count}")
         print(f"  {_C.WHITE}Result:{_C.RESET}                        SUCCESS")

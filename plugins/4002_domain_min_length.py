@@ -67,7 +67,18 @@ PLUGIN = {
         "most users even when the visible domain default looks weak."
     ),
     "control_id": "POLICY-002",
-    "framework_tags": ["DISA-STIG"],
+    "framework_tags": [
+        "NIST-800-53-IA-5",
+        "NIST-800-53-IA-5(1)",
+        "NIST-CSF-2.0-PR.AA-01",
+        "PCI-DSS-4.0-8.3.6",
+        "CIS-CSC-8-5.2",
+        "ISO-27001-2022-A.5.17",
+        "SOC2-CC6.1",
+        "HIPAA-164.308(a)(5)(ii)(D)",
+        "DISA-STIG-V-254291",
+        "MITRE-ATTCK-T1110",
+    ],
     "references": [
         {"title": "Microsoft: Minimum password length",
          "url": "https://learn.microsoft.com/en-us/windows/security/threat-protection/security-policy-settings/minimum-password-length"},

@@ -60,7 +60,15 @@ PLUGIN = {
         "what it turns out to be."
     ),
     "control_id": "POLICY-011",
-    "framework_tags": [],
+    "framework_tags": [
+        "NIST-800-53-CP-9",
+        "NIST-800-53-CP-10",
+        "NIST-CSF-2.0-PR.DS-11",
+        "CIS-CSC-8-11.2",
+        "ISO-27001-2022-A.8.13",
+        "SOC2-A1.2",
+        "HIPAA-164.308(a)(7)(ii)(A)",
+    ],
     "references": [
         {"title": "Microsoft: The AD Recycle Bin -- Understanding, Implementing, Best Practices, and Troubleshooting",
          "url": "https://techcommunity.microsoft.com/blog/askds/the-ad-recycle-bin-understanding-implementing-best-practices-and-troubleshooting/396944"},

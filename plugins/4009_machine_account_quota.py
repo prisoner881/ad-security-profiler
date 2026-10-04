@@ -41,7 +41,20 @@ PLUGIN = {
         "group instead of relying on the domain-wide quota."
     ),
     "control_id": "POLICY-009",
-    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1136.002"],
+    "framework_tags": [
+        "NIST-800-53-CM-6",
+        "NIST-800-53-CM-7",
+        "NIST-800-53-CM-2",
+        "NIST-CSF-2.0-PR.PS-01",
+        "PCI-DSS-4.0-2.2.1",
+        "PCI-DSS-4.0-2.2.6",
+        "CIS-CSC-8-4.1",
+        "ISO-27001-2022-A.8.9",
+        "SOC2-CC7.1",
+        "HIPAA-164.312(c)(1)",
+        "MITRE-ATTCK-T1136.002",
+        "CISA-AA26-237A",
+    ],
     "references": [
         {"title": "Microsoft: ms-DS-MachineAccountQuota attribute",
          "url": "https://learn.microsoft.com/en-us/windows/win32/adschema/a-ms-ds-machineaccountquota"},

@@ -50,7 +50,19 @@ PLUGIN = {
         "enabling in a production environment."
     ),
     "control_id": "STIG-V-243485",
-    "framework_tags": ["DISA-STIG"],
+    "framework_tags": [
+        "NIST-800-53-AC-4",
+        "NIST-800-53-AC-20",
+        "NIST-800-53-SC-7",
+        "NIST-CSF-2.0-PR.AA-05",
+        "CIS-CSC-8-12.2",
+        "ISO-27001-2022-A.8.20",
+        "ISO-27001-2022-A.8.22",
+        "SOC2-CC6.6",
+        "DISA-STIG",
+        "DISA-STIG-V-243485",
+        "MITRE-ATTCK-T1199",
+    ],
     "references": [
         {"title": "DISA Active Directory Domain STIG V3R7: V-243485",
          "url": "https://cyber.trackr.live/stig/Active_Directory_Domain/3/7#V-243485"},

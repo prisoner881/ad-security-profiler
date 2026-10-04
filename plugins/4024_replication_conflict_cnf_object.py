@@ -50,7 +50,18 @@ PLUGIN = {
         "just resolving object-by-object."
     ),
     "control_id": "DOM-424",
-    "framework_tags": [],
+    "framework_tags": [
+        "NIST-800-53-CM-6",
+        "NIST-800-53-CM-7",
+        "NIST-800-53-CM-2",
+        "NIST-CSF-2.0-PR.PS-01",
+        "PCI-DSS-4.0-2.2.1",
+        "PCI-DSS-4.0-2.2.6",
+        "CIS-CSC-8-4.1",
+        "ISO-27001-2022-A.8.9",
+        "SOC2-CC7.1",
+        "HIPAA-164.312(c)(1)",
+    ],
     "references": [
         {"title": "PingCastle: Replication rules -- S-Duplicate",
          "url": "https://pingcastle.com/PingCastleFiles/ad_hc_rules_list.html"},

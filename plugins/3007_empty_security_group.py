@@ -37,7 +37,16 @@ PLUGIN = {
         "actually has access to something."
     ),
     "control_id": "HYGIENE-302",
-    "framework_tags": [],
+    "framework_tags": [
+        "NIST-800-53-AC-2",
+        "NIST-800-53-AC-2(3)",
+        "NIST-CSF-2.0-PR.AA-01",
+        "PCI-DSS-4.0-8.2.6",
+        "CIS-CSC-8-5.3",
+        "ISO-27001-2022-A.5.18",
+        "SOC2-CC6.2",
+        "HIPAA-164.308(a)(3)(ii)(C)",
+    ],
     "references": [],
     "description": (
         "An empty security group is low-severity hygiene, not a "

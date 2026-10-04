@@ -49,7 +49,14 @@ PLUGIN = {
         "without updating the subnet."
     ),
     "control_id": "DOM-421",
-    "framework_tags": [],
+    "framework_tags": [
+        "NIST-800-53-CM-8",
+        "NIST-CSF-2.0-ID.AM-01",
+        "PCI-DSS-4.0-12.5.1",
+        "CIS-CSC-8-1.1",
+        "ISO-27001-2022-A.5.9",
+        "SOC2-CC6.1",
+    ],
     "references": [
         {"title": "PingCastle (related rule, DC IP coverage): S-DC-SubnetMissing",
          "url": "https://www.pingcastle.com/PingCastleFiles/ad_hc_rules_list.html"},

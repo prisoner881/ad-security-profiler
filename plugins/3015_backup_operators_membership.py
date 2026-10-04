@@ -49,7 +49,21 @@ PLUGIN = {
         "the same rigor applied to Domain Admins."
     ),
     "control_id": "PRIV-312",
-    "framework_tags": ["CISA-AA26-237A", "MITRE-ATTCK-T1078.002"],
+    "framework_tags": [
+        "NIST-800-53-AC-2(7)",
+        "NIST-800-53-AC-6(5)",
+        "NIST-800-53-AC-6(2)",
+        "NIST-CSF-2.0-PR.AA-05",
+        "PCI-DSS-4.0-7.2.1",
+        "PCI-DSS-4.0-7.2.2",
+        "CIS-CSC-8-5.4",
+        "CIS-CSC-8-6.8",
+        "ISO-27001-2022-A.8.2",
+        "SOC2-CC6.3",
+        "HIPAA-164.308(a)(4)(ii)(B)",
+        "MITRE-ATTCK-T1078.002",
+        "CISA-AA26-237A",
+    ],
     "references": [
         {"title": "Hacking Articles: Windows Privilege Escalation -- SeBackupPrivilege",
          "url": "https://www.hackingarticles.in/windows-privilege-escalation-sebackupprivilege/"},

@@ -37,7 +37,21 @@ PLUGIN = {
         "leaving standing access broader than required."
     ),
     "control_id": "ACL-004",
-    "framework_tags": [],
+    "framework_tags": [
+        "NIST-800-53-AC-3",
+        "NIST-800-53-AC-6",
+        "NIST-800-53-AC-6(1)",
+        "NIST-CSF-2.0-PR.AA-05",
+        "PCI-DSS-4.0-7.2.1",
+        "PCI-DSS-4.0-7.2.2",
+        "CIS-CSC-8-3.3",
+        "CIS-CSC-8-6.8",
+        "ISO-27001-2022-A.5.15",
+        "ISO-27001-2022-A.8.3",
+        "SOC2-CC6.3",
+        "HIPAA-164.312(a)(1)",
+        "MITRE-ATTCK-T1207",
+    ],
     "references": [
         {"title": "Microsoft: DS-Replication-Manage-Topology extended right",
          "url": "https://learn.microsoft.com/en-us/windows/win32/adschema/r-ds-replication-manage-topology"},

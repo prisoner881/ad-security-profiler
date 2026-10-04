@@ -9,6 +9,78 @@ the script's own docstring now keeps a one-line summary per entry, this
 file keeps the complete detail (root causes, what was verified, why a
 decision was made a particular way) for anyone who wants it.
 
+    0.6.0 - Requires schema v38 (schema_migration_v38.sql); run once with
+            --full-rescan afterwards so existing objects get the new
+            columns. Expect, on the first 0.6.0 run: one new version per
+            user (accountExpires is now collected and is set on every
+            user), one per DNS zone (zone settings are now versioned, see
+            (8)), one for the domain object (new derived settings) and one
+            per Enterprise CA (cACertificate). Collector changes:
+            (1) Security descriptor control flags. parse_security_descriptor()
+            also returns the SD header's Control field; every place that
+            stores owner_sid now stores directory_object.sd_control too
+            (0x1000 SE_DACL_PROTECTED = inheritance disabled).
+            (2) Users: altSecurityIdentities, accountExpires, and (probed)
+            msDS-AssignedAuthNPolicySilo / msDS-AssignedAuthNPolicy and the
+            cleartext-password attributes userPassword, unixUserPassword,
+            msSFU30Password, os400Password. Their VALUES are replaced by
+            "<redacted: N value(s)>" before anything is stored or logged;
+            only the names of the populated ones reach
+            cleartext_password_attributes.
+            (3) Computers: altSecurityIdentities, managedBy, msDS-KrbTgtLink,
+            the cleartext-password attributes, and (probed) the dMSA
+            attributes msDS-ManagedAccountPrecededByLink /
+            msDS-DelegatedMSAState. is_gmsa / is_dmsa come from targeted
+            objectClass searches (objectGUID only) applied in place --
+            objectClass is still not bulk-collected.
+            (4) RODC password replication policy -> rodc_prp_edge
+            (msDS-RevealedList / msDS-RevealOnDemandGroup /
+            msDS-NeverRevealGroup; DN-String values decoded; one sync per
+            run; an RODC whose read fails keeps its edges).
+            (5) ad_domain: Recycle Bin state, schema objectVersion,
+            forest/domain updates revisions, SCRIL hash rolling
+            (msDS-ExpirePasswordsOnSmartCardOnlyAccounts, probed), KDS
+            root key count, LAPS attribute schemaIDGUIDs (formatted like
+            acl_edge.object_type_guid), authentication policy silos and
+            policy count, forest root DN (RootDSE rootDomainNamingContext).
+            All folded into the domain's derived settings, so a change
+            versions the domain.
+            (6) ad_backup_status: last backup per naming context from the
+            NC head's dSASignature replication metadata, overwritten each
+            run (domain, configuration, schema, DomainDnsZones,
+            ForestDnsZones).
+            (7) GPOs: gPCFileSysPath and flags; each GPO's security
+            descriptor now goes to acl_edge / owner_sid / sd_control.
+            (8) DNS zones: forest-wide zones (ForestDnsZones) collected too,
+            each partition reconciled separately; ad_dns_zone.partition;
+            has_wildcard_record / has_wpad_record from a one-level search
+            per zone; zone ACLs to acl_edge (DNS collection moved before
+            the single acl_edge sync). allow_update and the record flags
+            are read before the zone is versioned and stored in
+            attributes_full under "adprofiler:zoneSettings", replacing the
+            old in-place UPDATE, so a zone switched to nonsecure updates
+            now leaves history (plugin 11018).
+            (9) KDS root keys -> ad_kds_root_key (metadata only, never
+            msKds-RootKeyData), plus the container's and each key's ACL. A
+            low-privileged account may see no key objects at all.
+            (10) AD FS DKM objects -> ad_adfs_dkm_object; the key itself
+            (thumbnailPhoto) is never read -- key_readable_by_collector
+            records whether a presence filter on it matched. Skipped when
+            there is no CN=ADFS container.
+            (11) Root CA (CN=Certification Authorities) and AIA certificates
+            -> ad_pki_certificate_store. Certificate parsing is shared
+            (parse_certificates()) and now also records not_valid_before,
+            key_algorithm, key_size and signature_hash_algorithm -- for
+            NTAuth too.
+            (12) Enrollment services: cACertificate -> ca_certificates,
+            msPKI-Enrollment-Servers (probed) -> enrollment_servers.
+            (13) Certificate templates: msPKI-Minimal-Key-Size,
+            msPKI-Private-Key-Flag.
+            (14) Trusts: supported_encryption_types column.
+            (15) Schema classes: defaultSecurityDescriptor and
+            lDAPDisplayName.
+            Every new LDAP read is non-fatal: a failure is logged and
+            recorded as unknown (NULL, or edges carried forward).
     0.5.16 - Requires schema v37 (schema_migration_v37.sql); run once with
             --full-rescan afterwards. (1) sIDHistory decoded to S-1-5-...
             strings. ldap3 has no formatter for it, so it was stored as

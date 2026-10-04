@@ -51,7 +51,20 @@ PLUGIN = {
         "confirmed safe to do so."
     ),
     "control_id": "PRIV-109",
-    "framework_tags": [],
+    "framework_tags": [
+        "NIST-800-53-AC-2(7)",
+        "NIST-800-53-AC-6(5)",
+        "NIST-800-53-AC-6(2)",
+        "NIST-CSF-2.0-PR.AA-05",
+        "PCI-DSS-4.0-7.2.1",
+        "PCI-DSS-4.0-7.2.2",
+        "CIS-CSC-8-5.4",
+        "CIS-CSC-8-6.8",
+        "ISO-27001-2022-A.8.2",
+        "SOC2-CC6.3",
+        "HIPAA-164.308(a)(4)(ii)(B)",
+        "MITRE-ATTCK-T1078.002",
+    ],
     "references": [],
     "description": (
         "Same reasoning as plugin 3005 (the group-side version of this "
