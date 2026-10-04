@@ -28,13 +28,24 @@ suppressed entirely when the client has no current GPO link at all --
 the Default Domain Policy is always linked to the domain, so zero links
 means link resolution failed for that run, not that every GPO is
 unlinked.
+
+[v1.2] Site links are now part of gpo_link_edge: collector 0.5.16
+collects AD sites before resolving gPLink and includes their gPLink, so a
+GPO linked only to a site counts as linked and is no longer reported.
+The summary reads "is not linked to any site, the domain or any OU"
+(summary text changed). If no current ad_site row exists -- site
+collection failed, which the collector treats as non-fatal, or the data
+predates 0.5.16 -- site links are unknown: the summary then keeps the
+old wording plus "(site links not collected)", and
+detail.site_links_collected records which case applies. Links made from
+another domain of the forest remain invisible.
 """
 
 PLUGIN = {
     "plugin_id": 9004,
     "category": "Organizational Units",
     "name": "Group Policy Object Is Not Linked Anywhere",
-    "version": "1.1",
+    "version": "1.2",
     "revision_date": "2026-10-04",
     "remediation": (
         "If this GPO is genuinely no longer needed, delete it (Group "
@@ -48,7 +59,7 @@ PLUGIN = {
     "framework_tags": [],
     "references": [],
     "description": (
-        "A GPO with zero links on the domain or any OU "
+        "A GPO with zero links on any AD site, the domain or any OU "
         "exists but is never actually applied to anything. This "
         "project had no visibility into GPO links at all until "
         "gpo_link_edge existed alongside Organizational Unit "
@@ -57,14 +68,24 @@ PLUGIN = {
         "troubleshooting and never relinked or removed -- was "
         "previously invisible entirely. Not a vulnerability by itself; "
         "an unlinked GPO grants no access and enforces nothing. "
-        "Unmanaged configuration surface worth cleaning up. Limitation: "
-        "only links on the domain object and OUs are collected -- a GPO "
-        "linked only at an AD site, or only from another domain in the "
-        "forest, is also reported; confirm in Group Policy Management "
-        "before deleting."
+        "Unmanaged configuration surface worth cleaning up. Site links "
+        "are collected since collector 0.5.16 (when site collection fails "
+        "the summary says \"site links not collected\" and a GPO linked "
+        "only at a site may be reported). Limitation: links made from "
+        "another domain in the forest are not visible; confirm in Group "
+        "Policy Management before deleting."
     ),
     "base_severity": "low",
     "query": """
+        WITH site_collection AS (
+            -- [v1.2] Every forest has at least one site, so no current
+            -- ad_site row means site collection failed (non-fatal in the
+            -- collector) or the data predates collector 0.5.16 -- site links
+            -- are then unknown and the summary says so.
+            SELECT EXISTS (SELECT 1 FROM ad_site s
+                           WHERE s.client_id = %(client_id)s AND s.valid_to IS NULL)
+                       AS sites_collected
+        )
         SELECT
             'warn' AS status,
             g.object_guid,
@@ -73,15 +94,20 @@ PLUGIN = {
             NULL AS tool_severity,
             NULL AS tool_reference,
             'low' AS fd_severity,
-            'GPO "' || COALESCE(g.display_name, 'unnamed') || '" is not linked to the domain or any OU' AS summary,
+            'GPO "' || COALESCE(g.display_name, 'unnamed') || '" is not linked to '
+                || CASE WHEN sc.sites_collected THEN 'any site, the domain or any OU'
+                        ELSE 'the domain or any OU (site links not collected)' END AS summary,
             jsonb_build_object(
                 'display_name', g.display_name,
                 'gpo_guid', g.gpo_guid,
-                'version_number', g.version_number
+                'version_number', g.version_number,
+                'site_links_collected', sc.sites_collected
             ) AS detail
         FROM ad_gpo g
+        CROSS JOIN site_collection sc
         WHERE g.valid_to IS NULL
           AND g.client_id = %(client_id)s
+          -- [v1.2] a link on a site, the domain or an OU (enabled or not)
           AND NOT EXISTS (
                 SELECT 1 FROM gpo_link_edge gle
                 WHERE gle.gpo_guid = g.object_guid AND gle.client_id = g.client_id AND gle.valid_to IS NULL

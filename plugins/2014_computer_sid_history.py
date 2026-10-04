@@ -12,13 +12,22 @@ privileged well-known RID (-500/-502/-512/-516/-518/-519/-520/-521/-498/
 (S-1-5-9) makes the finding critical and is listed in
 dangerous_sid_history; foreign-domain-only residue drops from high to
 medium (still critical on a DC). Previously every entry got a flat high.
+
+[v1.4] Collector 0.5.16 stores sIDHistory as real "S-1-5-..." strings
+(before, it was base64/garbled, so the classification above could never
+match). Checked against real SIDs: a privileged RID now only matches a
+domain SID (S-1-5-21-a-b-c-RID) and BUILTIN only S-1-5-32-RID. Values
+that are not SID strings (rows from before 0.5.16, until the
+--full-rescan) are listed in detail.undecoded_sid_history and never
+counted as dangerous; detail also gains same_domain_sid_history. Summary
+wording fixed: "entrie(s)" -> "entry"/"entries" (summaries change once).
 """
 
 PLUGIN = {
     "plugin_id": 2014,
     "category": "Computer Accounts",
     "name": "Computer Account Has SID History",
-    "version": "1.3",
+    "version": "1.4",
     "revision_date": "2026-10-04",
     "remediation": (
         "Investigate and confirm whether this is legitimate residue from "
@@ -48,7 +57,8 @@ PLUGIN = {
         "GPCO, RODCs, Key Admins, ...), a BUILTIN SID or Enterprise "
         "Domain Controllers, or when the computer is a domain controller; "
         "medium for SIDs of other domains only (typical migration "
-        "residue, still to be cleaned up). NOT downgraded when the computer account is "
+        "residue, still to be cleaned up; classification needs collector "
+        "0.5.16+, which decodes sIDHistory to SID strings). NOT downgraded when the computer account is "
         "disabled: sIDHistory is a persistent configuration on the "
         "object itself and survives disablement untouched, reactivating "
         "immediately if the account is ever re-enabled."
@@ -68,19 +78,31 @@ PLUGIN = {
             SELECT cl.domain_sid FROM client cl
             WHERE cl.client_id = %(client_id)s AND cl.domain_sid IS NOT NULL
         ),
-        flagged AS (
-            SELECT c.object_guid,
-                   array_agg(DISTINCT sh ORDER BY sh) AS dangerous_sids
+        entries AS (
+            -- [v1.4] sIDHistory holds "S-1-5-..." strings since collector
+            -- 0.5.16; earlier rows hold undecoded binary (base64/garbled).
+            SELECT c.object_guid, sh,
+                   sh ~ '^S-1-[0-9]+(-[0-9]+)+$' AS is_sid,
+                   EXISTS (SELECT 1 FROM dom WHERE sh LIKE dom.domain_sid || '-%%') AS same_domain,
+                   (sh ~ '^S-1-5-21-[0-9]+-[0-9]+-[0-9]+-(500|502|512|516|518|519|520|521|498|526|527)$'
+                    OR sh ~ '^S-1-5-32-[0-9]+$'
+                    OR sh = 'S-1-5-9') AS privileged_sid
             FROM ad_computer c
             CROSS JOIN LATERAL unnest(c.sid_history) AS sh
             WHERE c.valid_to IS NULL
               AND c.client_id = %(client_id)s
-              AND (sh ~ '^S-1-5-21-[0-9-]+-(500|502|512|516|518|519|520|521|498|526|527)$'
-                   OR sh LIKE 'S-1-5-32-%%'
-                   OR sh = 'S-1-5-9'
-                   OR EXISTS (SELECT 1 FROM dom
-                              WHERE sh LIKE dom.domain_sid || '-%%'))
-            GROUP BY c.object_guid
+              AND sh IS NOT NULL
+        ),
+        flagged AS (
+            SELECT e.object_guid,
+                   array_agg(DISTINCT e.sh ORDER BY e.sh)
+                       FILTER (WHERE e.is_sid AND (e.same_domain OR e.privileged_sid)) AS dangerous_sids,
+                   array_agg(DISTINCT e.sh ORDER BY e.sh)
+                       FILTER (WHERE e.is_sid AND e.same_domain) AS same_domain_sids,
+                   array_agg(DISTINCT e.sh ORDER BY e.sh)
+                       FILTER (WHERE NOT e.is_sid) AS undecoded
+            FROM entries e
+            GROUP BY e.object_guid
         )
         SELECT
             'fail' AS status,
@@ -89,13 +111,13 @@ PLUGIN = {
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
-            CASE WHEN c.is_domain_controller OR f.object_guid IS NOT NULL
+            CASE WHEN c.is_domain_controller OR f.dangerous_sids IS NOT NULL
                  THEN 'critical' ELSE 'medium' END AS fd_severity,
             (CASE WHEN c.is_domain_controller THEN 'Domain Controller ' ELSE '' END)
                 || 'Computer Account ' || COALESCE(c.sam_account_name, c.object_guid::text)
                 || ' has SID history populated (' || array_length(c.sid_history, 1)
-                || ' entrie(s)'
-                || CASE WHEN f.object_guid IS NOT NULL
+                || CASE WHEN array_length(c.sid_history, 1) = 1 THEN ' entry' ELSE ' entries' END
+                || CASE WHEN f.dangerous_sids IS NOT NULL
                         THEN ', including a privileged or same-domain SID' ELSE '' END
                 || ')' AS summary,
             jsonb_build_object(
@@ -103,6 +125,8 @@ PLUGIN = {
                 'dns_hostname', c.dns_hostname,
                 'sid_history', c.sid_history,
                 'dangerous_sid_history', f.dangerous_sids,
+                'same_domain_sid_history', f.same_domain_sids,
+                'undecoded_sid_history', f.undecoded,
                 'is_enabled', c.is_enabled,
                 'is_domain_controller', c.is_domain_controller
             ) AS detail

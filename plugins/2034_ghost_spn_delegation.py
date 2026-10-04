@@ -34,13 +34,24 @@ cifs/http/... targets is gone. krbtgt/<DOMAIN> entries are excluded:
 krbtgt is never a registered SPN, so such an entry is not a ghost but
 delegation to the KDC itself, reported by plugin 1035. Deleted source
 objects are excluded.
+
+[v1.2] No query change. Since collector 0.5.16 targets resolve through
+the forest's own sPNMappings (CN=Directory Service, stored as
+ad_domain.spn_mappings), falling back to the default HOST alias set only
+when that attribute is absent or unreadable -- exactly as the KDC
+resolves them. A forest that added its own alias (e.g. a custom service
+class mapped to host) therefore no longer produces false ghosts for it,
+and a target whose class a forest REMOVED from sPNMappings is now
+correctly reported as a ghost. Caveat: data collected by older
+collectors was resolved against the default set only; the description
+now states this.
 """
 
 PLUGIN = {
     "plugin_id": 2034,
     "category": "Computer Accounts",
     "name": "Constrained Delegation Configured to a Non-Existent (\"Ghost\") SPN",
-    "version": "1.1",
+    "version": "1.2",
     "revision_date": "2026-10-04",
     "remediation": (
         "Remove the dangling entry from msDS-AllowedToDelegateTo "
@@ -66,7 +77,12 @@ PLUGIN = {
         "An attacker who can register or take control of a principal "
         "whose SPN happens to match the dangling reference can use "
         "the existing delegation grant against it directly -- no ACL "
-        "change or approval needed."
+        "change or approval needed. Targets are resolved as the KDC "
+        "resolves them: an exact SPN first, then the host's HOST/ SPN for "
+        "service classes the forest's sPNMappings alias to host (collector "
+        "0.5.16+; the default alias set when sPNMappings is unreadable or "
+        "for data from older collectors, so a forest with customised "
+        "mappings may show stale results until re-collected)."
     ),
     "base_severity": "medium",
     "query": """

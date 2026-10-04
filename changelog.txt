@@ -9,6 +9,23 @@ the script's own docstring now keeps a one-line summary per entry, this
 file keeps the complete detail (root causes, what was verified, why a
 decision was made a particular way) for anyone who wants it.
 
+    0.5.16 - Requires schema v37 (schema_migration_v37.sql); run once with
+            --full-rescan afterwards. (1) sIDHistory decoded to S-1-5-...
+            strings. ldap3 has no formatter for it, so it was stored as
+            base64/garbled text and plugins could not classify SID-history
+            entries. (2) msDS-KeyCredentialLink parsed (KEYCREDENTIALLINK_BLOB,
+            [MS-ADTS] 2.2.20) into ad_user/ad_computer.key_credentials: key
+            id, device id, usage, source, creation time, flags -- what tells
+            a device's own key from an added "shadow credential". (3)
+            dSHeuristics dwAdminSDExMask (character 16) recorded as
+            ad_domain.dsheuristics_admin_sd_ex_mask. (4) The forest's
+            sPNMappings are read and used to resolve delegation target SPNs
+            (falling back to the default HOST alias set) and stored as
+            ad_domain.spn_mappings. (5) RBCD trustees that aren't collected
+            objects (well-known, foreign or orphaned SIDs) are kept, by SID,
+            in rbcd_unresolved_trustee_edge instead of being dropped. (6)
+            AD sites are collected before GPO link resolution and their
+            gPLink is included, so site-level GPO links are recorded.
     0.5.15 - Requires schema v36 (schema_migration_v36.sql); run once with
             --full-rescan afterwards so existing objects get the new
             columns. Collector fixes found by the per-plugin review:

@@ -31,13 +31,25 @@ membership: that membership is via primaryGroupID and DC objects
 commonly carry no adminCount, so it is expected, not a symptom.
 Known limitation: operator groups excluded from SDProp via dSHeuristics
 dwAdminSDExMask are not modelled (the collector does not parse it).
+
+[v1.4] dwAdminSDExMask is now modelled. Collector 0.5.16 records
+dSHeuristics character 16 as ad_domain.dsheuristics_admin_sd_ex_mask
+(bits 1 Account Operators S-1-5-32-548, 2 Server Operators -549, 4 Print
+Operators -550, 8 Backup Operators -551; NULL = unknown, treated as none
+excluded). SDProp does not protect an excluded operator group or its
+members, so a member whose ONLY privileged path is an excluded operator
+group legitimately has no adminCount and is no longer reported. A member
+that is also in a protected group is still reported; the excluded groups
+are left out of the summary's group list and named in
+detail.sdprop_excluded_operator_groups (detail also carries
+admin_sd_ex_mask).
 """
 
 PLUGIN = {
     "plugin_id": 3021,
     "category": "Groups",
     "name": "Privileged Group Member Missing the AdminSDHolder Protection Marker",
-    "version": "1.3",
+    "version": "1.4",
     "revision_date": "2026-10-04",
     "remediation": (
         "If this membership was added very recently (within the last "
@@ -69,17 +81,36 @@ PLUGIN = {
         "protected groups plus Key Admins / Enterprise Key Admins, by "
         "RID. A domain controller's default Domain Controllers / "
         "Read-only DCs membership is not reported. Operator groups "
-        "excluded from SDProp via dSHeuristics dwAdminSDExMask are not "
-        "modelled and may produce findings for their members."
+        "excluded from SDProp via dSHeuristics dwAdminSDExMask (collector "
+        "0.5.16+) are honoured: membership only through such a group is "
+        "not reported, since SDProp deliberately does not protect it."
     ),
     "base_severity": "medium",
     "query": """
-        WITH well_known_roots AS (
+        WITH sd_ex AS (
+            -- [v1.4] dSHeuristics dwAdminSDExMask (collector 0.5.16, schema
+            -- v37): operator groups excluded from AdminSDHolder/SDProp.
+            -- NULL = unknown, treated as "none excluded".
+            SELECT max(d.dsheuristics_admin_sd_ex_mask) AS mask
+            FROM ad_domain d
+            WHERE d.client_id = %(client_id)s
+              AND d.valid_to IS NULL
+        ),
+        well_known_roots AS (
             SELECT g.object_guid, COALESCE(g.sam_account_name, do2.object_sid) AS sam_account_name,
-                   do2.object_sid ~ '-(516|521)$' AS is_dc_group
+                   do2.object_sid ~ '-(516|521)$' AS is_dc_group,
+                   -- [v1.4] bits: 1 Account Operators, 2 Server Operators,
+                   -- 4 Print Operators, 8 Backup Operators
+                   COALESCE(CASE do2.object_sid
+                                WHEN 'S-1-5-32-548' THEN (sx.mask & 1) <> 0
+                                WHEN 'S-1-5-32-549' THEN (sx.mask & 2) <> 0
+                                WHEN 'S-1-5-32-550' THEN (sx.mask & 4) <> 0
+                                WHEN 'S-1-5-32-551' THEN (sx.mask & 8) <> 0
+                            END, false) AS sdprop_excluded
             FROM ad_group g
             JOIN directory_object do2
                 ON do2.object_guid = g.object_guid AND do2.client_id = g.client_id
+            CROSS JOIN sd_ex sx
             WHERE g.valid_to IS NULL
               AND g.client_id = %(client_id)s
               -- [v1.3] + Key Admins (526) / Enterprise Key Admins (527)
@@ -91,6 +122,7 @@ PLUGIN = {
                    mdo.object_class,
                    COALESCE(u.primary_group_id, c.primary_group_id) AS primary_group_id,
                    wkr.sam_account_name AS privileged_group_name,
+                   wkr.sdprop_excluded,
                    COALESCE(u.admin_count, g.admin_count, c.admin_count) AS admin_count
             FROM v_effective_group_membership vem
             JOIN well_known_roots wkr ON wkr.object_guid = vem.group_guid
@@ -115,9 +147,15 @@ PLUGIN = {
             SELECT object_guid, max(sam_account_name) AS sam_account_name,
                    max(object_class) AS object_class, max(admin_count) AS admin_count,
                    max(primary_group_id) AS primary_group_id,
-                   array_agg(DISTINCT privileged_group_name ORDER BY privileged_group_name) AS privileged_group_names
+                   array_agg(DISTINCT privileged_group_name ORDER BY privileged_group_name)
+                       FILTER (WHERE NOT sdprop_excluded) AS privileged_group_names,
+                   array_agg(DISTINCT privileged_group_name ORDER BY privileged_group_name)
+                       FILTER (WHERE sdprop_excluded) AS sdprop_excluded_groups
             FROM matches
             GROUP BY object_guid
+            -- [v1.4] membership only through operator groups excluded from
+            -- SDProp by dwAdminSDExMask legitimately carries no adminCount
+            HAVING bool_or(NOT sdprop_excluded)
         )
         SELECT
             'warn' AS status,
@@ -137,6 +175,8 @@ PLUGIN = {
                 'sam_account_name', a.sam_account_name,
                 'object_class', a.object_class,
                 'privileged_groups', a.privileged_group_names,
+                'sdprop_excluded_operator_groups', a.sdprop_excluded_groups,
+                'admin_sd_ex_mask', (SELECT mask FROM sd_ex),
                 'admin_count', a.admin_count,
                 'primary_group_id', a.primary_group_id
             ) AS detail

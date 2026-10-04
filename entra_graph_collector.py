@@ -2,9 +2,19 @@
 """
 entra_graph_collector.py -- Microsoft Entra ID / Graph API Email Collector
 
-VERSION: 0.5.1
+VERSION: 0.6.0
 
 CHANGELOG:
+    0.6.0 - Requires schema v37. Directory role membership now includes
+            PIM-eligible assignments (roleEligibilityScheduleInstances;
+            assignment_type 'eligible') and the transitive members of
+            groups that hold a role (via_group_id). Before, only active
+            direct members were seen, so someone who could activate Global
+            Administrator through PIM, or held it through a role-assignable
+            group, was invisible to plugins 10002/10003/10006. Eligibility
+            needs Entra ID P2; when Graph refuses it (or group expansion),
+            the reason is recorded in entra_security_posture and the run
+            continues.
     0.5.1 - DANGEROUS_GRAPH_PERMISSIONS extended with six more Graph
             application permissions that lead directly to tenant takeover
             (Policy.ReadWrite.PermissionGrant,
@@ -136,7 +146,7 @@ PG_DBNAME = "adprofiler"
 PG_USER = None
 PG_PASSWORD = None
 
-VERSION = "0.5.1"
+VERSION = "0.6.0"
 
 # [v0.5.0] Retry policy shared by every Graph/token request (see
 # _send_with_retry()). 429 and transient 5xx responses, plus network
@@ -170,6 +180,18 @@ GRAPH_PAGE_SIZE = 999  # Graph's own maximum for $top on /users, not a choice ma
 # right behavior for this project's purposes -- an inactive role has
 # never had a member, so there's nothing to cross-reference regardless.
 GRAPH_DIRECTORY_ROLES_URL = "https://graph.microsoft.com/v1.0/directoryRoles"
+# [v0.6.0] PIM-eligible role assignments (not visible in /directoryRoles,
+# which lists only active members) and the members of groups that hold a
+# role (role-assignable groups). Eligibility needs Entra ID P2 / Governance
+# licensing; without it Graph answers 400/403 and the collector records
+# that it couldn't check rather than failing the run. Permissions:
+# RoleManagement.Read.Directory (eligibility) and Directory.Read.All or
+# GroupMember.Read.All (group members) -- both already in SETUP.md's list.
+GRAPH_ROLE_ELIGIBILITY_URL = (
+    "https://graph.microsoft.com/v1.0/roleManagement/directory/roleEligibilityScheduleInstances"
+    "?$expand=principal,roleDefinition"
+)
+GRAPH_GROUPS_URL = "https://graph.microsoft.com/v1.0/groups"
 # Fixed, immutable across every tenant -- confirmed against Microsoft's
 # own documentation and cross-checked against multiple independent
 # sources, not tenant-specific the way a role's own "id" is.
@@ -442,6 +464,31 @@ class GraphClient:
             raise CollectorAbort(f"Graph request for {what} returned HTTP 200 with a non-JSON body.")
 
 
+def graph_get_optional(graph, url, what):
+    """[v0.6.0] Like graph.get(), but a 400/403/404 (feature not licensed,
+    permission not granted, object gone) returns (None, "<reason>") instead
+    of aborting the run. Throttling and transient errors are still retried
+    by _send_with_retry(), and still abort once retries run out."""
+    resp = _send_with_retry(
+        lambda: requests.get(url, headers={"Authorization": f"Bearer {graph._token}"}, timeout=60),
+        f"Graph request for {what}",
+        on_unauthorized=graph._refresh_token,
+    )
+    if resp.status_code == 200:
+        try:
+            return resp.json(), "ok"
+        except ValueError:
+            raise CollectorAbort(f"Graph request for {what} returned HTTP 200 with a non-JSON body.")
+    if resp.status_code in (400, 403, 404):
+        try:
+            err = resp.json().get("error", {})
+            detail = f"{err.get('code', '')}: {err.get('message', '')}".strip(": ")
+        except ValueError:
+            detail = resp.text[:200]
+        return None, f"HTTP {resp.status_code} {detail}".strip()
+    raise CollectorAbort(f"Graph request for {what} failed (HTTP {resp.status_code}): {resp.text}")
+
+
 def fetch_all_users(graph):
     """Paginated via @odata.nextLink -- Graph enforces its own page-size
     ceiling regardless of $top, so this always follows nextLink rather
@@ -528,9 +575,82 @@ def fetch_directory_roles_with_members(graph):
             url = body.get("@odata.nextLink")
         log_info(f"  role '{role.get('displayName')}': {len(members)} member(s)")
         for member in members:
-            role_members.append({"role": role, "member": member})
+            role_members.append({"role": role, "member": member, "assignment_type": "active",
+                                 "via_group": None, "directory_scope_id": "/"})
 
     return role_members
+
+
+def fetch_role_eligibility(graph):
+    """[v0.6.0] PIM-eligible directory role assignments. An eligible
+    principal holds no permissions until it activates the role, but can do
+    so on demand -- so for exposure purposes (who can become Global
+    Administrator) it counts like an active member. Returns
+    (role_member_entries, status); status is "ok" or why eligibility
+    couldn't be read (typically no Entra ID P2 licence)."""
+    entries = []
+    url = GRAPH_ROLE_ELIGIBILITY_URL
+    while url:
+        body, status = graph_get_optional(graph, url, "PIM-eligible role assignments")
+        if body is None:
+            log_warn(f"  PIM-eligible role assignments could not be read ({status}); "
+                     f"eligible-only role holders will not be reported.")
+            return [], status
+        for inst in body.get("value", []):
+            principal = inst.get("principal") or {}
+            definition = inst.get("roleDefinition") or {}
+            if not principal.get("id"):
+                continue
+            role = {
+                "id": inst.get("roleDefinitionId") or definition.get("id"),
+                "roleTemplateId": definition.get("templateId") or inst.get("roleDefinitionId"),
+                "displayName": definition.get("displayName"),
+            }
+            entries.append({"role": role, "member": principal, "assignment_type": "eligible",
+                            "via_group": None,
+                            "directory_scope_id": inst.get("directoryScopeId") or "/"})
+        url = body.get("@odata.nextLink")
+    log_info(f"  {len(entries)} PIM-eligible role assignment(s) found")
+    return entries, "ok"
+
+
+def expand_group_role_members(graph, role_members):
+    """[v0.6.0] A role held by a (role-assignable) group is held by every
+    member of that group. Adds one entry per transitive member, tagged
+    with the group it comes through (via_group), for every group found
+    among active and eligible role members. Returns (entries, status)."""
+    member_select = "id,displayName,userPrincipalName,onPremisesSecurityIdentifier,accountEnabled"
+    cache = {}
+    expanded = []
+    status = "ok"
+    for rm in role_members:
+        group = rm["member"]
+        if group.get("@odata.type") != "#microsoft.graph.group":
+            continue
+        gid = group["id"]
+        if gid not in cache:
+            members = []
+            url = f"{GRAPH_GROUPS_URL}/{gid}/transitiveMembers?$select={member_select}"
+            while url:
+                body, result = graph_get_optional(
+                    graph, url, f"members of role-holding group '{group.get('displayName')}'")
+                if body is None:
+                    log_warn(f"  Could not expand group '{group.get('displayName')}' ({result}).")
+                    status = result
+                    members = []
+                    break
+                members.extend(m for m in body.get("value", [])
+                               if m.get("@odata.type") != "#microsoft.graph.group")
+                url = body.get("@odata.nextLink")
+            cache[gid] = members
+        for member in cache[gid]:
+            expanded.append({"role": rm["role"], "member": member,
+                             "assignment_type": rm["assignment_type"],
+                             "via_group": group,
+                             "directory_scope_id": rm["directory_scope_id"]})
+    if expanded:
+        log_info(f"  {len(expanded)} role membership(s) held through role-assignable groups")
+    return expanded, status
 
 
 def fetch_security_defaults(graph):
@@ -835,14 +955,23 @@ def sync_directory_role_members(pg_conn, client_id, role_members):
             )
             sid_to_guid = dict(cur.fetchall())
 
+        seen = set()
         for rm in role_members:
             role, member = rm["role"], rm["member"]
+            via = rm.get("via_group") or {}
+            key = (role["id"], member["id"], rm.get("assignment_type", "active"),
+                   via.get("id"), rm.get("directory_scope_id", "/"))
+            if key in seen:
+                continue
+            seen.add(key)
             on_prem_sid = member.get("onPremisesSecurityIdentifier")
             rows.append((
                 client_id, role["id"], role.get("roleTemplateId"), role.get("displayName"),
                 member["id"], member.get("@odata.type"), member.get("displayName"),
                 member.get("userPrincipalName"), sid_to_guid.get(on_prem_sid),
                 on_prem_sid, member.get("accountEnabled"), now,
+                rm.get("assignment_type", "active"), via.get("id"), via.get("displayName"),
+                rm.get("directory_scope_id", "/"),
             ))
 
         cur.execute("DELETE FROM entra_directory_role_member WHERE client_id = %s;", (client_id,))
@@ -854,7 +983,8 @@ def sync_directory_role_members(pg_conn, client_id, role_members):
                     (client_id, role_id, role_template_id, role_display_name,
                      member_id, member_type, member_display_name, member_upn,
                      on_prem_object_guid, on_premises_security_identifier,
-                     account_enabled, collected_at)
+                     account_enabled, collected_at,
+                     assignment_type, via_group_id, via_group_display_name, directory_scope_id)
                 VALUES %s
                 """,
                 rows,
@@ -863,7 +993,8 @@ def sync_directory_role_members(pg_conn, client_id, role_members):
     return len(rows)
 
 
-def sync_security_posture(pg_conn, client_id, security_defaults_enabled, ca_policies):
+def sync_security_posture(pg_conn, client_id, security_defaults_enabled, ca_policies,
+                          role_eligibility_status=None, group_expansion_status=None):
     """Combines both into one row per client, same snapshot-replace
     philosophy as entra_user -- these two facts are only ever meaningful
     together (see plugin 10004's own docstring for why), so storing them
@@ -888,10 +1019,12 @@ def sync_security_posture(pg_conn, client_id, security_defaults_enabled, ca_poli
         cur.execute(
             """
             INSERT INTO entra_security_posture
-                (client_id, security_defaults_enabled, ca_policies, collected_at)
-            VALUES (%s, %s, %s, %s);
+                (client_id, security_defaults_enabled, ca_policies, collected_at,
+                 role_eligibility_status, group_expansion_status)
+            VALUES (%s, %s, %s, %s, %s, %s);
             """,
-            (client_id, security_defaults_enabled, json.dumps(slim_policies), now),
+            (client_id, security_defaults_enabled, json.dumps(slim_policies), now,
+             role_eligibility_status, group_expansion_status),
         )
     pg_conn.commit()
     return len(slim_policies)
@@ -1138,18 +1271,24 @@ def main():
 
         log_header("Collecting Directory Role Membership from Microsoft Graph")
         role_members = fetch_directory_roles_with_members(graph)
+        eligible_members, role_eligibility_status = fetch_role_eligibility(graph)
+        role_members += eligible_members
+        group_members, group_expansion_status = expand_group_role_members(graph, role_members)
+        role_members += group_members
         role_member_count = sync_directory_role_members(pg_conn, client_id, role_members)
         completed_steps.append("directory role membership")
-        global_admin_count = sum(
-            1 for rm in role_members if rm["role"].get("roleTemplateId") == GLOBAL_ADMIN_ROLE_TEMPLATE_ID
-        )
+        global_admin_count = len({
+            rm["member"]["id"] for rm in role_members
+            if rm["role"].get("roleTemplateId") == GLOBAL_ADMIN_ROLE_TEMPLATE_ID
+        })
         log_success(f"Recorded {role_member_count} role membership(s), "
                     f"including {global_admin_count} Global Administrator member(s).")
 
         log_header("Collecting Security Posture (Security Defaults + Conditional Access)")
         security_defaults_enabled = fetch_security_defaults(graph)
         ca_policies = fetch_conditional_access_policies(graph)
-        ca_policy_count = sync_security_posture(pg_conn, client_id, security_defaults_enabled, ca_policies)
+        ca_policy_count = sync_security_posture(pg_conn, client_id, security_defaults_enabled, ca_policies,
+                                                role_eligibility_status, group_expansion_status)
         completed_steps.append("security posture")
         log_success(f"Security Defaults enabled: {security_defaults_enabled}. "
                     f"{ca_policy_count} Conditional Access polic{'y' if ca_policy_count == 1 else 'ies'} recorded.")

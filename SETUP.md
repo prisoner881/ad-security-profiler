@@ -114,6 +114,11 @@ PostgreSQL password unless it's already set via `PGPASSWORD` or a
   Granting the Delegated version by mistake still shows a green
   "Granted" checkmark in the portal, but produces a 403 error here --
   a real client hit exactly this before catching it.
+  `RoleManagement.Read.Directory` also covers PIM-eligible role
+  assignments, which are read when the tenant has Entra ID P2 (or ID
+  Governance); without that licence the collector records that
+  eligibility couldn't be checked and carries on. `Directory.Read.All`
+  covers expanding the members of groups that hold a directory role.
 
 None of these need to be typed on the command line if you'd rather
 not -- every password/secret prompts securely (hidden input) if you

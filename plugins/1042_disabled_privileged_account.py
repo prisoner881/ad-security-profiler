@@ -43,13 +43,24 @@ OUs, PKI objects and CA objects; see acl_edge's scope documentation).
   "still holds privilege"; a stale adminCount grants nothing, and plugin
   1025 already reports it as a stale marker. Such accounts are no longer
   reported here.
+
+[v1.2] Privileged SID history is a third privilege path. Collector 0.5.16
+decodes sIDHistory to "S-1-5-..." strings (it was base64/garbled before,
+so it could only be listed, never classified). A disabled account whose
+SID history holds a domain SID with a privileged RID (500, 498, 512, 516,
+517, 518, 519, 520, 521, 526, 527), a privileged BUILTIN group
+(S-1-5-32-544/548/549/550/551/552) or Enterprise Domain Controllers
+(S-1-5-9) regains that privilege on re-enablement just like a group
+membership; it is now reported at 'high', with the SIDs in
+detail.privileged_sid_history (plugin 1008 reports the SID history
+itself). Membership still takes precedence in the summary.
 """
 
 PLUGIN = {
     "plugin_id": 1042,
     "category": "User Accounts",
     "name": "Disabled Account Still Holding Privilege",
-    "version": "1.1",
+    "version": "1.2",
     "revision_date": "2026-10-04",
     "remediation": (
         "Treat a disabled privileged account as an account that still "
@@ -83,7 +94,7 @@ PLUGIN = {
         "Identifies accounts that are disabled in Active Directory but "
         "still hold privilege -- an effective membership (including "
         "nested and primary-group membership) in a well-known "
-        "privileged group, or Tier 0 rights (control or ownership of a "
+        "privileged group, a privileged SID in its SID history, or Tier 0 rights (control or ownership of a "
         "Tier 0 object, or DCSync), directly or through a group. A "
         "leftover admin_count marker alone is plugin 1025's finding. "
         "Disabling an account "
@@ -150,6 +161,23 @@ PLUGIN = {
             WHERE client_id = %(client_id)s
               AND privilege_source <> 'protected_group_member'
             GROUP BY object_guid
+        ),
+        sid_history_privileged AS (
+            -- [v1.2] sIDHistory is decoded to "S-1-5-..." strings since
+            -- collector 0.5.16, so a privileged SID carried in SID history
+            -- (which the account's tokens include, like membership) can be
+            -- recognised: a domain SID with a privileged RID, a privileged
+            -- BUILTIN group or Enterprise Domain Controllers.
+            SELECT u.object_guid,
+                   array_agg(DISTINCT sh ORDER BY sh) AS privileged_sids
+            FROM ad_user u
+            CROSS JOIN LATERAL unnest(u.sid_history) AS sh
+            WHERE u.client_id = %(client_id)s
+              AND u.valid_to IS NULL
+              AND (sh ~ '^S-1-5-21-[0-9]+-[0-9]+-[0-9]+-(500|498|512|516|517|518|519|520|521|526|527)$'
+                   OR sh ~ '^S-1-5-32-(544|548|549|550|551|552)$'
+                   OR sh = 'S-1-5-9')
+            GROUP BY u.object_guid
         )
         SELECT
             'fail' AS status,
@@ -164,6 +192,9 @@ PLUGIN = {
                 || CASE
                        WHEN pm.via_groups IS NOT NULL
                            THEN 'effective member of ' || array_to_string(pm.via_groups, ', ')
+                       WHEN shp.privileged_sids IS NOT NULL
+                           THEN 'privileged SID in SID history: '
+                                || array_to_string(shp.privileged_sids, ', ')
                        ELSE 'Tier 0 rights: ' || array_to_string(ap.privilege_sources, ', ')
                    END
                 || ') -- re-enabling it restores that privilege in a single write'
@@ -180,6 +211,7 @@ PLUGIN = {
                 'service_principal_names', u.service_principal_names,
                 'has_sid_history', COALESCE(array_length(u.sid_history, 1), 0) > 0,
                 'sid_history', u.sid_history,
+                'privileged_sid_history', shp.privileged_sids,
                 'pwd_last_set', u.pwd_last_set,
                 'password_age_days',
                     CASE WHEN u.pwd_last_set IS NULL THEN NULL
@@ -192,10 +224,12 @@ PLUGIN = {
             ON do2.object_guid = u.object_guid AND do2.client_id = u.client_id
         LEFT JOIN privileged_members pm ON pm.member_guid = u.object_guid
         LEFT JOIN acl_privileged ap ON ap.object_guid = u.object_guid
+        LEFT JOIN sid_history_privileged shp ON shp.object_guid = u.object_guid
         WHERE u.valid_to IS NULL
           AND u.client_id = %(client_id)s
           AND u.is_enabled IS FALSE
-          AND (pm.member_guid IS NOT NULL OR ap.object_guid IS NOT NULL)
+          AND (pm.member_guid IS NOT NULL OR ap.object_guid IS NOT NULL
+               OR shp.object_guid IS NOT NULL)
           -- Disabled by design in every domain; excluding these keeps the
           -- finding actionable rather than perpetually noisy.
           AND COALESCE(do2.object_sid, '') NOT LIKE '%%-501'
