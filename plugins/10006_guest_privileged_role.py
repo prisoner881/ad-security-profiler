@@ -33,13 +33,26 @@ Guest Inviter); medium for every other role; low when the guest is
 disabled. External users created with userType 'Member' are now caught by
 their #EXT# UPN. Not visible (collector limitation): PIM-eligible
 assignments and roles held through a role-assignable group.
+
+[v1.2] Requires entra_graph_collector.py 0.6.0 / schema v37. Also counts
+roles a guest is PIM-eligible for and roles held through a role-assignable
+group. Still one finding per guest per role (identity unchanged); every
+path ("active", "PIM-eligible", "via group <name>", plus a non-tenant-wide
+scope) is listed sorted in detail.assignment_paths and summarized. Severity
+starts from the role tier and is taken from the strongest path: an
+eligible-only assignment is one step lower (except Global Administrator and
+Privileged Role Administrator, which stay at the tier), an
+administrative-unit-only scope one step lower, floor low; disabled guests
+stay low. status is 'fail' at medium/high, 'warn' at low. If eligibility or
+group membership couldn't be read (e.g. no Entra ID P2),
+detail.coverage_notes says so.
 """
 
 PLUGIN = {
     "plugin_id": 10006,
     "category": "Hybrid Identity",
     "name": "Guest Account Holds a Privileged Directory Role",
-    "version": "1.1",
+    "version": "1.2",
     "revision_date": "2026-10-04",
     "remediation": (
         "Confirm this is intentional and necessary -- a genuine "
@@ -62,18 +75,22 @@ PLUGIN = {
     "description": (
         "A guest account (an external identity via B2B collaboration -- "
         "userType Guest, or an #EXT# UPN -- not provisioned or fully "
-        "controlled by this tenant) holds an activated directory role. "
+        "controlled by this tenant) holds a directory role -- actively, "
+        "as PIM-eligible, or through a role-assignable group (all paths "
+        "listed per guest and role). "
         "High for privileged/administrative roles, low for read-only "
         "roles commonly given to guests (Directory Readers, Reports "
         "Reader, ...), medium otherwise, low when the guest is "
-        "disabled. Guest accounts exist for "
+        "disabled; an eligible-only (except Global/Privileged Role "
+        "Administrator) or administrative-unit-only assignment is one "
+        "step lower. Guest accounts exist for "
         "collaboration, not tenant administration -- their credential "
         "security and lifecycle are governed by their home "
         "organization, outside this tenant's control. Worth surfacing "
         "regardless of which specific role is held. Built entirely from "
         "data already collected for plugins 10002/10003 "
-        "(entra_directory_role_member) plus one added field "
-        "(entra_user.user_type) -- no new Graph collection required."
+        "(entra_directory_role_member) plus entra_user.user_type; gaps "
+        "in eligibility/group visibility are noted in the detail."
     ),
     "base_severity": "high",
     "query": """
@@ -111,36 +128,88 @@ PLUGIN = {
             ('ac16e43d-7b2d-40e0-ac05-243ff356ab5b'::uuid, 'low'),   -- Message Center Privacy Reader
             ('75934031-6c7e-415a-99d7-48dbd49e875e'::uuid, 'low'),   -- Usage Summary Reports Reader
             ('95e79109-95c0-4d8e-aee3-d01accf2d47b'::uuid, 'low')    -- Guest Inviter
+        ),
+        posture AS (
+            SELECT array_remove(ARRAY[
+                       CASE WHEN sp.role_eligibility_status IS DISTINCT FROM 'ok' THEN
+                           'PIM-eligible assignments could not be checked: '
+                           || COALESCE(sp.role_eligibility_status, 'not collected (collector older than 0.6.0)') END,
+                       CASE WHEN sp.group_expansion_status IS DISTINCT FROM 'ok' THEN
+                           'Membership of role-holding groups could not be checked: '
+                           || COALESCE(sp.group_expansion_status, 'not collected (collector older than 0.6.0)') END
+                   ], NULL) AS notes
+              FROM (SELECT 1) one
+              LEFT JOIN entra_security_posture sp ON sp.client_id = %(client_id)s
+        ),
+        paths AS (
+            SELECT rm.client_id, rm.member_id, rm.member_display_name, rm.member_upn,
+                   rm.account_enabled, rm.role_display_name, rm.role_template_id,
+                   COALESCE(rm.role_template_id, rm.role_id) AS role_key,
+                   eu.user_type,
+                   COALESCE(rt.tier, 'medium') AS tier,
+                   -- steps below the role tier for this path
+                   CASE WHEN rm.assignment_type = 'eligible'
+                             AND rm.role_template_id IS DISTINCT FROM '62e90394-69f5-4237-9190-012177145e10'
+                             AND rm.role_template_id IS DISTINCT FROM 'e8611ab8-c189-46e8-94e1-60213ab1f814'
+                        THEN 1 ELSE 0 END
+                   + CASE WHEN rm.directory_scope_id <> '/' THEN 1 ELSE 0 END AS steps_down,
+                   (CASE WHEN rm.assignment_type = 'eligible' THEN 'PIM-eligible' ELSE 'active' END
+                   || CASE WHEN rm.via_group_id IS NOT NULL
+                           THEN ' via group ' || COALESCE(rm.via_group_display_name, rm.via_group_id::text)
+                           ELSE '' END
+                   || CASE WHEN rm.directory_scope_id <> '/'
+                           THEN ' at scope ' || rm.directory_scope_id ELSE '' END) COLLATE "C" AS path
+              FROM entra_directory_role_member rm
+              LEFT JOIN entra_user eu ON eu.entra_object_id = rm.member_id AND eu.client_id = rm.client_id
+              LEFT JOIN role_tier rt ON rt.role_template_id = rm.role_template_id
+             WHERE rm.client_id = %(client_id)s
+               AND rm.member_type = '#microsoft.graph.user'
+               AND (eu.user_type = 'Guest'
+                    OR COALESCE(eu.user_principal_name, rm.member_upn) ILIKE '%%#EXT#%%')
+        ),
+        held AS (
+            SELECT p.member_id, p.role_key,
+                   min(p.role_template_id::text)::uuid AS role_template_id,
+                   min(p.role_display_name) AS role_display_name,
+                   min(p.member_display_name) AS member_display_name,
+                   min(p.member_upn) AS member_upn,
+                   min(p.user_type) AS user_type,
+                   min(p.tier) AS tier,
+                   bool_or(p.account_enabled) AS account_enabled,
+                   bool_or(p.account_enabled IS FALSE) AND NOT bool_or(p.account_enabled IS TRUE) AS disabled,
+                   greatest(1, CASE min(p.tier) WHEN 'high' THEN 3 WHEN 'medium' THEN 2 ELSE 1 END
+                               - min(p.steps_down)) AS sev_rank,
+                   jsonb_agg(DISTINCT p.path ORDER BY p.path) AS assignment_paths,
+                   string_agg(DISTINCT p.path, '; ' ORDER BY p.path) AS path_summary
+              FROM paths p
+             GROUP BY p.member_id, p.role_key
         )
         SELECT
-            CASE WHEN COALESCE(rt.tier, 'medium') = 'low' OR rm.account_enabled IS FALSE
-                 THEN 'warn' ELSE 'fail' END AS status,
-            md5(rm.member_id::text || ':' || COALESCE(rm.role_template_id, rm.role_id)::text)::uuid AS object_guid,
+            CASE WHEN h.disabled OR h.sev_rank = 1 THEN 'warn' ELSE 'fail' END AS status,
+            md5(h.member_id::text || ':' || h.role_key::text)::uuid AS object_guid,
             NULL AS stig_severity,
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
-            CASE WHEN rm.account_enabled IS FALSE THEN 'low'
-                 ELSE COALESCE(rt.tier, 'medium') END AS fd_severity,
-            'Guest account ' || COALESCE(rm.member_display_name, rm.member_upn, rm.member_id::text)
-                || ' holds the "' || COALESCE(rm.role_display_name, rm.role_template_id::text, rm.role_id::text)
-                || '" directory role' AS summary,
+            CASE WHEN h.disabled THEN 'low'
+                 ELSE CASE h.sev_rank WHEN 3 THEN 'high' WHEN 2 THEN 'medium' ELSE 'low' END
+            END AS fd_severity,
+            'Guest account ' || COALESCE(h.member_display_name, h.member_upn, h.member_id::text)
+                || ' holds the "' || COALESCE(h.role_display_name, h.role_key::text)
+                || '" directory role (' || h.path_summary || ')' AS summary,
             jsonb_build_object(
-                'member_id', rm.member_id,
-                'member_display_name', rm.member_display_name,
-                'member_upn', rm.member_upn,
-                'user_type', eu.user_type,
-                'role_display_name', rm.role_display_name,
-                'role_template_id', rm.role_template_id,
-                'role_tier', COALESCE(rt.tier, 'medium'),
-                'account_enabled', rm.account_enabled
+                'member_id', h.member_id,
+                'member_display_name', h.member_display_name,
+                'member_upn', h.member_upn,
+                'user_type', h.user_type,
+                'role_display_name', h.role_display_name,
+                'role_template_id', h.role_template_id,
+                'role_tier', h.tier,
+                'account_enabled', h.account_enabled,
+                'assignment_paths', h.assignment_paths,
+                'coverage_notes', to_jsonb(po.notes)
             ) AS detail
-        FROM entra_directory_role_member rm
-        LEFT JOIN entra_user eu ON eu.entra_object_id = rm.member_id AND eu.client_id = rm.client_id
-        LEFT JOIN role_tier rt ON rt.role_template_id = rm.role_template_id
-        WHERE rm.client_id = %(client_id)s
-          AND rm.member_type = '#microsoft.graph.user'
-          AND (eu.user_type = 'Guest'
-               OR COALESCE(eu.user_principal_name, rm.member_upn) ILIKE '%%#EXT#%%')
+        FROM held h
+        CROSS JOIN posture po
     """,
 }

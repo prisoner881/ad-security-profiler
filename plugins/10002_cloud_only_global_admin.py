@@ -30,16 +30,30 @@ at all) rather than on_prem_object_guid IS NULL, which was also NULL for
 synced users whose SID simply wasn't found in the collected domain (another
 domain/forest). Severity lowered to low (cloud-only privileged accounts are
 Microsoft's recommended pattern), and info when the account is disabled.
-Coverage note: only active, direct user assignments from /directoryRoles
-are collected -- PIM-eligible assignments and GA held through a
-role-assignable group are not visible (would need a collector change).
+Coverage note (v1.1): only active, direct user assignments were visible.
+
+[v1.2] Requires entra_graph_collector.py 0.6.0 / schema v37. Exposure now
+counts every way the principal holds or can obtain Global Administrator:
+active, PIM-eligible (can activate on demand), and membership of a
+role-assignable group that holds it ("via group <name>"). All paths for one
+principal are aggregated into one finding (identity unchanged: member_id),
+listed sorted in detail.assignment_paths and summarized in the summary.
+Eligible keeps the same severity as active (Global Administrator), an
+administrative-unit-only scope is one step lower. Service principals
+holding Global Administrator are now reported too, labelled as such, at
+medium (a workload identity with GA is protected only by its credential --
+no MFA, outside user Conditional Access). The group's own row is not a
+finding (its members are). When the collector couldn't read PIM
+eligibility or expand role-holding groups (e.g. no Entra ID P2 licence),
+detail.coverage_notes says so, and one separate low warn finding per
+client records the coverage gap.
 """
 
 PLUGIN = {
     "plugin_id": 10002,
     "category": "Hybrid Identity",
     "name": "Cloud-Only Global Administrator (No On-Prem Account)",
-    "version": "1.1",
+    "version": "1.2",
     "revision_date": "2026-10-04",
     "remediation": (
         "Confirm this account's security posture was set deliberately, "
@@ -53,7 +67,13 @@ PLUGIN = {
         "access to sign-in attempts alerted on). If this account is a "
         "day-to-day admin identity rather than break-glass, consider "
         "whether it should be brought into hybrid sync so this "
-        "project's on-prem findings can actually cover it."
+        "project's on-prem findings can actually cover it. For a "
+        "PIM-eligible assignment, confirm activation requires MFA and "
+        "approval; for one held via a group, review who can change that "
+        "group's membership. A service principal should almost never "
+        "hold Global Administrator: grant it the narrowest role or Graph "
+        "permission it needs instead, and audit who owns it and its "
+        "credentials."
     ),
     "control_id": "HYBRID-002",
     "framework_tags": [],
@@ -62,43 +82,110 @@ PLUGIN = {
          "url": "https://learn.microsoft.com/en-us/entra/identity/role-based-access-control/security-emergency-access"},
     ],
     "description": (
-        "A Global Administrator with no corresponding on-prem AD "
-        "account bypasses every on-prem control this project's other "
-        "plugins check -- by construction, not misconfiguration. Not "
-        "inherently wrong (this is Microsoft's own recommended pattern "
-        "for break-glass/emergency-access accounts, and common for "
-        "cloud-first organizations generally), but worth confirming "
-        "its security posture was set deliberately rather than left at "
-        "Entra's own defaults, since none of this project's on-prem "
-        "hardening findings reach an account on-prem AD has never "
-        "heard of. Severity is low (info when the account is "
-        "disabled), since cloud-only privileged accounts are what "
-        "Microsoft recommends. Only active, direct user assignments are "
-        "visible: PIM-eligible assignments and Global Administrator held "
-        "through a role-assignable group are not collected."
+        "A principal that holds -- or can activate -- Global "
+        "Administrator and has no corresponding on-prem AD account "
+        "bypasses every on-prem control this project's other plugins "
+        "check -- by construction, not misconfiguration. Counts active, "
+        "PIM-eligible and role-assignable-group (\"via group\") "
+        "assignments, one finding per principal with every path listed. "
+        "Not inherently wrong for users (Microsoft's own recommended "
+        "pattern for break-glass/emergency-access accounts, and common "
+        "for cloud-first organizations), but worth confirming its "
+        "security posture was set deliberately. Severity is low for "
+        "users (info when disabled or only administrative-unit scoped), "
+        "medium for service principals (credential-only protection). "
+        "When PIM eligibility or group membership couldn't be read, the "
+        "gap is noted in detail and as a separate low finding."
     ),
     "base_severity": "low",
     "query": """
+        WITH posture AS (
+            SELECT sp.role_eligibility_status, sp.group_expansion_status,
+                   array_remove(ARRAY[
+                       CASE WHEN sp.role_eligibility_status IS DISTINCT FROM 'ok' THEN
+                           'PIM-eligible assignments could not be checked: '
+                           || COALESCE(sp.role_eligibility_status, 'not collected (collector older than 0.6.0)') END,
+                       CASE WHEN sp.group_expansion_status IS DISTINCT FROM 'ok' THEN
+                           'Membership of role-holding groups could not be checked: '
+                           || COALESCE(sp.group_expansion_status, 'not collected (collector older than 0.6.0)') END
+                   ], NULL) AS notes
+              FROM (SELECT 1) one
+              LEFT JOIN entra_security_posture sp ON sp.client_id = %(client_id)s
+        ),
+        paths AS (
+            SELECT rm.*,
+                   (CASE WHEN rm.assignment_type = 'eligible' THEN 'PIM-eligible' ELSE 'active' END
+                   || CASE WHEN rm.via_group_id IS NOT NULL
+                           THEN ' via group ' || COALESCE(rm.via_group_display_name, rm.via_group_id::text)
+                           ELSE '' END
+                   || CASE WHEN rm.directory_scope_id <> '/'
+                           THEN ' at scope ' || rm.directory_scope_id ELSE '' END) COLLATE "C" AS path
+              FROM entra_directory_role_member rm
+             WHERE rm.client_id = %(client_id)s
+               AND rm.role_template_id = '62e90394-69f5-4237-9190-012177145e10'
+               AND rm.member_type IN ('#microsoft.graph.user', '#microsoft.graph.servicePrincipal')
+        ),
+        holders AS (
+            SELECT p.member_id,
+                   min(p.member_type) AS member_type,
+                   min(p.member_display_name) AS member_display_name,
+                   min(p.member_upn) AS member_upn,
+                   bool_or(p.account_enabled) AS account_enabled,
+                   bool_or(p.account_enabled IS FALSE) AND NOT bool_or(p.account_enabled IS TRUE) AS disabled,
+                   bool_or(p.directory_scope_id = '/') AS tenant_wide,
+                   jsonb_agg(DISTINCT p.path ORDER BY p.path) AS assignment_paths,
+                   string_agg(DISTINCT p.path, '; ' ORDER BY p.path) AS path_summary
+              FROM paths p
+              LEFT JOIN entra_user eu ON eu.entra_object_id = p.member_id AND eu.client_id = p.client_id
+             GROUP BY p.member_id
+            HAVING bool_and(p.on_premises_security_identifier IS NULL)
+               AND bool_and(eu.on_premises_security_identifier IS NULL)
+               AND bool_and(p.on_prem_object_guid IS NULL)
+        )
         SELECT
             'warn' AS status,
-            rm.member_id AS object_guid,
+            h.member_id AS object_guid,
             NULL AS stig_severity,
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
-            CASE WHEN rm.account_enabled IS FALSE THEN 'info' ELSE 'low' END AS fd_severity,
-            'Global Administrator ' || COALESCE(rm.member_display_name, rm.member_upn, rm.member_id::text)
-                || ' has no corresponding on-prem AD account' AS summary,
+            CASE WHEN h.disabled OR NOT h.tenant_wide THEN
+                     CASE WHEN h.member_type = '#microsoft.graph.servicePrincipal' THEN 'low' ELSE 'info' END
+                 WHEN h.member_type = '#microsoft.graph.servicePrincipal' THEN 'medium'
+                 ELSE 'low' END AS fd_severity,
+            CASE WHEN h.member_type = '#microsoft.graph.servicePrincipal'
+                 THEN 'Service principal ' ELSE 'User ' END
+                || COALESCE(h.member_display_name, h.member_upn, h.member_id::text)
+                || ' holds Global Administrator (' || h.path_summary
+                || ') with no corresponding on-prem AD account' AS summary,
             jsonb_build_object(
-                'member_display_name', rm.member_display_name,
-                'member_upn', rm.member_upn,
-                'member_id', rm.member_id,
-                'account_enabled', rm.account_enabled
+                'member_display_name', h.member_display_name,
+                'member_upn', h.member_upn,
+                'member_id', h.member_id,
+                'member_type', h.member_type,
+                'principal_kind', CASE WHEN h.member_type = '#microsoft.graph.servicePrincipal'
+                                       THEN 'service principal' ELSE 'user' END,
+                'account_enabled', h.account_enabled,
+                'assignment_paths', h.assignment_paths,
+                'coverage_notes', to_jsonb(po.notes)
             ) AS detail
-        FROM entra_directory_role_member rm
-        WHERE rm.client_id = %(client_id)s
-          AND rm.role_template_id = '62e90394-69f5-4237-9190-012177145e10'
-          AND rm.member_type = '#microsoft.graph.user'
-          AND rm.on_premises_security_identifier IS NULL
+        FROM holders h
+        CROSS JOIN posture po
+        UNION ALL
+        SELECT
+            'warn',
+            md5(%(client_id)s::text || ':10002:role-coverage')::uuid,
+            NULL, NULL, NULL, NULL,
+            'low',
+            'Global Administrator coverage is incomplete: '
+                || array_to_string(po.notes, '; '),
+            jsonb_build_object(
+                'role_eligibility_status', po.role_eligibility_status,
+                'group_expansion_status', po.group_expansion_status,
+                'coverage_notes', to_jsonb(po.notes)
+            )
+        FROM posture po
+        WHERE cardinality(po.notes) > 0
+          AND EXISTS (SELECT 1 FROM entra_directory_role_member x WHERE x.client_id = %(client_id)s)
     """,
 }

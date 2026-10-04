@@ -2,7 +2,7 @@
 """
 adaudit.py -- AD Security & Compliance Plugin Runner
 ======================================================
-VERSION: 0.7.5
+VERSION: 0.7.6
 
 Companion to adprofiler.py. Where adprofiler.py collects AD data,
 adaudit.py analyzes it: discovers every plugin file in plugins/, runs each
@@ -132,7 +132,7 @@ from datetime import datetime, timezone
 import psycopg2
 import psycopg2.extras
 
-VERSION = "0.7.5"
+VERSION = "0.7.6"
 
 # [test-candidate-branch] Always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
@@ -370,8 +370,9 @@ def connect_postgres():
 # [v0.7.4] Lowest schema version this adaudit.py and its plugins work
 # against: v34 added v_privileged_principal and acl_edge.inherit_only
 # (used by many plugins), v35 the 'retired' change_status, v36 the RODC /
-# primary-group / template columns several plugins read.
-REQUIRED_SCHEMA_VERSION = 36
+# primary-group / template columns several plugins read, v37 KeyCredential /
+# dSHeuristics / sPNMappings / RBCD-by-SID / Entra eligibility columns.
+REQUIRED_SCHEMA_VERSION = 37
 
 
 def check_schema_version(conn):

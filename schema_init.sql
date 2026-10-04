@@ -3690,6 +3690,69 @@ COMMENT ON VIEW ad_intel.v_privileged_principal IS
     'client_id. See schema_migration_v34.sql.';
 
 -- ============================================================================
+-- v37 ADDITIONS -- see schema_migration_v37.sql.
+-- ============================================================================
+
+ALTER TABLE ad_intel.ad_user     ADD COLUMN IF NOT EXISTS key_credentials jsonb;
+ALTER TABLE ad_intel.ad_computer ADD COLUMN IF NOT EXISTS key_credentials jsonb;
+COMMENT ON COLUMN ad_intel.ad_user.key_credentials IS
+    'Parsed msDS-KeyCredentialLink entries: [{key_id, device_id, usage (NGC, FIDO, ...), '
+    'source (AD/AzureAD), creation_time, approximate_last_logon, custom_flags, parse_error}]. '
+    'Key material is not stored. (schema v37)';
+COMMENT ON COLUMN ad_intel.ad_computer.key_credentials IS
+    'Parsed msDS-KeyCredentialLink entries; see ad_user.key_credentials. (schema v37)';
+
+ALTER TABLE ad_intel.ad_domain
+    ADD COLUMN IF NOT EXISTS dsheuristics_admin_sd_ex_mask smallint,
+    ADD COLUMN IF NOT EXISTS spn_mappings jsonb;
+
+CREATE TABLE IF NOT EXISTS ad_intel.rbcd_unresolved_trustee_edge (
+    edge_id             BIGINT GENERATED ALWAYS AS IDENTITY,
+    client_id           UUID NOT NULL,
+    trustee_sid         TEXT NOT NULL,
+    target_guid         UUID NOT NULL,
+    valid_from          TIMESTAMPTZ NOT NULL,
+    valid_to            TIMESTAMPTZ,
+    run_id_valid_from   BIGINT NOT NULL,
+    run_id_valid_to     BIGINT,
+    PRIMARY KEY (edge_id, valid_from),
+    CHECK (valid_to IS NULL OR valid_to > valid_from),
+    FOREIGN KEY (target_guid, client_id) REFERENCES ad_intel.directory_object(object_guid, client_id) ON DELETE RESTRICT,
+    FOREIGN KEY (run_id_valid_from, client_id) REFERENCES ad_intel.sync_run(run_id, client_id) ON DELETE RESTRICT,
+    FOREIGN KEY (run_id_valid_to, client_id) REFERENCES ad_intel.sync_run(run_id, client_id) ON DELETE RESTRICT
+);
+COMMENT ON TABLE ad_intel.rbcd_unresolved_trustee_edge IS
+    'An RBCD trustee (msDS-AllowedToActOnBehalfOfOtherIdentity allow ACE) on '
+    'target_guid whose SID is not a collected object -- a well-known SID such '
+    'as Everyone/Authenticated Users, a principal from another domain, or an '
+    'orphaned SID. Resolved trustees are in delegation_edge. (schema v37)';
+CREATE INDEX IF NOT EXISTS idx_rbcd_unresolved_trustee_edge_open
+    ON ad_intel.rbcd_unresolved_trustee_edge (client_id, target_guid) WHERE valid_to IS NULL;
+
+ALTER TABLE ad_intel.entra_directory_role_member
+    ADD COLUMN IF NOT EXISTS assignment_type text DEFAULT 'active' NOT NULL,
+    ADD COLUMN IF NOT EXISTS via_group_id uuid,
+    ADD COLUMN IF NOT EXISTS via_group_display_name text,
+    ADD COLUMN IF NOT EXISTS directory_scope_id text DEFAULT '/' NOT NULL;
+ALTER TABLE ad_intel.entra_directory_role_member
+    DROP CONSTRAINT IF EXISTS entra_directory_role_member_pkey;
+CREATE UNIQUE INDEX IF NOT EXISTS entra_directory_role_member_key
+    ON ad_intel.entra_directory_role_member
+       (client_id, role_id, member_id, assignment_type,
+        COALESCE(via_group_id, '00000000-0000-0000-0000-000000000000'::uuid), directory_scope_id);
+COMMENT ON COLUMN ad_intel.entra_directory_role_member.assignment_type IS
+    '''active'' (current member, from /directoryRoles) or ''eligible'' (PIM-eligible: can '
+    'activate the role on demand). (schema v37)';
+COMMENT ON COLUMN ad_intel.entra_directory_role_member.via_group_id IS
+    'Set when the member holds the role through membership of this group '
+    '(role-assignable group); NULL for a direct assignment. (schema v37)';
+
+ALTER TABLE ad_intel.entra_security_posture
+    ADD COLUMN IF NOT EXISTS role_eligibility_status text,
+    ADD COLUMN IF NOT EXISTS group_expansion_status text;
+
+
+-- ============================================================================
 -- v31 ADDITIONS -- schema version tracking.
 -- ============================================================================
 
@@ -3703,7 +3766,7 @@ CREATE TABLE schema_migration_history (
 -- pretense of having stepped through intermediate versions that were
 -- never actually separately applied to this database.
 INSERT INTO schema_migration_history (version_number, description) VALUES
-    (36, 'Fresh install via schema_init.sql, consolidated through v36');
+    (37, 'Fresh install via schema_init.sql, consolidated through v37');
 
 -- ============================================================================
 -- PARTITIONED TABLE REGISTRY + INITIAL PARTITION CREATION

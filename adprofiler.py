@@ -4,7 +4,7 @@
  adprofiler.py -- Active Directory Security & Compliance Profiler (Collector)
 ================================================================================
 
-VERSION: 0.5.15
+VERSION: 0.5.16
 
 PURPOSE:
     Connects to an on-premise Active Directory Domain Controller via LDAP,
@@ -180,7 +180,7 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
-VERSION = "0.5.15"
+VERSION = "0.5.16"
 # [client-test-branch] These are always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
 # connect_postgres() is ever called -- the values here are placeholders,
@@ -360,7 +360,9 @@ NTAUTH_FILTER = "(objectClass=*)"
 
 # [v0.5.4] AD Sites and Subnets -- both live in the Configuration NC,
 # like NTAuthCertificates/cert templates/enrollment services above.
-SITE_ATTRS = ["objectGUID", "distinguishedName", "cn"]
+# [v0.5.16] gPLink/gPOptions: GPOs can be linked to sites, not just the
+# domain and OUs (plugins 9004/9005 couldn't see site links).
+SITE_ATTRS = ["objectGUID", "distinguishedName", "cn", "gPLink", "gPOptions"]
 SITE_FILTER = "(objectClass=site)"
 SUBNET_ATTRS = ["objectGUID", "distinguishedName", "cn", "siteObject"]
 SUBNET_FILTER = "(objectClass=subnet)"
@@ -479,7 +481,7 @@ KNOWN_TYPED_TABLES = {"ad_user", "ad_group", "ad_computer", "ad_domain",
 KNOWN_EDGE_TABLES = {"group_member_edge", "spn_edge", "delegation_edge",
                       "fgpp_applies_to_edge", "cert_template_enabled_edge",
                       "acl_edge", "gpo_link_edge", "gmsa_password_reader_edge",
-                      "unresolved_delegation_target_edge"}
+                      "unresolved_delegation_target_edge", "rbcd_unresolved_trustee_edge"}
 
 _USE_COLOR = sys.stdout.isatty()
 
@@ -596,6 +598,59 @@ def handle_sigint(signum, frame):
 
 
 signal.signal(signal.SIGINT, handle_sigint)
+
+
+# [v0.5.16] KEYCREDENTIALLINK_BLOB ([MS-ADTS] 2.2.20): parsed so plugins can
+# tell a device's own key from one added by an attacker (shadow
+# credentials). Entry identifiers per 2.2.20.6.
+KEYCRED_USAGE = {0x00: "AdminKey", 0x01: "NGC", 0x02: "STK", 0x03: "BitlockerRecovery",
+                 0x07: "FIDO", 0x08: "FEK", 0x09: "DPAPI"}
+KEYCRED_SOURCE = {0x00: "AD", 0x01: "AzureAD"}
+
+
+def parse_key_credential_link(values):
+    """Parses msDS-KeyCredentialLink values (DN-Binary strings
+    "B:<hex char count>:<hex blob>:<owner DN>") into one dict per key:
+    key_id, device_id, usage, source, creation_time,
+    approximate_last_logon, custom_flags. A value that can't be parsed
+    is returned as {"parse_error": True} rather than dropped, so it still
+    counts as a key. The key material itself is not kept."""
+    keys = []
+    for value in values or []:
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", "replace")
+        try:
+            parts = value.split(":", 3)
+            if len(parts) < 3 or parts[0].upper() != "B":
+                raise ValueError("not DN-Binary")
+            blob = bytes.fromhex(parts[2])
+            version = struct.unpack_from("<I", blob, 0)[0]
+            if version != 0x200:
+                raise ValueError(f"unsupported version {version:#x}")
+            info = {"parse_error": False}
+            pos = 4
+            while pos + 3 <= len(blob):
+                length, ident = struct.unpack_from("<HB", blob, pos)
+                data = blob[pos + 3:pos + 3 + length]
+                pos += 3 + length
+                if ident == 0x01:
+                    info["key_id"] = data.hex()
+                elif ident == 0x04 and data:
+                    info["usage"] = KEYCRED_USAGE.get(data[0], f"0x{data[0]:02x}")
+                elif ident == 0x05 and data:
+                    info["source"] = KEYCRED_SOURCE.get(data[0], f"0x{data[0]:02x}")
+                elif ident == 0x06 and len(data) == 16:
+                    info["device_id"] = str(uuid.UUID(bytes_le=data))
+                elif ident == 0x07 and len(data) >= 2:
+                    info["custom_flags"] = data[1]
+                elif ident in (0x08, 0x09) and len(data) == 8:
+                    ts = filetime_to_datetime(struct.unpack("<q", data)[0])
+                    key = "approximate_last_logon" if ident == 0x08 else "creation_time"
+                    info[key] = ts.isoformat() if hasattr(ts, "isoformat") else ts
+        except (ValueError, struct.error) as exc:
+            info = {"parse_error": True, "error": str(exc)}
+        keys.append(info)
+    return keys
 
 
 def sid_bytes_to_str(data):
@@ -1303,12 +1358,16 @@ def get_domain_sid_and_tombstone_lifetime(conn, base_dn, config_nc):
     # which means the uniqueness checks are enforced. Plugin 4030 must
     # not report an unreadable value as if it were a safe one.
     dsheuristics_uniqueness = None
+    # [v0.5.16] dwAdminSDExMask (dSHeuristics character 16) and the forest's
+    # sPNMappings, from the same Directory Service object. None = unknown.
+    ds_extra = {"admin_sd_ex_mask": None, "spn_mappings": None}
     if config_nc:
         ds_dn = f"CN=Directory Service,CN=Windows NT,CN=Services,{config_nc}"
         try:
             entries = ldap_search(conn, ds_dn, "(objectClass=*)", ldap3.BASE,
                                   ["msDS-DeletedObjectLifetime", "tombstoneLifetime",
-                                   "dSHeuristics"], what="the Directory Service object")
+                                   "dSHeuristics", "sPNMappings"],
+                                  what="the Directory Service object")
             if entries:
                 attrs = entries[0]["attributes"]
                 dol_val = attrs.get("msDS-DeletedObjectLifetime")
@@ -1332,6 +1391,8 @@ def get_domain_sid_and_tombstone_lifetime(conn, base_dn, config_nc):
                 # the uniqueness state is now known. Absent or short
                 # dSHeuristics means the default: all checks enforced.
                 dsheuristics_uniqueness = 0
+                ds_extra["admin_sd_ex_mask"] = 0
+                ds_extra["spn_mappings"] = parse_spn_mappings(attrs.get("sPNMappings"))
                 if dsh_val:
                     dsh_str = dsh_val[0] if isinstance(dsh_val, list) else dsh_val
                     if len(dsh_str) >= 7 and dsh_str[6] == "2":
@@ -1352,6 +1413,17 @@ def get_domain_sid_and_tombstone_lifetime(conn, base_dn, config_nc):
                                      f"value {parsed!r}; treating uniqueness state "
                                      f"as undetermined rather than guessing.")
                             dsheuristics_uniqueness = None
+                    # [v0.5.16] Character 16 (dwAdminSDExMask) is a hex digit
+                    # whose bits exclude operator groups from SDProp
+                    # protection: 1 Account Operators, 2 Server Operators,
+                    # 4 Print Operators, 8 Backup Operators ([MS-ADTS]
+                    # 6.1.1.2.4.1.2). Plugins 3005/3021 need it to tell a
+                    # deliberately unprotected group from a broken one.
+                    if len(dsh_str) >= 16:
+                        try:
+                            ds_extra["admin_sd_ex_mask"] = int(dsh_str[15], 16)
+                        except ValueError:
+                            ds_extra["admin_sd_ex_mask"] = None
         except LDAPException as exc:
             log_warn(f"Could not read tombstone lifetime: {exc}")
     if tombstone_lifetime is None:
@@ -1363,7 +1435,26 @@ def get_domain_sid_and_tombstone_lifetime(conn, base_dn, config_nc):
         tombstone_lifetime = 60
 
     return (domain_sid, tombstone_lifetime, tombstone_lifetime_is_default,
-            dsheuristics_anonymous_access, dsheuristics_uniqueness)
+            dsheuristics_anonymous_access, dsheuristics_uniqueness, ds_extra)
+
+
+def parse_spn_mappings(values):
+    """[v0.5.16] sPNMappings values look like "host=alerter,http,cifs,...":
+    each alias service class is answered by the named target class.
+    Returns {alias: target}, or None when the attribute is absent (the
+    caller then uses the documented default set)."""
+    if not values:
+        return None
+    if isinstance(values, str):
+        values = [values]
+    mapping = {}
+    for value in values:
+        target, _, aliases = str(value).partition("=")
+        for alias in aliases.split(","):
+            alias = alias.strip().lower()
+            if alias:
+                mapping[alias] = target.strip().lower()
+    return mapping or None
 
 
 def ldap_attribute_exists(conn, config_nc, attribute_ldap_name):
@@ -1627,7 +1718,7 @@ REQUIRED_IDENTITY_COLUMNS = {
 # the structural check remains the backstop for a schema altered
 # outside the approved migration files, where the version number could
 # claim to be current while the actual structure doesn't match it.
-EXPECTED_SCHEMA_VERSION = 36
+EXPECTED_SCHEMA_VERSION = 37
 
 
 def check_schema_version(pg_conn):
@@ -2184,6 +2275,15 @@ def build_attributes_full(dn, attributes, raw_attributes):
             raw = raw_attributes.get("objectSid")
             full["objectSid"] = sid_bytes_to_str(raw[0]) if raw else None
             continue
+        if key == "sIDHistory":
+            # [v0.5.16] Binary SIDs, like objectSid -- but ldap3 has no
+            # formatter for this attribute, so it arrived as raw bytes and
+            # normalize_value() stored base64 (or mangled text when the
+            # bytes happened to decode as UTF-8). Plugins 1008/2014/3001
+            # could see that SID history existed but not classify it.
+            raw = raw_attributes.get("sIDHistory") or []
+            full["sIDHistory"] = [sid_bytes_to_str(v) for v in raw if v] or None
+            continue
         if key == "msDS-AllowedToActOnBehalfOfOtherIdentity":
             # [v0.3.0, fixed same version] RBCD trustee list is itself a
             # full security descriptor (Microsoft deliberately reuses the
@@ -2515,6 +2615,7 @@ def user_typed_columns(full):
         "description": full.get("description"),
         "notes": full.get("info"),
         "key_credential_count": len(key_credentials),
+        "key_credentials": json.dumps(parse_key_credential_link(key_credentials)) if key_credentials else None,
         "mail": full.get("mail"),
         "proxy_addresses": proxy_addresses or None,
         "when_created": full.get("whenCreated"),
@@ -2570,7 +2671,9 @@ def computer_typed_columns(full):
         "pwd_last_set": filetime_to_datetime(full.get("pwdLastSet")),
         "description": full.get("description"),
         "notes": full.get("info"),
-        "key_credential_count": len(full.get("msDS-KeyCredentialLink") or []),
+        "key_credential_count": len(_as_list(full.get("msDS-KeyCredentialLink"))),
+        "key_credentials": (json.dumps(parse_key_credential_link(_as_list(full.get("msDS-KeyCredentialLink"))))
+                            if full.get("msDS-KeyCredentialLink") else None),
         "primary_group_id": _as_int(full.get("primaryGroupID")),
         "sid_history": sid_history or None,
         "when_created": full.get("whenCreated"),
@@ -2629,7 +2732,7 @@ def ou_typed_columns(full):
 
 def domain_typed_columns(full, functional_level, tombstone_lifetime_days, tombstone_lifetime_is_default,
                           laps_schema_present, dsheuristics_anonymous_access,
-                          dfsr_migration_flags, dsheuristics_uniqueness=None):
+                          dfsr_migration_flags, dsheuristics_uniqueness=None, ds_extra=None):
     """[v0.1.3 fix] minPwdAge/maxPwdAge/lockoutDuration/lockOutObservationWindow
     were never collected for the domain-wide DEFAULT password policy, even
     though the equivalent fields were built for Fine-Grained Password
@@ -2665,6 +2768,10 @@ def domain_typed_columns(full, functional_level, tombstone_lifetime_days, tombst
         "laps_schema_present": laps_schema_present,
         "dsheuristics_anonymous_access": dsheuristics_anonymous_access,
         "dsheuristics_uniqueness": dsheuristics_uniqueness,
+        # [v0.5.16, schema v37]
+        "dsheuristics_admin_sd_ex_mask": (ds_extra or {}).get("admin_sd_ex_mask"),
+        "spn_mappings": (json.dumps((ds_extra or {}).get("spn_mappings"))
+                         if (ds_extra or {}).get("spn_mappings") else None),
         "lockout_threshold": _as_int(full.get("lockoutThreshold")),
         "min_pwd_age_seconds": ad_interval_to_seconds(full.get("minPwdAge"), zero_means_none=False),
         "max_pwd_age_seconds": ad_interval_to_seconds(full.get("maxPwdAge")),
@@ -2924,6 +3031,12 @@ def dns_zone_typed_columns(full):
     return {
         "zone_name": full.get("name") or full.get("cn"),
     }
+
+
+def _as_list(value):
+    if value is None:
+        return []
+    return [value] if isinstance(value, str) else list(value)
 
 
 def _as_int(value):
@@ -3228,7 +3341,7 @@ def build_spn_to_guid(entries):
     return mapping
 
 
-def resolve_spn(spn_to_guid, spn):
+def resolve_spn(spn_to_guid, spn, spn_mappings=None):
     """[v0.5.15] Resolves a delegation target SPN the way the KDC does:
     an exact registered SPN first, then -- for a service class in the
     default HOST alias set -- the host's HOST/<name> SPN (port and
@@ -3240,10 +3353,16 @@ def resolve_spn(spn_to_guid, spn):
     if guid is not None:
         return guid
     service_class, _, rest = key.partition("/")
-    if not rest or service_class not in HOST_SPN_ALIASES:
+    # [v0.5.16] The forest's own sPNMappings (CN=Directory Service) when it
+    # was readable; the documented default HOST alias set otherwise.
+    if spn_mappings:
+        target_class = spn_mappings.get(service_class)
+    else:
+        target_class = "host" if service_class in HOST_SPN_ALIASES else None
+    if not rest or not target_class:
         return None
     host = rest.split("/", 1)[0].split(":", 1)[0]
-    return spn_to_guid.get(f"host/{host}")
+    return spn_to_guid.get(f"{target_class}/{host}")
 
 
 def collect_spn_edges(pg_cur, client_id, run_id, entries, stats, run_timestamp):
@@ -3264,9 +3383,16 @@ def collect_spn_edges(pg_cur, client_id, run_id, entries, stats, run_timestamp):
     log_success(f"SPNs: {len(desired)} active, {opened} edge(s) opened, {closed} closed")
 
 
-def collect_delegation_edges(pg_cur, client_id, run_id, entries, spn_to_guid, stats, run_timestamp):
+def collect_delegation_edges(pg_cur, client_id, run_id, entries, spn_to_guid, stats, run_timestamp,
+                             spn_mappings=None):
     valid_from = run_timestamp
     desired = {}
+    # [v0.5.16] RBCD trustees whose SID isn't a collected object (well-known
+    # SIDs such as Everyone / Authenticated Users, principals from other
+    # domains, orphaned SIDs) used to be dropped. They're the worst case --
+    # e.g. Authenticated Users can impersonate any user to this computer --
+    # so they're kept, by SID, in rbcd_unresolved_trustee_edge (schema v37).
+    rbcd_unresolved_desired = {}
     unresolved = 0
     rbcd_unresolved_trustees = 0
     # [v0.5.4] "Ghost SPN" tracking (Purple Knight-inspired): every
@@ -3303,7 +3429,7 @@ def collect_delegation_edges(pg_cur, client_id, run_id, entries, spn_to_guid, st
         if isinstance(allowed_to, str):
             allowed_to = [allowed_to]
         for target_spn in allowed_to:
-            target_guid = resolve_spn(spn_to_guid, target_spn)
+            target_guid = resolve_spn(spn_to_guid, target_spn, spn_mappings)
             if target_guid is None:
                 unresolved += 1
                 ghost_spn_desired[(object_guid, target_spn)] = {}
@@ -3332,6 +3458,7 @@ def collect_delegation_edges(pg_cur, client_id, run_id, entries, spn_to_guid, st
                 trustee_guid = sid_to_guid.get(ace["trustee_sid"])
                 if trustee_guid is None:
                     rbcd_unresolved_trustees += 1
+                    rbcd_unresolved_desired[(ace["trustee_sid"], object_guid)] = {}
                     continue
                 desired[(trustee_guid, object_guid, "rbcd")] = {}
 
@@ -3347,12 +3474,16 @@ def collect_delegation_edges(pg_cur, client_id, run_id, entries, spn_to_guid, st
         pg_cur, "unresolved_delegation_target_edge", client_id, run_id, valid_from,
         ["source_guid", "target_spn"], ghost_spn_desired,
     )
+    rbcd_sid_opened, rbcd_sid_closed = sync_edges(
+        pg_cur, "rbcd_unresolved_trustee_edge", client_id, run_id, valid_from,
+        ["trustee_sid", "target_guid"], rbcd_unresolved_desired,
+    )
 
     log_success(f"Delegation: {opened} edge(s) opened, {closed} closed, "
                 f"{unresolved} constrained target(s) unresolved "
                 f"({ghost_opened} ghost-SPN edge(s) opened, {ghost_closed} closed), "
-                f"{rbcd_unresolved_trustees} RBCD trustee(s) unresolved "
-                "(not a collected object)")
+                f"{rbcd_unresolved_trustees} RBCD trustee(s) not a collected object, "
+                f"recorded by SID ({rbcd_sid_opened} opened, {rbcd_sid_closed} closed)")
 
 
 def resolve_gmsa_password_readers(pg_cur, client_id, run_id, computer_entries, stats, run_timestamp):
@@ -3794,7 +3925,7 @@ def main():
 
         (domain_sid, tombstone_lifetime, tombstone_lifetime_is_default,
          dsheuristics_anonymous_access,
-         dsheuristics_uniqueness) = get_domain_sid_and_tombstone_lifetime(
+         dsheuristics_uniqueness, ds_extra) = get_domain_sid_and_tombstone_lifetime(
             ldap_conn, base_dn, rootdse["config_nc"]
         )
 
@@ -4016,6 +4147,8 @@ def main():
                 "tombstone_lifetime_is_default": tombstone_lifetime_is_default,
                 "dsheuristics_anonymous_access": dsheuristics_anonymous_access,
                 "dsheuristics_uniqueness": dsheuristics_uniqueness,
+                "dsheuristics_admin_sd_ex_mask": ds_extra["admin_sd_ex_mask"],
+                "spn_mappings": ds_extra["spn_mappings"],
                 "laps_schema_present": bool(laps_legacy_present or laps_modern_present),
                 "dfsr_migration_flags": dfsr_migration_flags,
             }
@@ -4027,7 +4160,7 @@ def main():
                     full, rootdse.get("domain_functionality"), tombstone_lifetime,
                     tombstone_lifetime_is_default, laps_legacy_present or laps_modern_present,
                     dsheuristics_anonymous_access, dfsr_migration_flags,
-                    dsheuristics_uniqueness,
+                    dsheuristics_uniqueness, ds_extra,
                 ),
                 dn_to_guid, stats, run_timestamp,
                 extra_attributes={DERIVED_DOMAIN_SETTINGS_KEY: derived_domain_settings},
@@ -4204,7 +4337,8 @@ def main():
             spn_to_guid = build_spn_to_guid(all_principals)
             collect_spn_edges(cur, client_id, run_id, all_principals, stats, run_timestamp)
             collect_delegation_edges(cur, client_id, run_id, all_principals,
-                                      spn_to_guid, stats, run_timestamp)
+                                      spn_to_guid, stats, run_timestamp,
+                                      spn_mappings=ds_extra["spn_mappings"])
             resolve_gmsa_password_readers(cur, client_id, run_id, computers, stats, run_timestamp)
 
             # --- v0.1.0: trusts, GPOs, FGPP, ADCS templates -----------------
@@ -4243,9 +4377,28 @@ def main():
             # GPO reference came back unresolved -- caught by the mock
             # harness reporting "1 unresolved" against a scenario that
             # should have resolved cleanly, not by inspection.
+            # [v0.5.16] Sites first: GPOs linked to a site are part of the
+            # same single gpo_link_edge sync, and a link edge needs its
+            # site's directory_object row to exist.
+            site_entries = []
+            try:
+                sites_container = f"CN=Sites,{rootdse['config_nc']}"
+                site_entries = collect_object_class(
+                    ldap_conn, cur, client_id, run_id, args.dc_host, sites_container,
+                    SITE_FILTER, SITE_ATTRS, args.page_size, "AD sites",
+                    "ad_site", site_typed_columns, dn_to_guid, stats, run_timestamp,
+                )
+                reconcile_absent_objects(
+                    ldap_conn, cur, client_id, run_id, args.dc_host, "ad_site",
+                    sites_container, site_entries, "AD sites", stats, run_timestamp,
+                )
+            except LDAPException as exc:
+                log_warn(f"AD Sites collection failed (non-fatal): {exc}")
+                site_entries = []
+
             resolve_gpo_links(
                 cur, client_id, run_id, dn_to_guid,
-                domain_entries + ou_entries, stats, run_timestamp,
+                domain_entries + ou_entries + site_entries, stats, run_timestamp,
             )
 
             try:
@@ -4474,19 +4627,8 @@ def main():
             # block above: none of these are guaranteed to exist or be
             # reachable in every environment, and one failure shouldn't
             # abort collection of everything else.
-            try:
-                sites_container = f"CN=Sites,{rootdse['config_nc']}"
-                site_entries = collect_object_class(
-                    ldap_conn, cur, client_id, run_id, args.dc_host, sites_container,
-                    SITE_FILTER, SITE_ATTRS, args.page_size, "AD sites",
-                    "ad_site", site_typed_columns, dn_to_guid, stats, run_timestamp,
-                )
-                reconcile_absent_objects(
-                    ldap_conn, cur, client_id, run_id, args.dc_host, "ad_site",
-                    sites_container, site_entries, "AD sites", stats, run_timestamp,
-                )
-            except LDAPException as exc:
-                log_warn(f"AD Sites collection failed (non-fatal): {exc}")
+            # [v0.5.16] AD sites are collected earlier now (before GPO link
+            # resolution) so site-level gPLinks can be resolved -- see there.
 
             try:
                 subnets_container = f"CN=Subnets,CN=Sites,{rootdse['config_nc']}"

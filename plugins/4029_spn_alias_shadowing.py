@@ -93,13 +93,23 @@ enabled state and lastLogonTimestamp. Known limitation: sPNMappings is
 not collected, so the default alias set (identical to the collector's
 HOST_SPN_ALIASES) is assumed; forests that customise sPNMappings are
 evaluated against the default list.
+
+[v1.3] The forest's actual sPNMappings are used when collected
+(collector 0.5.16, schema v37: ad_domain.spn_mappings as {alias: target
+class}): every alias whose target is 'host' (other than 'host' itself)
+is a mapped class, so aliases a forest added are checked and aliases it
+removed are not. When spn_mappings is NULL (attribute absent or not
+readable, or data from an older collector) the previous default list is
+used. The web-hosting classes http/www/w3svc keep their DC-only
+treatment either way. detail gains spn_mappings_source ("forest
+sPNMappings" or "default HOST alias list").
 """
 
 PLUGIN = {
     "plugin_id": 4029,
     "category": "Domain",
     "name": "Explicit Service Principal Name Shadowing a HOST-Mapped Alias",
-    "version": "1.2",
+    "version": "1.3",
     "revision_date": "2026-10-04",
     "remediation": (
         "Establish how the conflicting SPN came to exist before removing "
@@ -161,15 +171,29 @@ PLUGIN = {
         "Findings where every shadowed host is a disabled computer account "
         "are rated medium (stale object). Exact duplicate SPNs are reported by plugin "
         "4028. The conflicting SPN is indistinguishable from a legitimate "
-        "one in native management tools."
+        "one in native management tools. The HOST-mapped classes are taken "
+        "from the forest's own sPNMappings when collected (collector "
+        "0.5.16+), otherwise from the default alias list."
     ),
     "base_severity": "high",
     "query": """
-        WITH mapped_class_os (cls) AS (
+        WITH forest_mappings AS (
+            -- [v1.3] The forest's own sPNMappings (collector 0.5.16, schema
+            -- v37: ad_domain.spn_mappings = {alias: target class}). NULL when
+            -- the attribute was absent/unreadable -> default list below.
+            SELECT DISTINCT lower(m.key) AS cls
+            FROM ad_domain d
+            CROSS JOIN LATERAL jsonb_each_text(
+                CASE WHEN jsonb_typeof(d.spn_mappings) = 'object'
+                     THEN d.spn_mappings ELSE '{}'::jsonb END) AS m(key, value)
+            WHERE d.client_id = %(client_id)s
+              AND d.valid_to IS NULL
+              AND lower(m.value) = 'host'
+              AND lower(m.key) <> 'host'
+        ),
+        default_mappings (cls) AS (
             -- Default sPNMappings HOST alias set (MS-ADA3 section 2.276),
-            -- restricted to services implemented by the host OS itself.
-            -- 'host' itself is excluded: HOST/x on two accounts is a plain
-            -- duplicate SPN and is reported by plugin 4028, not here.
+            -- used when the forest's own mappings were not collected.
             VALUES ('alerter'),('appmgmt'),('cisvc'),('clipsrv'),('browser'),
                    ('dhcp'),('dnscache'),('replicator'),('eventlog'),
                    ('eventsystem'),('policyagent'),('oakley'),('dmserver'),
@@ -180,21 +204,32 @@ PLUGIN = {
                    ('remoteaccess'),('rsvp'),('samss'),('scardsvr'),('scesrv'),
                    ('seclogon'),('scm'),('dcom'),('cifs'),('spooler'),('snmp'),
                    ('schedule'),('tapisrv'),('trksvr'),('trkwks'),('ups'),
-                   ('time'),('wins'),('iisadmin'),('msdtc')
-            -- [v1.1] The web-hosting classes http, www and w3svc are
-            -- deliberately absent. HTTP/<host> on an application-pool
-            -- service account (or gMSA) is the documented Kerberos set-up
-            -- for IIS, SSRS and similar; the KDC resolves that exact SPN
-            -- before the HOST alias, so tickets go to the account that runs
-            -- the application. Only classes the OS itself serves under the
-            -- host's own identity are a genuine shadowing defect.
+                   ('time'),('wins'),('iisadmin'),('msdtc'),
+                   ('http'),('www'),('w3svc')
+        ),
+        host_alias (cls) AS (
+            SELECT cls FROM forest_mappings
+            UNION
+            SELECT cls FROM default_mappings
+            WHERE NOT EXISTS (SELECT 1 FROM forest_mappings)
+        ),
+        mapping_source AS (
+            SELECT CASE WHEN EXISTS (SELECT 1 FROM forest_mappings)
+                        THEN 'forest sPNMappings' ELSE 'default HOST alias list' END AS src
         ),
         mapped_class (cls, web_only_for_dc) AS (
-            SELECT cls, false FROM mapped_class_os
-            UNION ALL
-            -- [v1.2] ...except on a domain controller, where HTTP/<DC> is
-            -- WinRM / PowerShell remoting running as the DC itself.
-            SELECT v.cls, true FROM (VALUES ('http'),('www'),('w3svc')) v(cls)
+            -- 'host' itself is excluded: HOST/x on two accounts is a plain
+            -- duplicate SPN and is reported by plugin 4028, not here.
+            -- [v1.1] The web-hosting classes http, www and w3svc are
+            -- reported only for domain controllers. HTTP/<host> on an
+            -- application-pool service account (or gMSA) is the documented
+            -- Kerberos set-up for IIS, SSRS and similar; the KDC resolves
+            -- that exact SPN before the HOST alias, so tickets go to the
+            -- account that runs the application. Only classes the OS itself
+            -- serves under the host's own identity are a genuine shadowing
+            -- defect. [v1.2] ...except on a domain controller, where
+            -- HTTP/<DC> is WinRM / PowerShell remoting running as the DC.
+            SELECT cls, cls IN ('http', 'www', 'w3svc') FROM host_alias
         ),
         parsed AS (
             -- Alias uniqueness compares the WHOLE remainder after the service
@@ -304,6 +339,7 @@ PLUGIN = {
                 'conflict_count', a.conflict_count,
                 'shadows_domain_controller', a.shadows_dc,
                 'conflicts', a.conflicts,
+                'spn_mappings_source', (SELECT src FROM mapping_source),
                 'scope',
                     'Host-implemented service classes only; http/www/w3svc on '
                     'a service account is the documented configuration and is '

@@ -24,13 +24,21 @@ non-enforced GPO links on the domain object and on every ancestor OU
 no longer receives because of the block -- which makes the finding
 actionable. Summary unchanged (ou_name COALESCEd to the DN for safety).
 Site-linked GPOs are not collected and so not listed.
+
+[v1.2] Checked against site links, which gpo_link_edge holds since
+collector 0.5.16: blocked_inherited_gpos is unaffected (a site's DN is
+in the Configuration partition, so it is never an ancestor of an OU).
+Because Block Inheritance also stops non-enforced site-linked GPOs, they
+are now listed separately in detail.blocked_site_gpos (GPO and site
+name); they only ever applied to computers in that site. Summary and
+severity unchanged.
 """
 
 PLUGIN = {
     "plugin_id": 9003,
     "category": "Organizational Units",
     "name": "Organizational Unit Blocks Group Policy Inheritance",
-    "version": "1.1",
+    "version": "1.2",
     "revision_date": "2026-10-04",
     "remediation": (
         "Confirm this was a deliberate choice and that no security-"
@@ -60,7 +68,9 @@ PLUGIN = {
         "silently defeat security-relevant GPOs applied higher in the "
         "hierarchy without anyone reviewing this specific OU realizing "
         "it. The finding lists the inherited, non-enforced GPO links "
-        "(domain and parent OUs) that the block stops from applying. "
+        "(domain and parent OUs) that the block stops from applying, and "
+        "separately the non-enforced site-linked GPOs it also stops "
+        "(site links collected since collector 0.5.16). "
         "Worth an explicit inventory of where it's set, the same "
         "framing already used for plugin 7004 (disabled trusts still "
         "present)."
@@ -104,6 +114,27 @@ PLUGIN = {
                       AND gle.container_guid <> o.object_guid
                       AND right(lower(od.dn_current), length(cdo.dn_current) + 1)
                           = ',' || lower(cdo.dn_current)
+                ),
+                -- [v1.2] Block Inheritance also stops non-enforced GPOs linked
+                -- to AD sites (collected since 0.5.16). Site DNs live in the
+                -- Configuration partition and never match the ancestor test
+                -- above, so they are listed separately; they apply only to
+                -- computers (and logons) in that site.
+                'blocked_site_gpos', (
+                    SELECT jsonb_agg(DISTINCT jsonb_build_object(
+                               'gpo', COALESCE(g.display_name, 'unnamed'),
+                               'site', COALESCE(st.site_name, sdo.dn_current)))
+                    FROM gpo_link_edge gle
+                    JOIN ad_site st
+                      ON st.object_guid = gle.container_guid AND st.client_id = gle.client_id
+                     AND st.valid_to IS NULL
+                    JOIN directory_object sdo
+                      ON sdo.object_guid = st.object_guid AND sdo.client_id = st.client_id
+                    JOIN ad_gpo g ON g.object_guid = gle.gpo_guid AND g.client_id = gle.client_id AND g.valid_to IS NULL
+                    WHERE gle.client_id = %(client_id)s
+                      AND gle.valid_to IS NULL
+                      AND gle.link_enabled
+                      AND NOT gle.link_enforced
                 )
             ) AS detail
         FROM ad_ou o
