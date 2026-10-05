@@ -4,7 +4,7 @@
  adprofiler.py -- Active Directory Security & Compliance Profiler (Collector)
 ================================================================================
 
-VERSION: 0.7.1
+VERSION: 0.7.2
 
 PURPOSE:
     Connects to an on-premise Active Directory Domain Controller via LDAP,
@@ -185,7 +185,7 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
-VERSION = "0.7.1"
+VERSION = "0.7.2"
 # [client-test-branch] These are always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
 # connect_postgres() is ever called -- the values here are placeholders,
@@ -1922,7 +1922,9 @@ REQUIRED_SCHEMA_COLUMNS = {
                                  "valid_to", "store", "ca_name", "certificates",
                                  "certificate_count"},
 }
-REQUIRED_SCHEMA_FUNCTIONS = {"upsert_directory_object", "set_current_version"}
+REQUIRED_SCHEMA_FUNCTIONS = {"upsert_directory_object", "set_current_version",
+                             # [v0.7.2] partition maintenance, schema v41
+                             "run_partition_maintenance", "missing_current_partitions"}
 
 # [v0.5.10] Column EXISTENCE (REQUIRED_SCHEMA_COLUMNS above) isn't the
 # same guarantee as column CORRECTNESS -- a real client hit exactly
@@ -1957,7 +1959,7 @@ REQUIRED_IDENTITY_COLUMNS = {
 # the structural check remains the backstop for a schema altered
 # outside the approved migration files, where the version number could
 # claim to be current while the actual structure doesn't match it.
-EXPECTED_SCHEMA_VERSION = 40
+EXPECTED_SCHEMA_VERSION = 41
 
 
 def check_schema_version(pg_conn):
@@ -2060,6 +2062,55 @@ def validate_schema(pg_conn):
             )
 
     return problems
+
+
+def run_partition_maintenance(pg_conn):
+    """[v0.7.2] Creates this month's and the next two months' partitions of
+    the partitioned history tables, and (at most every 28 days) purges
+    closed history older than the client's retention_months, then drops
+    partitions left empty -- ad_intel.run_partition_maintenance(), schema
+    v41.
+
+    Before this, nothing ever created partitions after schema_init.sql's
+    initial three months, so every collection failed from the first day
+    after the last partition ("no partition of relation ... found for
+    row"). Retention never deletes current rows (see the migration).
+
+    A failure here is only fatal when the current month's partitions are
+    missing (the run would fail half-way through otherwise); if they
+    exist, it is logged and collection continues."""
+    try:
+        with pg_conn.cursor() as cur:
+            cur.execute("SELECT ad_intel.run_partition_maintenance();")
+            result = cur.fetchone()[0] or {}
+        pg_conn.commit()
+    except psycopg2.Error as exc:
+        pg_conn.rollback()
+        with pg_conn.cursor() as cur:
+            cur.execute("SELECT ad_intel.missing_current_partitions();")
+            missing = cur.fetchone()[0] or []
+        pg_conn.commit()
+        if missing:
+            log_error(f"Partition maintenance failed: {str(exc).strip()}")
+            log_error(f"The current month has no partition for {len(missing)} table(s) "
+                      f"({', '.join(missing[:5])}{', ...' if len(missing) > 5 else ''}), so "
+                      f"collection cannot run. Re-apply schema_migration_v41.sql as the "
+                      f"schema owner (its functions run with the owner's rights), or run "
+                      f"SELECT ad_intel.run_partition_maintenance(); as the owner. Aborting.")
+            raise CollectorAbort("Partition maintenance failed")
+        log_warn(f"Partition maintenance failed (non-fatal, this month's partitions "
+                 f"exist): {str(exc).strip()}")
+        return
+    created = result.get("partitions_created", 0)
+    if result.get("purge_ran"):
+        dropped = result.get("partitions_dropped") or []
+        log_success(f"Partition maintenance: {created} partition(s) created; closed history "
+                    f"older than the retention period purged ({result.get('rows_purged', 0)} "
+                    f"row(s)), {len(dropped)} empty partition(s) dropped.")
+    elif created:
+        log_success(f"Partition maintenance: {created} partition(s) created.")
+    else:
+        log_info("Partition maintenance: partitions up to date.")
 
 
 def base_dn_to_fqdn(base_dn):
@@ -5068,6 +5119,8 @@ def main():
             )
             raise CollectorAbort("Schema validation failed")
         log_success(f"Database schema validated (version {EXPECTED_SCHEMA_VERSION}).")
+
+        run_partition_maintenance(pg_conn)
 
         client_id = upsert_client(pg_conn, base_dn_to_fqdn(base_dn), domain_sid, tombstone_lifetime)
 
