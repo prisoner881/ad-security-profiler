@@ -25,6 +25,7 @@ Copy the following into this directory (however you received them --
 USB drive, secure file transfer, etc.):
 
 - `adprofiler.py`
+- `sysvol_collector.py` (used by `adprofiler.py --sysvol`)
 - `entra_graph_collector.py`
 - `adaudit.py`
 - `requirements.txt`
@@ -38,6 +39,7 @@ When done, `~/adprofiler` should look like:
 ```
 adprofiler/
     adprofiler.py
+    sysvol_collector.py
     entra_graph_collector.py
     adaudit.py
     requirements.txt
@@ -101,6 +103,11 @@ PostgreSQL password unless it's already set via `PGPASSWORD` or a
 - **A domain controller hostname or IP**, and a service/bind account
   with read access to Active Directory (a low-privileged domain user
   account is sufficient -- nothing administrative is required).
+- **Optional, for Group Policy content (`--sysvol`)**: TCP 445 (SMB)
+  from this machine to the same domain controller, in addition to
+  LDAP/LDAPS. No extra account or permission is needed -- the same
+  bind account reads the SYSVOL and NETLOGON shares, which every domain
+  user can read by default. See "Collecting Group Policy content" below.
 - **If Entra ID collection is also wanted**: an App Registration's
   tenant ID, application (client) ID, and client secret, with the
   Graph API permissions already granted and admin-consented
@@ -158,6 +165,35 @@ if your domain controller doesn't have LDAPS configured.
 This creates a timestamped log file in the current directory:
 `adprofiler-results_<timestamp>.log`, mirroring everything shown on
 screen.
+
+**Collecting Group Policy content (optional, recommended):** add
+`--sysvol` to the Step 1 command. Group Policy settings are stored as
+files on the domain controllers' SYSVOL share, not in LDAP; with
+`--sysvol` the collector also reads, over SMB and read-only, each GPO's
+security template, administrative-template settings, audit policy and
+Group Policy Preferences, and scans logon/startup scripts (GPO script
+folders and the NETLOGON share) for embedded credentials. This is what
+lets the report check things like LDAP and SMB signing, NTLMv1, Kerberos
+policy, user rights and audit policy on the domain controllers, and find
+Group Policy Preferences passwords (MS14-025).
+
+- Needs TCP 445 to the domain controller. If the DCs refuse NTLM, add
+  `--sysvol-kerberos` and pass the DC's FQDN as `--dc-host` (or
+  `--smb-host`); this machine must then resolve the DC by name in DNS
+  and have its clock within 5 minutes of the DC's.
+- Passwords found in Group Policy Preferences or scripts are never
+  stored: only the fact that one is present, the account it is for, and
+  for scripts the pattern name and line number.
+- If an administrator removed "Authenticated Users" read access from a
+  GPO (security filtering), the bind account can't read that GPO's
+  folder; the report lists such GPOs (plugin 9021) and evaluates the
+  rest. Grant the bind account read on them if you want them covered.
+- Reading every GPO folder and searching scripts for passwords looks
+  like an attacker's reconnaissance, so endpoint or identity monitoring
+  tools may raise an alert. Tell the security team before the run, or
+  have them allowlist this machine.
+- If SMB is unreachable the run still succeeds; the SYSVOL-based checks
+  are then shown as NOT ASSESSED in the report.
 
 **Step 2 -- collect Entra ID data (skip this step entirely if there's
 no Entra ID tenant to collect from):**

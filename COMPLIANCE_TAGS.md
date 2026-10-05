@@ -98,6 +98,9 @@ Use AC-2(4) and PCI 10.2.1.5 for account and credential changes, and PCI 11.5.2 
 
 Use CM-11 for user app consent and registration, and AC-20 / PCI 8.2.7 / A.5.19 for guests and external access.
 
+### T17. Audit logging configuration: which security events domain controllers record (audit policy)
+`NIST-800-53-AU-2`, `NIST-800-53-AU-12`, `NIST-800-53-AU-3`, `NIST-CSF-2.0-DE.CM-03`, `PCI-DSS-4.0-10.2.1`, `PCI-DSS-4.0-10.2.1.2`, `PCI-DSS-4.0-10.2.1.5`, `CIS-CSC-8-8.2`, `CIS-CSC-8-8.5`, `ISO-27001-2022-A.8.15`, `SOC2-CC7.2`, `HIPAA-164.312(b)`
+
 ### CISA SCuBA Entra ID (MS.AAD)
 
 | Tag | Policy |

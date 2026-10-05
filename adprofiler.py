@@ -4,7 +4,7 @@
  adprofiler.py -- Active Directory Security & Compliance Profiler (Collector)
 ================================================================================
 
-VERSION: 0.6.0
+VERSION: 0.7.0
 
 PURPOSE:
     Connects to an on-premise Active Directory Domain Controller via LDAP,
@@ -35,6 +35,13 @@ INPUT FORMAT (command line):
         --base-dn        Override the search base. Default: auto-discovered
                          from the DC's RootDSE (defaultNamingContext).
         --page-size      LDAP paged-search page size. Default: 1000.
+        --sysvol         [v0.7.0] Also read Group Policy settings, Group
+                         Policy Preferences and scripts from the SYSVOL and
+                         NETLOGON shares over SMB (TCP 445), read-only, with
+                         the same account. See sysvol_collector.py.
+        --sysvol-kerberos  Authenticate the SMB session with Kerberos
+                         (needs --dc-host / --smb-host as the DC's FQDN).
+        --smb-host       Host for the SMB session. Default: --dc-host.
         --version        Print version and exit.
 
     Example:
@@ -59,10 +66,8 @@ SCOPE / KNOWN LIMITATIONS:
       collected for the same reason (binary security-descriptor format).
       Unconstrained and constrained delegation ARE collected (plain UAC
       bits and text/SPN attributes -- no binary parsing required).
-    - GPO collection is existence/name/version only. Which OUs a GPO is
-      actually linked to (gPLink parsing) and the GPO's actual settings
-      content (which lives in SYSVOL, not LDAP) are NOT collected --
-      genuinely larger, separate pieces of work.
+    - GPO settings content lives in SYSVOL, not LDAP; it is collected
+      only with --sysvol (v0.7.0, sysvol_collector.py).
     - LAPS status is the password EXPIRATION TIMESTAMP only, for both
       legacy (ms-Mcs-AdmPwd) and modern Windows LAPS (msLAPS-*). The
       password value itself is never read, by design -- that's live
@@ -180,7 +185,7 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 # [client-test-branch] These are always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
 # connect_postgres() is ever called -- the values here are placeholders,
@@ -600,7 +605,8 @@ KNOWN_EDGE_TABLES = {"group_member_edge", "spn_edge", "delegation_edge",
                       "fgpp_applies_to_edge", "cert_template_enabled_edge",
                       "acl_edge", "gpo_link_edge", "gmsa_password_reader_edge",
                       "unresolved_delegation_target_edge", "rbcd_unresolved_trustee_edge",
-                      "rodc_prp_edge"}
+                      "rodc_prp_edge", "gpo_setting_edge", "gpo_preference_item_edge",
+                      "sysvol_script_edge"}
 
 _USE_COLOR = sys.stdout.isatty()
 
@@ -1868,6 +1874,21 @@ REQUIRED_SCHEMA_COLUMNS = {
     "cert_template_enabled_edge": {"edge_id", "client_id", "ca_guid", "template_guid",
                                     "valid_from", "valid_to", "run_id_valid_from",
                                     "run_id_valid_to"},
+    # [v0.7.0, schema v39] SYSVOL collection
+    "sysvol_collection_status": {"client_id", "run_id", "collected_at", "smb_host", "status",
+                                 "gpos_read", "gpos_unreadable", "netlogon_read", "detail"},
+    "ad_gpo_sysvol": {"client_id", "gpo_object_guid", "sysvol_path", "read_status",
+                      "gpt_ini_version", "files_read", "error_detail", "run_id", "collected_at"},
+    "gpo_setting_edge": {"edge_id", "client_id", "gpo_guid", "scope", "source", "section",
+                         "setting_key", "value_type", "setting_value", "valid_from", "valid_to",
+                         "run_id_valid_from", "run_id_valid_to"},
+    "gpo_preference_item_edge": {"edge_id", "client_id", "gpo_guid", "scope", "preference_type",
+                                 "item_uid", "item_name", "action", "has_cpassword",
+                                 "account_name", "details_json", "valid_from", "valid_to",
+                                 "run_id_valid_from", "run_id_valid_to"},
+    "sysvol_script_edge": {"edge_id", "client_id", "share", "file_path", "gpo_guid",
+                           "size_bytes", "credential_indicators", "valid_from", "valid_to",
+                           "run_id_valid_from", "run_id_valid_to"},
     # [v0.6.0, schema v38]
     "rodc_prp_edge": {"edge_id", "client_id", "rodc_guid", "principal_guid", "relation",
                       "valid_from", "valid_to", "run_id_valid_from", "run_id_valid_to"},
@@ -1900,6 +1921,9 @@ REQUIRED_SCHEMA_FUNCTIONS = {"upsert_directory_object", "set_current_version"}
 REQUIRED_IDENTITY_COLUMNS = {
     ("unresolved_delegation_target_edge", "edge_id"),
     ("rodc_prp_edge", "edge_id"),  # [v0.6.0]
+    ("gpo_setting_edge", "edge_id"),  # [v0.7.0]
+    ("gpo_preference_item_edge", "edge_id"),
+    ("sysvol_script_edge", "edge_id"),
 }
 
 # [v0.5.8] Bump alongside VERSION whenever a release needs new schema.
@@ -1913,7 +1937,7 @@ REQUIRED_IDENTITY_COLUMNS = {
 # the structural check remains the backstop for a schema altered
 # outside the approved migration files, where the version number could
 # claim to be current while the actual structure doesn't match it.
-EXPECTED_SCHEMA_VERSION = 38
+EXPECTED_SCHEMA_VERSION = 39
 
 
 def check_schema_version(pg_conn):
@@ -4741,6 +4765,50 @@ def update_adfs_key_readability(conn, pg_cur, client_id, adfs_container, entries
     return None if readable is None else len(readable)
 
 
+def collect_sysvol_step(args, password, cur, client_id, run_id, run_timestamp, base_dn,
+                        gpo_entries, stats):
+    """[v0.7.0] Runs sysvol_collector.collect_sysvol() inside this run's
+    transaction (same run_id, so its edges version with everything else).
+    Imported here so a run without --sysvol never needs the SMB code."""
+    import sysvol_collector as SV
+    log_header("SYSVOL (Group Policy content)")
+    smb_host = args.smb_host or args.dc_host
+    try:
+        reader = SV.SmbSysvolReader(smb_host, args.username, password,
+                                    domain=base_dn_to_fqdn(base_dn),
+                                    use_kerberos=args.sysvol_kerberos)
+    except SV.SysvolError as exc:
+        log_warn(f"SYSVOL not collected: {exc}. Check that TCP 445 to {smb_host} is open "
+                 f"and that the account can authenticate over SMB (NTLM, or Kerberos with "
+                 f"--sysvol-kerberos). Previously collected Group Policy data is kept.")
+        SV.write_collection_status(cur, client_id, run_id, run_timestamp, smb_host, "failed",
+                                   0, 0, None, str(exc)[:1000])
+        return
+    try:
+        # Savepoint: a database error here must not abort the LDAP data.
+        cur.execute("SAVEPOINT sysvol_collection")
+        opened, closed = SV.collect_sysvol(
+            cur, client_id, run_id, run_timestamp, reader, smb_host,
+            base_dn_to_fqdn(base_dn), gpo_entries, sync_edges, log_success,
+            max_script_files=args.sysvol_max_script_files,
+        )
+        cur.execute("RELEASE SAVEPOINT sysvol_collection")
+        stats.edges_opened += opened
+        stats.edges_closed += closed
+    except Exception as exc:
+        cur.execute("ROLLBACK TO SAVEPOINT sysvol_collection")
+        log_warn(f"SYSVOL collection failed (non-fatal, previous Group Policy data kept): {exc}")
+        cur.execute("SAVEPOINT sysvol_status")
+        try:
+            SV.write_collection_status(cur, client_id, run_id, run_timestamp, smb_host, "failed",
+                                       0, 0, None, f"unexpected: {exc}"[:1000])
+            cur.execute("RELEASE SAVEPOINT sysvol_status")
+        except Exception:
+            cur.execute("ROLLBACK TO SAVEPOINT sysvol_status")
+    finally:
+        reader.close()
+
+
 def parse_args():
     """
     [v0.0.3 fix] --dc-host and --username were previously argparse
@@ -4782,6 +4850,19 @@ def parse_args():
                               "an upgrade to backfill; not needed for routine runs. "
                               "Recorded honestly as change_kind='rescanned', distinct from "
                               "'modified', since nothing in AD actually changed.")
+    parser.add_argument("--sysvol", action="store_true",
+                         help="[v0.7.0] Also read Group Policy settings, Group Policy "
+                              "Preferences and scripts from SYSVOL/NETLOGON over SMB "
+                              "(TCP 445, read-only, same account). Needs schema v39.")
+    parser.add_argument("--sysvol-kerberos", action="store_true",
+                         help="Authenticate the SYSVOL SMB session with Kerberos instead "
+                              "of NTLM (use when the DCs refuse NTLM; --dc-host or "
+                              "--smb-host must then be the DC's FQDN).")
+    parser.add_argument("--smb-host", default=None,
+                         help="Host for the SYSVOL SMB session. Default: --dc-host.")
+    parser.add_argument("--sysvol-max-script-files", type=int, default=500,
+                         help="Upper limit on script files scanned per folder tree "
+                              "(each GPO's Scripts folder, NETLOGON). Default: 500.")
     parser.add_argument("--version", action="store_true",
                          help="Print version and exit.")
     parser.add_argument("--pg-host", default=None,
@@ -5424,6 +5505,13 @@ def main():
                 cur, client_id, run_id, dn_to_guid,
                 domain_entries + ou_entries + site_entries, stats, run_timestamp,
             )
+
+            # [v0.7.0] Group Policy content from SYSVOL (opt-in, --sysvol).
+            # Never fatal: an unreachable share or folder keeps the
+            # previously collected settings (see sysvol_collector.py).
+            if args.sysvol:
+                collect_sysvol_step(args, password, cur, client_id, run_id, run_timestamp,
+                                    base_dn, gpo_entries, stats)
 
             try:
                 pso_container = f"CN=Password Settings Container,CN=System,{base_dn}"

@@ -9,6 +9,32 @@ the script's own docstring now keeps a one-line summary per entry, this
 file keeps the complete detail (root causes, what was verified, why a
 decision was made a particular way) for anyone who wants it.
 
+    0.7.0 - Requires schema v39 (schema_migration_v39.sql). New, opt-in
+            --sysvol: reads Group Policy content from the SYSVOL and
+            NETLOGON shares over SMB (impacket; read-only; same account;
+            --sysvol-kerberos for Kerberos-only environments, --smb-host
+            to use another host, --sysvol-max-script-files to cap script
+            scanning). New module sysvol_collector.py parses gpt.ini,
+            GptTmpl.inf (security template), Registry.pol (PReg format),
+            audit.csv (advanced audit policy) and Group Policy
+            Preferences XML (Groups, ScheduledTasks, Services,
+            DataSources, Drives, Printers), and scans GPO script folders
+            and NETLOGON for credential patterns. Stored in
+            gpo_setting_edge / gpo_preference_item_edge /
+            sysvol_script_edge (versioned edges, synced in this run's
+            transaction under a savepoint), ad_gpo_sysvol (per-GPO read
+            result) and sysvol_collection_status. Views
+            v_gpo_dc_application (which GPOs apply to each DC, with
+            precedence: links, enforcement, block inheritance, computer
+            settings disabled, Apply Group Policy security filtering) and
+            v_dc_effective_gpo_setting (each DC's winning value per
+            setting). Secrets are never stored: cpassword values are only
+            detected, credential-named string registry values are stored
+            as '<redacted>', and script findings record pattern names and
+            line numbers only. Never fatal: an unreachable share leaves all
+            previously collected Group Policy data unchanged
+            (status 'failed'); an unreadable GPO folder or NETLOGON keeps
+            its previous rows.
     0.6.0 - Requires schema v38 (schema_migration_v38.sql); run once with
             --full-rescan afterwards so existing objects get the new
             columns. Expect, on the first 0.6.0 run: one new version per
