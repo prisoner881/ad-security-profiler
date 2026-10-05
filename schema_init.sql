@@ -4310,6 +4310,31 @@ COMMENT ON VIEW ad_intel.v_dc_effective_gpo_setting IS
 
 
 -- ============================================================================
+-- v40 ADDITIONS -- see schema_migration_v40.sql.
+-- ============================================================================
+
+
+ALTER TABLE ad_intel.ad_domain
+    ADD COLUMN IF NOT EXISTS tombstone_lifetime_source text;
+ALTER TABLE ad_intel.ad_domain
+    DROP CONSTRAINT IF EXISTS ad_domain_tombstone_lifetime_source_check;
+ALTER TABLE ad_intel.ad_domain
+    ADD CONSTRAINT ad_domain_tombstone_lifetime_source_check CHECK (
+        tombstone_lifetime_source IS NULL OR tombstone_lifetime_source IN
+        ('msDS-DeletedObjectLifetime', 'tombstoneLifetime', 'not_set', 'unreadable'));
+COMMENT ON COLUMN ad_intel.ad_domain.tombstone_lifetime_source IS
+    'Where tombstone_lifetime_days came from: ''msDS-DeletedObjectLifetime'' or '
+    '''tombstoneLifetime'' (read from CN=Directory Service); ''not_set'' (the object was read but '
+    'neither attribute is set -- MS-ADTS then specifies 60 days, typical of forests created before '
+    'Windows Server 2003 SP1); ''unreadable'' (the object could not be read; '
+    'tombstone_lifetime_days is NULL). NULL = collected before schema v40. (schema v40)';
+COMMENT ON COLUMN ad_intel.ad_domain.tombstone_lifetime_is_default IS
+    'TRUE if tombstone_lifetime_days is not an explicitly configured value: neither '
+    'msDS-DeletedObjectLifetime nor tombstoneLifetime was set (60-day MS-ADTS default) or, before '
+    'schema v40, the value could not be read either. See tombstone_lifetime_source.';
+
+
+-- ============================================================================
 -- v31 ADDITIONS -- schema version tracking.
 -- ============================================================================
 
@@ -4323,7 +4348,7 @@ CREATE TABLE schema_migration_history (
 -- pretense of having stepped through intermediate versions that were
 -- never actually separately applied to this database.
 INSERT INTO schema_migration_history (version_number, description) VALUES
-    (39, 'Fresh install via schema_init.sql, consolidated through v39');
+    (40, 'Fresh install via schema_init.sql, consolidated through v40');
 
 -- ============================================================================
 -- PARTITIONED TABLE REGISTRY + INITIAL PARTITION CREATION

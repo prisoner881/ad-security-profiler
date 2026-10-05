@@ -9,6 +9,16 @@ the script's own docstring now keeps a one-line summary per entry, this
 file keeps the complete detail (root causes, what was verified, why a
 decision was made a particular way) for anyone who wants it.
 
+    0.7.1 - Requires schema v40 (schema_migration_v40.sql). The tombstone /
+            deleted-object lifetime now records its source in
+            ad_domain.tombstone_lifetime_source: msDS-DeletedObjectLifetime,
+            tombstoneLifetime, not_set (the Directory Service object was read
+            and neither attribute is set: the MS-ADTS 60-day default applies)
+            or unreadable. An unreadable object no longer yields an assumed
+            60 days -- the lifetime is stored as NULL (is_default NULL) and
+            client.tombstone_lifetime_days keeps its last known value.
+            Before, both cases produced "assumed 60 days", so plugin 4011
+            couldn't tell a real 60-day lifetime from a value nobody read.
     0.7.0 - Requires schema v39 (schema_migration_v39.sql). New, opt-in
             --sysvol: reads Group Policy content from the SYSVOL and
             NETLOGON shares over SMB (impacket; read-only; same account;
