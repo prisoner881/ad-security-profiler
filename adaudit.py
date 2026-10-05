@@ -2,7 +2,7 @@
 """
 adaudit.py -- AD Security & Compliance Plugin Runner
 ======================================================
-VERSION: 0.9.0
+VERSION: 0.9.1
 
 Companion to adprofiler.py. Where adprofiler.py collects AD data,
 adaudit.py analyzes it: discovers every plugin file in plugins/, runs each
@@ -25,6 +25,8 @@ DESIGN:
       as: (status, object_guid, stig_severity, stig_reference,
       tool_severity, tool_reference, fd_severity, summary, detail).
       Zero rows returned = clean pass, nothing to report.
+    - [v0.9.1] Requires schema v40 (ad_domain.tombstone_lifetime_source,
+      read by plugin 4011 v1.5).
     - [v0.9.0] Requires schema v39 (SYSVOL / Group Policy content tables and
       views, read by plugins 9008-9023 and 11021). Plugins reading SYSVOL
       data are shown as NOT ASSESSED when SYSVOL was never collected for
@@ -159,7 +161,7 @@ from datetime import datetime, timezone
 import psycopg2
 import psycopg2.extras
 
-VERSION = "0.9.0"
+VERSION = "0.9.1"
 
 # [test-candidate-branch] Always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
@@ -495,8 +497,9 @@ def connect_postgres():
 # primary-group / template columns several plugins read, v37 KeyCredential /
 # dSHeuristics / sPNMappings / RBCD-by-SID / Entra eligibility columns, v38
 # the columns and tables of the advisory/compliance gap round plugins, v39
-# the SYSVOL (Group Policy content) tables and views.
-REQUIRED_SCHEMA_VERSION = 39
+# the SYSVOL (Group Policy content) tables and views, v40
+# ad_domain.tombstone_lifetime_source (plugin 4011).
+REQUIRED_SCHEMA_VERSION = 40
 
 # [v0.9.0] Data sources a client may not have collected: (table/view names a
 # plugin query mentions, probe returning TRUE when the client has the data).

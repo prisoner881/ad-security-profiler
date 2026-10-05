@@ -319,3 +319,17 @@ troubleshooting if anything looked wrong during collection.
   `--full-rescan` so objects that haven't changed in AD still get the
   columns the new version collects (otherwise some checks see them as
   "not collected" until each object next changes).
+- **`adprofiler.py` stops with "The current month has no partition for
+  ... table(s)"**: the collector creates the monthly storage partitions it
+  needs at the start of every run (schema v41 and later). This message
+  means it wasn't allowed to: apply `schema_migration_v41.sql` (or
+  re-apply it) as the PostgreSQL user that owns the schema -- the
+  maintenance functions then run with that user's rights even when the
+  collector connects as a different user. Running
+  `SELECT ad_intel.run_partition_maintenance();` once as that owner also
+  fixes it.
+- **Disk use / data retention**: superseded history (old versions of
+  objects, removed memberships and permissions) is kept for
+  `retention_months` (12 by default, per client in the `client` table)
+  and then purged automatically, about once a month. Current state is
+  never purged, however long it has been unchanged.
