@@ -2,7 +2,7 @@
 """
 adaudit.py -- AD Security & Compliance Plugin Runner
 ======================================================
-VERSION: 0.8.0
+VERSION: 0.9.0
 
 Companion to adprofiler.py. Where adprofiler.py collects AD data,
 adaudit.py analyzes it: discovers every plugin file in plugins/, runs each
@@ -25,6 +25,11 @@ DESIGN:
       as: (status, object_guid, stig_severity, stig_reference,
       tool_severity, tool_reference, fd_severity, summary, detail).
       Zero rows returned = clean pass, nothing to report.
+    - [v0.9.0] Requires schema v39 (SYSVOL / Group Policy content tables and
+      views, read by plugins 9008-9023 and 11021). Plugins reading SYSVOL
+      data are shown as NOT ASSESSED when SYSVOL was never collected for
+      the client (adprofiler.py --sysvol), like Entra plugins without Entra
+      data (OPTIONAL_DATA_SOURCES).
     - [v0.8.0] Compliance-framework reporting. Each finding plugin's
       framework_tags (format and allowed IDs: COMPLIANCE_TAGS.md) are
       split by prefix into (framework, control id) via FRAMEWORKS /
@@ -40,7 +45,8 @@ DESIGN:
       the compliance sheets. --framework restricts a run to plugins
       carrying at least one tag of the named framework(s). A plugin that
       reads Entra tables when no Entra ID collection exists for the client
-      is shown as NOT ASSESSED on the compliance sheets rather than as
+      (or, since v0.9.0, SYSVOL data when SYSVOL was never collected) is
+      shown as NOT ASSESSED on the compliance sheets rather than as
       passing (its zero rows mean "nothing to check"). references must be
       a list of {"title", "url"} dicts (else a load failure): a bare URL
       string passed every clean run and crashed the report the first time
@@ -153,7 +159,7 @@ from datetime import datetime, timezone
 import psycopg2
 import psycopg2.extras
 
-VERSION = "0.8.0"
+VERSION = "0.9.0"
 
 # [test-candidate-branch] Always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
@@ -488,8 +494,22 @@ def connect_postgres():
 # (used by many plugins), v35 the 'retired' change_status, v36 the RODC /
 # primary-group / template columns several plugins read, v37 KeyCredential /
 # dSHeuristics / sPNMappings / RBCD-by-SID / Entra eligibility columns, v38
-# the columns and tables of the advisory/compliance gap round plugins.
-REQUIRED_SCHEMA_VERSION = 38
+# the columns and tables of the advisory/compliance gap round plugins, v39
+# the SYSVOL (Group Policy content) tables and views.
+REQUIRED_SCHEMA_VERSION = 39
+
+# [v0.9.0] Data sources a client may not have collected: (table/view names a
+# plugin query mentions, probe returning TRUE when the client has the data).
+# A plugin that reads one and passes while the data is absent is shown as
+# NOT ASSESSED on the compliance sheets.
+OPTIONAL_DATA_SOURCES = [
+    (("entra_",),
+     "SELECT EXISTS (SELECT 1 FROM entra_security_posture WHERE client_id = %(c)s) "
+     "    OR EXISTS (SELECT 1 FROM entra_user WHERE client_id = %(c)s);"),
+    (("gpo_setting_edge", "gpo_preference_item_edge", "sysvol_script_edge", "ad_gpo_sysvol",
+      "v_dc_effective_gpo_setting"),
+     "SELECT EXISTS (SELECT 1 FROM ad_gpo_sysvol WHERE client_id = %(c)s AND read_status = 'ok');"),
+]
 
 
 def check_schema_version(conn):
@@ -1466,19 +1486,19 @@ def main():
 
     # [v0.8.0] Entra plugins return zero rows ("pass") when there is no
     # Entra data at all; on the compliance sheets that must read as "not
-    # assessed", not as SCuBA/MFA controls passing.
+    # assessed", not as SCuBA/MFA controls passing. [v0.9.0] The same for
+    # plugins reading SYSVOL (Group Policy content) data when SYSVOL was
+    # never collected (adprofiler.py --sysvol).
+    not_assessed_ids = set()
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT EXISTS (SELECT 1 FROM entra_security_posture WHERE client_id = %(c)s) "
-            "    OR EXISTS (SELECT 1 FROM entra_user WHERE client_id = %(c)s);",
-            {"c": client_id},
-        )
-        entra_collected = cur.fetchone()[0]
+        for markers, probe in OPTIONAL_DATA_SOURCES:
+            cur.execute(probe, {"c": client_id})
+            if not cur.fetchone()[0]:
+                not_assessed_ids |= {p["plugin_id"] for p in finding_plugins
+                                     if any(m in p["query"] for m in markers)}
     conn.commit()
-    entra_plugin_ids = () if entra_collected else {
-        p["plugin_id"] for p in finding_plugins if "entra_" in p["query"]}
     compliance = build_compliance(plugin_summaries, all_findings,
-                                  not_assessed_plugin_ids=entra_plugin_ids)
+                                  not_assessed_plugin_ids=not_assessed_ids)
     if finding_plugins:
         print_report(plugin_summaries, all_findings)
         print_compliance_summary(compliance)
