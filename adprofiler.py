@@ -4,7 +4,7 @@
  adprofiler.py -- Active Directory Security & Compliance Profiler (Collector)
 ================================================================================
 
-VERSION: 0.7.2
+VERSION: 0.7.3
 
 PURPOSE:
     Connects to an on-premise Active Directory Domain Controller via LDAP,
@@ -185,7 +185,7 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
-VERSION = "0.7.2"
+VERSION = "0.7.3"
 # [client-test-branch] These are always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
 # connect_postgres() is ever called -- the values here are placeholders,
@@ -1959,7 +1959,7 @@ REQUIRED_IDENTITY_COLUMNS = {
 # the structural check remains the backstop for a schema altered
 # outside the approved migration files, where the version number could
 # claim to be current while the actual structure doesn't match it.
-EXPECTED_SCHEMA_VERSION = 41
+EXPECTED_SCHEMA_VERSION = 42  # [v0.7.3] v42: Entra tables only
 
 
 def check_schema_version(pg_conn):

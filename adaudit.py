@@ -2,7 +2,7 @@
 """
 adaudit.py -- AD Security & Compliance Plugin Runner
 ======================================================
-VERSION: 0.9.1
+VERSION: 0.9.2
 
 Companion to adprofiler.py. Where adprofiler.py collects AD data,
 adaudit.py analyzes it: discovers every plugin file in plugins/, runs each
@@ -25,6 +25,20 @@ DESIGN:
       as: (status, object_guid, stig_severity, stig_reference,
       tool_severity, tool_reference, fd_severity, summary, detail).
       Zero rows returned = clean pass, nothing to report.
+    - [v0.9.2] Requires schema v42 (Entra ID coverage round: plugins
+      10020-10121 and 11022-11029). A plugin may declare
+      PLUGIN["requires_sources"]: the Entra data sources
+      (entra_collection_status.source, e.g. "registration_details",
+      "auth_methods_policy") it cannot assess without. When any of them was
+      not read successfully for the client (missing optional Graph
+      permission or licence), a passing result is shown as NOT ASSESSED
+      on the compliance sheets, like Entra plugins without any Entra data.
+      Must be a list of known source names (else a load failure).
+      A plugin that is not assessed for this reason -- or any of the
+      earlier ones (no Entra data, no SYSVOL data) -- and returns no rows
+      now leaves its open findings open: previously they were closed as
+      'remediated' when, say, a licence lapsed or Entra collection
+      stopped, then reopened as 'new' once the data came back.
     - [v0.9.1] Requires schema v40 (ad_domain.tombstone_lifetime_source,
       read by plugin 4011 v1.5).
     - [v0.9.0] Requires schema v39 (SYSVOL / Group Policy content tables and
@@ -161,7 +175,7 @@ from datetime import datetime, timezone
 import psycopg2
 import psycopg2.extras
 
-VERSION = "0.9.1"
+VERSION = "0.9.2"
 
 # [test-candidate-branch] Always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
@@ -398,6 +412,14 @@ def discover_plugins(plugins_dir):
             fail(path, 'references must be a list of {"title": ..., "url": ...} dicts', plugin)
             continue
 
+        # [v0.9.2] Entra data sources the plugin needs (NOT ASSESSED when absent).
+        sources = plugin.get("requires_sources") or []
+        if not isinstance(sources, list) or not all(
+                isinstance(x, str) and x in ENTRA_DATA_SOURCES for x in sources):
+            fail(path, "requires_sources must be a list of Entra data source names: "
+                       + ", ".join(sorted(ENTRA_DATA_SOURCES)), plugin)
+            continue
+
         pid = plugin["plugin_id"]
         if pid in seen_ids:
             fail(path, f"plugin_id {pid} already used by {seen_ids[pid]}", plugin)
@@ -498,8 +520,9 @@ def connect_postgres():
 # dSHeuristics / sPNMappings / RBCD-by-SID / Entra eligibility columns, v38
 # the columns and tables of the advisory/compliance gap round plugins, v39
 # the SYSVOL (Group Policy content) tables and views, v40
-# ad_domain.tombstone_lifetime_source (plugin 4011).
-REQUIRED_SCHEMA_VERSION = 40
+# ad_domain.tombstone_lifetime_source (plugin 4011), v41 partition
+# maintenance (no plugin change), v42 the Entra coverage round tables.
+REQUIRED_SCHEMA_VERSION = 42
 
 # [v0.9.0] Data sources a client may not have collected: (table/view names a
 # plugin query mentions, probe returning TRUE when the client has the data).
@@ -513,6 +536,43 @@ OPTIONAL_DATA_SOURCES = [
       "v_dc_effective_gpo_setting"),
      "SELECT EXISTS (SELECT 1 FROM ad_gpo_sysvol WHERE client_id = %(c)s AND read_status = 'ok');"),
 ]
+
+# [v0.9.2] Optional Entra data sources (entra_graph_collector.py 0.8.0,
+# schema v42), one entra_collection_status row each. A plugin lists the ones
+# it needs in PLUGIN["requires_sources"].
+ENTRA_DATA_SOURCES = frozenset({
+    "subscribed_skus", "organization", "domains", "federation", "groups", "role_definitions",
+    "custom_role_assignments", "pim_policies", "service_principals", "app_owners",
+    "app_role_grants", "delegated_grants", "named_locations", "auth_methods_policy",
+    "cross_tenant_policy", "admin_consent_request_policy", "directory_settings",
+    "device_registration_policy", "onprem_sync", "pta_agents", "partner_contracts",
+    "registration_details", "sign_in_activity", "sp_sign_in_activity", "risky_users",
+    "risk_detections",
+})
+
+
+def compute_not_assessed_ids(conn, client_id, finding_plugins):
+    """plugin_ids that cannot assess anything for this client because their
+    source data was not collected: [v0.8.0] Entra plugins with no Entra data
+    at all, [v0.9.0] SYSVOL plugins when SYSVOL was never collected
+    (OPTIONAL_DATA_SOURCES), [v0.9.2] plugins whose requires_sources include
+    an Entra source not read successfully (missing optional permission or
+    licence). A passing result from one of these is NOT ASSESSED on the
+    compliance sheets, and zero rows from one of these closes nothing."""
+    not_assessed_ids = set()
+    with conn.cursor() as cur:
+        for markers, probe in OPTIONAL_DATA_SOURCES:
+            cur.execute(probe, {"c": client_id})
+            if not cur.fetchone()[0]:
+                not_assessed_ids |= {p["plugin_id"] for p in finding_plugins
+                                     if any(m in p["query"] for m in markers)}
+        cur.execute("SELECT source FROM entra_collection_status "
+                    "WHERE client_id = %(c)s AND status = 'ok';", {"c": client_id})
+        ok_sources = {r[0] for r in cur.fetchall()}
+        not_assessed_ids |= {p["plugin_id"] for p in finding_plugins
+                             if set(p.get("requires_sources") or []) - ok_sources}
+    conn.commit()
+    return not_assessed_ids
 
 
 def check_schema_version(conn):
@@ -1401,6 +1461,12 @@ def main():
         evidence_run_id = cur.fetchone()[0]
     conn.commit()
 
+    # [v0.9.2] Worked out before the plugins run (it depends only on which
+    # data was collected), so a plugin that cannot assess anything this run
+    # leaves its open findings open instead of closing them as remediated.
+    not_assessed_ids = compute_not_assessed_ids(conn, client_id, finding_plugins)
+    not_assessed_kept = 0
+
     plugin_summaries = []
     all_findings = []
     executed_control_test_ids = set()
@@ -1431,6 +1497,21 @@ def main():
         # the same SAVEPOINT pattern run_plugin_query already uses
         # above, for the same reason -- one broken plugin's evidence
         # write can't be allowed to poison the whole run.
+        if not rows and plugin["plugin_id"] in not_assessed_ids:
+            # [v0.9.2] Zero rows because the plugin's source data is missing
+            # (e.g. an optional Graph permission or licence lapsed), not because
+            # anything was fixed: record nothing, close nothing.
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT count(*) FROM control_evidence_fact WHERE control_test_id = %s "
+                    "AND client_id = %s AND valid_to IS NULL;", (control_test_id, client_id))
+                not_assessed_kept += cur.fetchone()[0]
+            conn.commit()
+            plugin_summaries.append({"plugin_id": plugin["plugin_id"], "category": plugin["category"],
+                                      "name": plugin["name"], "version": plugin["version"],
+                                      "rollup": "pass", "framework_tags": plugin["framework_tags"]})
+            continue
+
         savepoint = f"evidence_{plugin['plugin_id']}"
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(f"SAVEPOINT {savepoint};")
@@ -1454,6 +1535,10 @@ def main():
                                   "rollup": rollup_status(rows),
                                   "framework_tags": plugin["framework_tags"]})
         all_findings.extend(findings)
+
+    if not_assessed_kept:
+        log(f"{not_assessed_kept} open finding(s) of plugins whose source data was not "
+            f"collected this run were left open (not assessed, not marked remediated).")
 
     if retired_plugins:
         with conn.cursor() as cur:
@@ -1487,19 +1572,6 @@ def main():
         log("Filtered run (--plugin-id/--category/--framework) -- skipping the stale-plugin safety net, "
             "since plugins not selected this run were deliberately skipped, not removed.")
 
-    # [v0.8.0] Entra plugins return zero rows ("pass") when there is no
-    # Entra data at all; on the compliance sheets that must read as "not
-    # assessed", not as SCuBA/MFA controls passing. [v0.9.0] The same for
-    # plugins reading SYSVOL (Group Policy content) data when SYSVOL was
-    # never collected (adprofiler.py --sysvol).
-    not_assessed_ids = set()
-    with conn.cursor() as cur:
-        for markers, probe in OPTIONAL_DATA_SOURCES:
-            cur.execute(probe, {"c": client_id})
-            if not cur.fetchone()[0]:
-                not_assessed_ids |= {p["plugin_id"] for p in finding_plugins
-                                     if any(m in p["query"] for m in markers)}
-    conn.commit()
     compliance = build_compliance(plugin_summaries, all_findings,
                                   not_assessed_plugin_ids=not_assessed_ids)
     if finding_plugins:

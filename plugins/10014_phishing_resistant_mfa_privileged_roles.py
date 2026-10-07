@@ -48,14 +48,19 @@ collected.
 
 Tenant-level finding: object_guid is md5('10014:' || client_id), as in
 plugin 10004.
+
+[v1.1] A policy stored without conditions (collector older than 0.7.0)
+now counts as unevaluable: the check was NULL instead of FALSE, so such
+policies were silently ignored and the plugin could fire on data it
+cannot assess.
 """
 
 PLUGIN = {
     "plugin_id": 10014,
     "category": "Hybrid Identity",
     "name": "Phishing-Resistant MFA Not Required for Highly Privileged Roles",
-    "version": "1.0",
-    "revision_date": "2026-10-04",
+    "version": "1.1",
+    "revision_date": "2026-10-05",
     "control_id": "HYBRID-10014",
     "framework_tags": [
         "CISA-SCUBA-MS.AAD.3.6",
@@ -129,7 +134,7 @@ PLUGIN = {
         pol AS (
             SELECT p->>'id' AS id,
                    COALESCE(p->>'display_name', p->>'id') COLLATE "C" AS name,
-                   jsonb_typeof(p->'conditions') = 'object' AS evaluable,
+                   COALESCE(jsonb_typeof(p->'conditions') = 'object', FALSE) AS evaluable,
                    p->'grant_controls'->'authenticationStrength' AS strength,
                    CASE WHEN jsonb_typeof(p->'conditions'->'users'->'includeUsers') = 'array'
                         THEN p->'conditions'->'users'->'includeUsers' ELSE '[]'::jsonb END AS inc_users,
