@@ -4,7 +4,7 @@
  adprofiler.py -- Active Directory Security & Compliance Profiler (Collector)
 ================================================================================
 
-VERSION: 0.7.4
+VERSION: 0.7.5
 
 PURPOSE:
     Connects to an on-premise Active Directory Domain Controller via LDAP,
@@ -185,7 +185,7 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
-VERSION = "0.7.4"
+VERSION = "0.7.5"
 # [client-test-branch] These are always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
 # connect_postgres() is ever called -- the values here are placeholders,
@@ -4038,6 +4038,9 @@ def collect_delegation_edges(pg_cur, client_id, run_id, entries, spn_to_guid, st
         pg_cur, "rbcd_unresolved_trustee_edge", client_id, run_id, valid_from,
         ["trustee_sid", "target_guid"], rbcd_unresolved_desired,
     )
+    # [v0.7.5] Counted in the Run Summary's edge totals like every other edge table.
+    stats.edges_opened += ghost_opened + rbcd_sid_opened
+    stats.edges_closed += ghost_closed + rbcd_sid_closed
 
     log_success(f"Delegation: {opened} edge(s) opened, {closed} closed, "
                 f"{unresolved} constrained target(s) unresolved "
@@ -5883,6 +5886,9 @@ def main():
                 ["object_guid", "trustee_sid", "ace_type", "access_mask", "object_type_guid"],
                 acl_desired,
             )
+            # [v0.7.5] ACL edges were left out of the Run Summary's edge totals.
+            stats.edges_opened += acl_opened
+            stats.edges_closed += acl_closed
             log_success(f"ACLs: {acl_opened} edge(s) opened, {acl_closed} closed "
                         f"(domain root + AdminSDHolder + {len(ou_entries)} OU(s) + "
                         f"{len(gpo_entries)} GPO(s) + ADCS objects + {len(kds_entries)} KDS key(s) + "

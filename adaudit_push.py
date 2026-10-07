@@ -618,6 +618,9 @@ def sync_catalogue(api, conn, plugins, tool_version, log):
         "schema_version": CONTRACT_VERSION, "emitted_at": iso(datetime.now(timezone.utc)),
         "source": {"tool": "adaudit", "tool_version": tool_version}, "plugins": entries,
     })
+    if api.dry_run:
+        log(f"Plugin catalogue ({len(entries)} plugins) written to {api.dry_run_dir} (dry run: not sent).")
+        return
     log(f"Plugin catalogue sent: {body.get('created', 0)} created, {body.get('updated', 0)} "
         f"updated, {body.get('unchanged', 0)} unchanged, {body.get('rejected', 0)} rejected.")
     if body.get("rejected"):
@@ -767,6 +770,9 @@ def _push_one(api, conn, run, meta, inventories, tool_version, schema_version, l
                                   f"{r.get('identity_guid') or ''}: {r.get('error')}"
                                   for r in rejected[:5])) if rejected else None
     ingest = str(done.get("ingest_status") or "").upper()
+    if api.dry_run:
+        log(f"  Run {rid} written to {api.dry_run_dir} (dry run: nothing sent, push state unchanged).")
+        return
     if status == 200 or ingest == "COMPLETE":
         log(f"  Run {rid} accepted as COMPLETE (API run id {done.get('run_id') or server_run_id}; "
             f"{done.get('remediated_findings', 0)} remediated, {done.get('retired_findings', 0)} "

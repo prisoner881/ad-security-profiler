@@ -25,14 +25,19 @@ kept being reported as privileged. admin_count stays in detail. krbtgt
 (RID 502; disabled, never logs on interactively) is excluded. detail gains
 has_spn so service accounts, which usually cannot use smart cards and need
 a different control (gMSA, authentication policy), are recognisable.
+
+[v1.7] Entra Connect / Azure AD Connect sync accounts (MSOL_<hex> connector,
+AAD_<hex> ADSync service account, or the installer's description) are no
+longer reported: a service account cannot use a smart card, and their exposure
+is reported by plugin 10009.
 """
 
 PLUGIN = {
     "plugin_id": 1012,
     "category": "User Accounts",
     "name": "Privileged Account Without Smartcard Logon Required",
-    "version": "1.6",
-    "revision_date": "2026-10-04",
+    "version": "1.7",
+    "revision_date": "2026-10-07",
     "remediation": (
     'Enable smartcard-required authentication for the account, or if smartcards '
     "aren't practical in this environment, implement an equivalent "
@@ -113,6 +118,16 @@ PLUGIN = {
         WHERE u.valid_to IS NULL
           AND u.client_id = %(client_id)s
           AND NOT u.smartcard_required
+          -- [v1.7] Entra Connect / Azure AD Connect sync accounts (MSOL_ connector,
+          -- AAD_ / ADSync service account, or the installer's description) are
+          -- service accounts: they cannot use smart cards. Their exposure is plugin 10009's
+          -- finding; plugin 1041 (cannot be delegated) still applies to them.
+          AND NOT (u.sam_account_name LIKE 'MSOL\\_%%'
+                   OR u.sam_account_name LIKE 'AAD\\_%%'
+                   OR COALESCE(u.description, '') ILIKE '%%Azure Active Directory Connect%%'
+                   OR COALESCE(u.description, '') ILIKE '%%Azure AD Connect%%'
+                   OR COALESCE(u.description, '') ILIKE '%%Entra Connect%%'
+                   OR COALESCE(u.description, '') ILIKE '%%Service account for the Synchronization Service%%')
           -- [v1.6] krbtgt (RID 502) is not an interactive account.
           AND NOT EXISTS (
                 SELECT 1 FROM directory_object o

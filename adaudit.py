@@ -2,7 +2,7 @@
 """
 adaudit.py -- AD Security & Compliance Plugin Runner
 ======================================================
-VERSION: 0.10.0
+VERSION: 0.10.1
 
 Companion to adprofiler.py. Where adprofiler.py collects AD data,
 adaudit.py analyzes it: discovers every plugin file in plugins/, runs each
@@ -25,6 +25,15 @@ DESIGN:
       as: (status, object_guid, stig_severity, stig_reference,
       tool_severity, tool_reference, fd_severity, summary, detail).
       Zero rows returned = clean pass, nothing to report.
+    - [v0.10.1] A plugin that could not assess anything because its source
+      data was not collected (no Entra / SYSVOL data, or a required Entra
+      source unreadable) is now shown as [N/A ] in the console and counted
+      as NOT ASSESSED in the summary line and the workbook's Summary tab,
+      instead of [ OK ] / PASS. Entra plugins are recognised by a FROM / JOIN
+      on an Entra table, not by the substring "entra_" anywhere in the
+      query: AD-only plugin 11016 (detail key all_entra_whfb) was shown as
+      not assessed on clients without Entra data. Dry-run pushes now say
+      what was written instead of "sent" / "accepted".
     - [v0.10.0] Requires schema v43. Pushes results to the FortifyData AD
       audit ingest API (adaudit_push.py; --push, --push-only, --push-run,
       --push-skip, --push-dry-run; credentials at runtime via --api-url /
@@ -205,7 +214,7 @@ import psycopg2.extras
 
 import adaudit_push
 
-VERSION = "0.10.0"
+VERSION = "0.10.1"
 
 # [test-candidate-branch] Always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
@@ -561,7 +570,10 @@ REQUIRED_SCHEMA_VERSION = 43
 # A plugin that reads one and passes while the data is absent is shown as
 # NOT ASSESSED on the compliance sheets.
 OPTIONAL_DATA_SOURCES = [
-    (("entra_",),
+    # [v0.10.1] A regex for table references, not the bare substring "entra_":
+    # an AD-only plugin whose detail key merely contains "entra_" (11016's
+    # all_entra_whfb) was shown as NOT ASSESSED on clients without Entra data.
+    ((re.compile(r"\b(?:FROM|JOIN)\s+(?:ad_intel\.)?v?_?entra_\w+", re.IGNORECASE),),
      "SELECT EXISTS (SELECT 1 FROM entra_security_posture WHERE client_id = %(c)s) "
      "    OR EXISTS (SELECT 1 FROM entra_user WHERE client_id = %(c)s);"),
     (("gpo_setting_edge", "gpo_preference_item_edge", "sysvol_script_edge", "ad_gpo_sysvol",
@@ -629,6 +641,12 @@ def mark_run_aborted(conn, evidence_run_id):
         pass
 
 
+def _marker_matches(marker, query):
+    """An OPTIONAL_DATA_SOURCES marker is a table/view name (substring) or a
+    compiled regex."""
+    return bool(marker.search(query)) if hasattr(marker, "search") else marker in query
+
+
 def compute_not_assessed_ids(conn, client_id, finding_plugins):
     """plugin_ids that cannot assess anything for this client because their
     source data was not collected: [v0.8.0] Entra plugins with no Entra data
@@ -643,7 +661,7 @@ def compute_not_assessed_ids(conn, client_id, finding_plugins):
             cur.execute(probe, {"c": client_id})
             if not cur.fetchone()[0]:
                 not_assessed_ids |= {p["plugin_id"] for p in finding_plugins
-                                     if any(m in p["query"] for m in markers)}
+                                     if any(_marker_matches(m, p["query"]) for m in markers)}
         cur.execute("SELECT source FROM entra_collection_status "
                     "WHERE client_id = %(c)s AND status = 'ok';", {"c": client_id})
         ok_sources = {r[0] for r in cur.fetchall()}
@@ -1033,7 +1051,8 @@ def print_report(plugin_summaries, all_findings):
 
     total_fail = sum(1 for p in plugin_summaries if p["rollup"] == "fail")
     total_warn = sum(1 for p in plugin_summaries if p["rollup"] == "warn")
-    total_pass = sum(1 for p in plugin_summaries if p["rollup"] == "pass")
+    total_pass = sum(1 for p in plugin_summaries if p["rollup"] == "pass" and not p.get("not_assessed"))
+    total_na = sum(1 for p in plugin_summaries if p.get("not_assessed"))
     total_error = sum(1 for p in plugin_summaries if p["rollup"] == "error")
     total_new = sum(1 for f in all_findings if f["change_status"] == "new")
     total_changed = sum(1 for f in all_findings if f["change_status"] == "changed")
@@ -1049,8 +1068,12 @@ def print_report(plugin_summaries, all_findings):
                                   key=lambda p: (STATUS_ORDER.get(p["rollup"], -1), -p["plugin_id"]),
                                   reverse=True)
         for p in plugins_in_cat:
-            header_marker = {"fail": "[FAIL]", "warn": "[WARN]", "pass": "[ OK ]",
-                              "error": "[ERR!]"}[p["rollup"]]
+            # [v0.10.1] A plugin whose source data was not collected (no
+            # Entra / SYSVOL data, or a required Entra source unreadable)
+            # checked nothing: "[N/A ]", not "[ OK ]".
+            header_marker = ("[N/A ]" if p.get("not_assessed") else
+                             {"fail": "[FAIL]", "warn": "[WARN]", "pass": "[ OK ]",
+                              "error": "[ERR!]"}[p["rollup"]])
             print(f"  {header_marker} #{p['plugin_id']:<5} [v{p['version']}] {p['name']}")
 
             for f in findings_by_plugin.get(p["plugin_id"], []):
@@ -1091,7 +1114,8 @@ def print_report(plugin_summaries, all_findings):
     print()
     print("=" * 78)
     print(f"  Summary: {total_fail} FAIL, {total_warn} WARN, {total_pass} PASS"
-          + (f", {total_error} ERROR" if total_error else ""))
+          + (f", {total_error} ERROR" if total_error else "")
+          + (f", {total_na} NOT ASSESSED (source data not collected)" if total_na else ""))
     print(f"  Change tracking: {total_new} new, {total_changed} changed, "
           f"{total_remediated} remediated since last run")
     print("=" * 78)
@@ -1304,24 +1328,28 @@ def write_excel_report(plugin_summaries, all_findings, inventory_results, filena
     for p in plugin_summaries:
         by_category.setdefault(p["category"], []).append(p)
 
-    write_header_row(ws_summary, ["Category", "FAIL", "WARN", "PASS", "ERROR", "Total Plugins"])
-    grand_fail = grand_warn = grand_pass = grand_error = 0
+    write_header_row(ws_summary, ["Category", "FAIL", "WARN", "PASS", "ERROR", "NOT ASSESSED",
+                                  "Total Plugins"])
+    grand_fail = grand_warn = grand_pass = grand_error = grand_na = 0
     for category in sorted(by_category):
         in_cat = by_category[category]
         n_fail = sum(1 for p in in_cat if p["rollup"] == "fail")
         n_warn = sum(1 for p in in_cat if p["rollup"] == "warn")
-        n_pass = sum(1 for p in in_cat if p["rollup"] == "pass")
+        n_pass = sum(1 for p in in_cat if p["rollup"] == "pass" and not p.get("not_assessed"))
         n_error = sum(1 for p in in_cat if p["rollup"] == "error")
-        ws_summary.append([category, n_fail, n_warn, n_pass, n_error, len(in_cat)])
+        n_na = sum(1 for p in in_cat if p.get("not_assessed"))
+        ws_summary.append([category, n_fail, n_warn, n_pass, n_error, n_na, len(in_cat)])
         grand_fail += n_fail
         grand_warn += n_warn
         grand_pass += n_pass
         grand_error += n_error
-    ws_summary.append(["TOTAL", grand_fail, grand_warn, grand_pass, grand_error, len(plugin_summaries)])
-    for col_idx in range(1, 7):
+        grand_na += n_na
+    ws_summary.append(["TOTAL", grand_fail, grand_warn, grand_pass, grand_error, grand_na,
+                       len(plugin_summaries)])
+    for col_idx in range(1, 8):
         ws_summary.cell(row=ws_summary.max_row, column=col_idx).font = Font(bold=True)
     ws_summary.auto_filter.ref = ws_summary.dimensions
-    for col_idx, width in enumerate([28, 8, 8, 8, 8, 14], start=1):
+    for col_idx, width in enumerate([28, 8, 8, 8, 8, 14, 14], start=1):
         ws_summary.column_dimensions[get_column_letter(col_idx)].width = width
 
     # --- [v0.8.0] Compliance Summary tab: one row per framework ---
@@ -1527,7 +1555,10 @@ def run_push(conn, client_id, sync_run_id, push_cfg, all_plugins, inventory_resu
         conn.rollback()
         log(f"[ERROR] Push stopped: {exc}")
         return False
-    if waiting:
+    if push_cfg["dry_run_dir"]:
+        log(f"Push (dry run): {pushed} run(s) written to {push_cfg['dry_run_dir']}; nothing was "
+            f"sent and they are still queued.")
+    elif waiting:
         log(f"Push: {pushed} run(s) pushed; the rest stay queued until FortifyData approves "
             f"this installation (client_id {client_id}).")
     else:
@@ -1838,6 +1869,9 @@ def main():
         if not run_finished:
             mark_run_aborted(conn, evidence_run_id)
 
+    for summary in plugin_summaries:
+        summary["not_assessed"] = (summary["rollup"] == "pass"
+                                   and summary["plugin_id"] in not_assessed_ids)
     compliance = build_compliance(plugin_summaries, all_findings,
                                   not_assessed_plugin_ids=not_assessed_ids)
     if finding_plugins:

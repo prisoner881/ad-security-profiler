@@ -44,14 +44,20 @@ protected_users_direct_flag. Summary and severity are unchanged.
 [v1.4] detail gains has_spn (and spn_count) so service accounts -- which
 Protected Users can break (no delegation, AES-only, no NTLM) -- can be
 triaged separately. Selection, summary and severity are unchanged.
+
+[v1.5] Entra Connect / Azure AD Connect sync accounts (MSOL_<hex> connector,
+AAD_<hex> ADSync service account, or the installer's description) are no
+longer reported: Microsoft does not support them in Protected Users (it can
+break synchronization), and their exposure is reported by plugin 10009.
+Plugin 1041 (cannot be delegated) still covers them.
 """
 
 PLUGIN = {
     "plugin_id": 1040,
     "category": "User Accounts",
     "name": "Privileged Account Not a Member of the Protected Users Group",
-    "version": "1.4",
-    "revision_date": "2026-10-04",
+    "version": "1.5",
+    "revision_date": "2026-10-07",
     "remediation": (
         "Add this account to the built-in Protected Users group, "
         "provided the domain functional level is at least Windows "
@@ -159,6 +165,16 @@ PLUGIN = {
           AND u.valid_to IS NULL
           AND u.is_enabled
           AND pum.object_guid IS NULL
+          -- [v1.5] Entra Connect / Azure AD Connect sync accounts (MSOL_ connector,
+          -- AAD_ / ADSync service account, or the installer's description) are
+          -- service accounts: Protected Users can break synchronization (AES-only Kerberos, no NTLM, no credential caching). Their exposure is plugin 10009's
+          -- finding; plugin 1041 (cannot be delegated) still applies to them.
+          AND NOT (u.sam_account_name LIKE 'MSOL\\_%%'
+                   OR u.sam_account_name LIKE 'AAD\\_%%'
+                   OR COALESCE(u.description, '') ILIKE '%%Azure Active Directory Connect%%'
+                   OR COALESCE(u.description, '') ILIKE '%%Azure AD Connect%%'
+                   OR COALESCE(u.description, '') ILIKE '%%Entra Connect%%'
+                   OR COALESCE(u.description, '') ILIKE '%%Service account for the Synchronization Service%%')
           -- [v1.3] Fallback from retired plugin 1015: the collector's
           -- direct-memberOf flag also counts as membership, in case the
           -- Protected Users group's member edges were not collected.

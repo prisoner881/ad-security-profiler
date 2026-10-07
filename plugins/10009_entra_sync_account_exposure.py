@@ -52,14 +52,26 @@ accounts) -- now count only when the account really holds DCSync, so
 unrelated sync service accounts are no longer labelled Tier 0. "Disabled
 but retains its replication rights" is only stated when DCSync is
 confirmed.
+
+[v1.3] The summary said "Tier 0, holds directory replication rights by
+design" for every matched account, including AAD_<hex> accounts that hold
+none (replication_rights_confirmed_on_domain_root false). AAD_<hex> is not an
+older DirSync connector, as the original note above says: it is the ADSync
+service account Entra Connect creates on a custom installation ("Service
+account for the Synchronization Service"), which runs the sync engine and
+needs no replication rights. The parenthesis now follows the evidence:
+"Tier 0, holds directory replication rights by design" only when DCSync is
+confirmed, otherwise "Entra Connect account; no directory replication rights
+found on the domain root". Selection and severity are unchanged (an
+unconfirmed account stays medium).
 """
 
 PLUGIN = {
     "plugin_id": 10009,
     "category": "Hybrid Identity",
     "name": "Entra Connect Directory Synchronization Account Exposure",
-    "version": "1.2",
-    "revision_date": "2026-10-04",
+    "version": "1.3",
+    "revision_date": "2026-10-07",
     "remediation": (
         "Treat this account as Tier 0 and the Entra Connect server as "
         "a Tier 0 asset, on par with a domain controller -- it holds a "
@@ -191,7 +203,11 @@ PLUGIN = {
                 ELSE 'medium'
             END AS fd_severity,
             'Directory synchronization account "' || COALESCE(sa.sam_account_name, sa.object_guid::text)
-                || '" (Tier 0, holds directory replication rights by design) '
+                || CASE WHEN sa.has_dcsync
+                        THEN '" (Tier 0, holds directory replication rights by design) '
+                        ELSE '" (Entra Connect account; no directory replication rights '
+                             'found on the domain root) '
+                   END
                 || CASE
                        WHEN COALESCE(array_length(sa.service_principal_names, 1), 0) > 0
                            THEN 'has a servicePrincipalName registered and is therefore '

@@ -55,14 +55,29 @@ is fail / critical; a partial grant (one right only, which cannot
 extract secrets on its own) is warn / medium. Read-only DCs (521) and
 Enterprise Read-only DCs (498) are excluded unless they hold the full
 set.
+
+[v1.6] The ACTIVE Entra Connect (Azure AD Connect) connector account is now an
+expected holder, as plugin 10009's documentation always said it was:
+password hash synchronization requires DCSync, and plugins 10009 / 10010
+report that account's exposure (credential hygiene, sync server on a DC).
+"Connector account" = a user account named MSOL_<hex>, or whose description
+is the installer's ("Azure Active Directory Connect" / "Azure AD Connect" /
+"Entra Connect"). "Active" = enabled and logged on within 30 days of the
+collection (lastLogonTimestamp replicates with up to ~14 days' lag). A
+connector account that is disabled or has not logged on for 30 days --
+typically left behind by an earlier or decommissioned installation -- is
+still reported, critical, and named as a stale Entra Connect connector
+account: it keeps standing DCSync with nothing using it. Found on a lab
+domain with one live connector (MSOL_e8f8..., previously a critical false
+positive) and one left from a 2017 installation (MSOL_68bf..., real).
 """
 
 PLUGIN = {
     "plugin_id": 5001,
     "category": "ACLs",
     "name": "DCSync Replication Rights Held by an Unexpected Principal",
-    "version": "1.5",
-    "revision_date": "2026-10-04",
+    "version": "1.6",
+    "revision_date": "2026-10-07",
     "remediation": (
         "Confirm this grant was deliberate and is still needed. "
         "Service accounts frequently accumulate replication rights for "
@@ -148,6 +163,24 @@ PLUGIN = {
                    (dr.has_all_extended_rights
                     OR (dr.has_get_changes AND dr.has_get_changes_all)) AS full_dcsync
             FROM dcsync_rights dr
+        ),
+        -- [v1.6] Entra Connect connector accounts, and whether each is in use.
+        collection AS (
+            SELECT COALESCE(sr.completed_at, now()) AS collected_at
+            FROM sync_run sr WHERE sr.run_id = %(run_id)s
+        ),
+        connector AS (
+            SELECT u.object_guid,
+                   (u.is_enabled IS TRUE
+                    AND u.last_logon_timestamp >= (SELECT collected_at FROM collection)
+                                                  - interval '30 days') AS active,
+                   u.is_enabled, u.last_logon_timestamp
+            FROM ad_user u
+            WHERE u.client_id = %(client_id)s AND u.valid_to IS NULL
+              AND (u.sam_account_name LIKE 'MSOL\\_%%'
+                   OR u.description ILIKE '%%Azure Active Directory Connect%%'
+                   OR u.description ILIKE '%%Azure AD Connect%%'
+                   OR u.description ILIKE '%%Entra Connect%%')
         )
         SELECT
             CASE WHEN c.full_dcsync THEN 'fail' ELSE 'warn' END AS status,
@@ -157,7 +190,10 @@ PLUGIN = {
             NULL AS tool_severity,
             NULL AS tool_reference,
             CASE WHEN c.full_dcsync THEN 'critical' ELSE 'medium' END AS fd_severity,
-            'Principal ' || COALESCE(do2.sam_account_name, c.trustee_sid)
+            CASE WHEN cn.object_guid IS NOT NULL
+                 THEN 'Stale Entra Connect connector account '
+                 ELSE 'Principal ' END
+                || COALESCE(do2.sam_account_name, c.trustee_sid)
                 || CASE WHEN c.full_dcsync
                         THEN ' holds DCSync replication rights on the domain root ('
                         ELSE ' holds a partial DCSync grant on the domain root ('
@@ -181,13 +217,21 @@ PLUGIN = {
                 'has_get_changes_all', c.has_get_changes_all,
                 'has_all_extended_rights', c.has_all_extended_rights,
                 'has_generic_all', c.has_generic_all,
-                'full_dcsync', c.full_dcsync
+                'full_dcsync', c.full_dcsync,
+                'sync_connector_account', cn.object_guid IS NOT NULL,
+                'connector_enabled', cn.is_enabled,
+                'connector_last_logon_timestamp', cn.last_logon_timestamp
             ) AS detail
         FROM classified c
         JOIN directory_object do2
             ON do2.object_sid = c.trustee_sid AND do2.client_id = %(client_id)s
            AND NOT do2.is_deleted
+        LEFT JOIN connector cn ON cn.object_guid = do2.object_guid
         WHERE
+            -- [v1.6] The active Entra Connect connector account is expected
+            -- (password hash sync); plugins 10009 / 10010 report it.
+            NOT COALESCE(cn.active, FALSE)
+            AND
             -- Default holders of the full right set: Domain Admins (512),
             -- Enterprise Admins (519), Administrators (S-1-5-32-544),
             -- Enterprise Domain Controllers (S-1-5-9), and -- since Windows
