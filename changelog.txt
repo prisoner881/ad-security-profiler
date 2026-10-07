@@ -9,6 +9,17 @@ the script's own docstring now keeps a one-line summary per entry, this
 file keeps the complete detail (root causes, what was verified, why a
 decision was made a particular way) for anyone who wants it.
 
+    0.7.6 - msDS-KeyCredentialLink timestamps of Entra-sourced keys are now
+            decoded correctly. For a key whose source is AzureAD (Windows
+            Hello for Business keys written back by Entra Connect) the
+            creation and last-logon times are .NET DateTime.ToBinary()
+            values, not FILETIMEs; read as FILETIMEs they overflowed and
+            were stored as null, so plugin 1022 reported every such key as
+            "possible Shadow Credentials (creation_time_missing_or_invalid)"
+            (seen on a lab account with two hybrid WHfB keys). AD-sourced
+            keys were always decoded correctly. Re-collect to correct
+            ad_user.key_credentials / ad_computer.key_credentials.
+
     0.7.5 - Run Summary edge totals now include ACL edges (acl_edge) and the
             unresolved delegation-target / RBCD-by-SID edges; they were
             synced and logged per step but left out of "Edges opened" /

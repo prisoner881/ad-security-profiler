@@ -37,8 +37,8 @@ rights on a DC expose Tier 0 credentials on that host. DISA STIG
 restricts each of these on domain controllers.
 
 Service identities: Windows adds IIS application-pool identities
-(S-1-5-82-*, IIS APPPOOL\<pool>), per-service SIDs (S-1-5-80-*,
-NT SERVICE\<service>) and IIS_IUSRS (S-1-5-32-568) to
+(S-1-5-82-*, IIS APPPOOL\\<pool>), per-service SIDs (S-1-5-80-*,
+NT SERVICE\\<service>) and IIS_IUSRS (S-1-5-32-568) to
 SeAssignPrimaryTokenPrivilege and SeImpersonatePrivilege when IIS (for
 example AD CS Web Enrollment) or such a service is installed on a DC; on
 a DC that local change lands in the Default Domain Controllers Policy.

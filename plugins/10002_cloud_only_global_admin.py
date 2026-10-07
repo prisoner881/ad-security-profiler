@@ -47,14 +47,18 @@ finding (its members are). When the collector couldn't read PIM
 eligibility or expand role-holding groups (e.g. no Entra ID P2 licence),
 detail.coverage_notes says so, and one separate low warn finding per
 client records the coverage gap.
+
+[v1.3] The summary adds the UPN after the display name, so two holders
+with the same display name (a lab showed two "Eric Smith" accounts) give
+two distinguishable findings. Identity is unchanged (member_id).
 """
 
 PLUGIN = {
     "plugin_id": 10002,
     "category": "Hybrid Identity",
     "name": "Cloud-Only Global Administrator (No On-Prem Account)",
-    "version": "1.2",
-    "revision_date": "2026-10-04",
+    "version": "1.3",
+    "revision_date": "2026-10-07",
     "remediation": (
         "Confirm this account's security posture was set deliberately, "
         "not left at defaults: a strong, unique password not reused "
@@ -172,6 +176,9 @@ PLUGIN = {
             CASE WHEN h.member_type = '#microsoft.graph.servicePrincipal'
                  THEN 'Service principal ' ELSE 'User ' END
                 || COALESCE(h.member_display_name, h.member_upn, h.member_id::text)
+                -- [v1.3] the UPN tells apart two holders with the same display name
+                || CASE WHEN h.member_display_name IS NOT NULL AND h.member_upn IS NOT NULL
+                        THEN ' (' || h.member_upn || ')' ELSE '' END
                 || ' holds Global Administrator (' || h.path_summary
                 || ') with no corresponding on-prem AD account' AS summary,
             jsonb_build_object(
