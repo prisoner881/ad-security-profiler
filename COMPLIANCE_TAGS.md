@@ -107,18 +107,33 @@ Use CM-11 for user app consent and registration, and AC-20 / PCI 8.2.7 / A.5.19 
 |---|---|
 | `CISA-SCUBA-MS.AAD.1.1` | Legacy authentication SHALL be blocked |
 | `CISA-SCUBA-MS.AAD.2.1` | Users detected as high risk SHALL be blocked |
+| `CISA-SCUBA-MS.AAD.2.2` | A notification SHOULD be sent to the administrator when high-risk users are detected |
 | `CISA-SCUBA-MS.AAD.2.3` | Sign-ins detected as high risk SHALL be blocked |
 | `CISA-SCUBA-MS.AAD.3.1` | Phishing-resistant MFA SHALL be enforced for all users |
 | `CISA-SCUBA-MS.AAD.3.2` | If phishing-resistant MFA isn't enforced, an alternative MFA method SHALL be enforced for all users |
+| `CISA-SCUBA-MS.AAD.3.3` | If Microsoft Authenticator is enabled, it SHALL be configured to show login context information |
+| `CISA-SCUBA-MS.AAD.3.4` | The Authentication Methods Manage Migration feature SHALL be set to Migration Complete |
+| `CISA-SCUBA-MS.AAD.3.5` | The authentication methods SMS, Voice Call, and Email One-Time Passcode (OTP) SHALL be disabled |
 | `CISA-SCUBA-MS.AAD.3.6` | Phishing-resistant MFA SHALL be required for highly privileged roles |
+| `CISA-SCUBA-MS.AAD.3.7` | Managed devices SHOULD be required for authentication |
+| `CISA-SCUBA-MS.AAD.3.8` | Managed Devices SHOULD be required to register MFA |
+| `CISA-SCUBA-MS.AAD.3.9` | Device code authentication SHOULD be blocked |
+| `CISA-SCUBA-MS.AAD.4.1` | Security logs SHALL be sent to the agency's security operations center for monitoring |
 | `CISA-SCUBA-MS.AAD.5.1` | Only administrators SHALL be allowed to register applications |
 | `CISA-SCUBA-MS.AAD.5.2` | Only administrators SHALL be allowed to consent to applications |
 | `CISA-SCUBA-MS.AAD.5.3` | An admin consent workflow SHALL be configured |
+| `CISA-SCUBA-MS.AAD.5.5` | Application Password Addition SHOULD be blocked |
+| `CISA-SCUBA-MS.AAD.5.6` | Application password lifetime SHOULD be restricted to 180 days or less |
+| `CISA-SCUBA-MS.AAD.5.7` | Application certificate lifetime SHOULD be restricted to 365 days or less |
+| `CISA-SCUBA-MS.AAD.6.1` | User passwords SHALL NOT expire |
 | `CISA-SCUBA-MS.AAD.7.1` | A minimum of two users and a maximum of eight users SHALL be provisioned with the Global Administrator role |
 | `CISA-SCUBA-MS.AAD.7.2` | Privileged users SHALL be provisioned with finer-grained roles instead of Global Administrator |
 | `CISA-SCUBA-MS.AAD.7.3` | Privileged users SHALL be provisioned cloud-only accounts separate from an on-premises directory |
 | `CISA-SCUBA-MS.AAD.7.4` | Permanent active role assignments SHALL NOT be allowed for highly privileged roles |
 | `CISA-SCUBA-MS.AAD.7.5` | Provisioning users to highly privileged roles SHALL NOT occur outside of a PAM system |
+| `CISA-SCUBA-MS.AAD.7.6` | Activation of the Global Administrator role SHALL require approval |
 | `CISA-SCUBA-MS.AAD.7.7` | Eligible and Active highly privileged role assignments SHALL trigger an alert |
+| `CISA-SCUBA-MS.AAD.7.8` | User activation of the Global Administrator role SHALL trigger an alert |
+| `CISA-SCUBA-MS.AAD.7.9` | User activation of other highly privileged roles SHOULD trigger an alert |
 | `CISA-SCUBA-MS.AAD.8.1` | Guest users SHOULD have limited or restricted access to Entra ID directory objects |
 | `CISA-SCUBA-MS.AAD.8.2` | Only users with the Guest Inviter role SHOULD be able to invite guest users |

@@ -2,9 +2,43 @@
 """
 entra_graph_collector.py -- Microsoft Entra ID / Graph API Email Collector
 
-VERSION: 0.7.0
+VERSION: 0.8.0
 
 CHANGELOG:
+    0.8.0 - Requires schema v42. Collects much more of the tenant, each
+            new data source optional: a 400/403/404 (permission not
+            granted, licence missing, beta endpoint unavailable) no longer
+            aborts anything -- the source's rows are removed for the
+            client and the reason is stored in entra_collection_status
+            (one row per source per run, 'ok' when read), so adaudit.py
+            shows the plugins that need it as NOT ASSESSED. New sources:
+            licences (subscribedSkus), organization, domains and
+            federation configuration (signing certificates parsed),
+            groups with owners and transitive members of the sensitive
+            ones, role definitions, custom-role assignments, PIM role
+            settings, service principals (own credentials, owner tenant,
+            publisher) and their sign-in activity, application and
+            service-principal owners, application permissions on nine
+            resource APIs, delegated (oauth2PermissionGrants) grants,
+            named locations, the authentication methods, cross-tenant
+            access, admin consent request, directory (password
+            protection / group) and device registration policies,
+            on-prem sync feature flags, partner contracts, MFA
+            registration details, risky users and risk detections, and
+            (opt-in, --include-pta-agents) pass-through authentication
+            agents. Users gain createdDateTime, passwordPolicies, password
+            change time, guest invitation state, last sync time, licensed
+            services and (optional pass) sign-in activity; applications
+            gain certificate details, audience, publisher, redirect URIs,
+            implicit grant and instance-lock settings; the authorization
+            policy gains allowedToReadBitlockerKeysForOwnedDevice. After
+            all sources run, entra_change_history (SCD2) and
+            entra_change_baseline are updated for every entity type whose
+            input sources were all read. Per-object owner/member/app-role
+            reads go through Graph JSON batching ($batch, 20 per request,
+            429 sub-responses retried honouring Retry-After). Existing
+            core steps and tables are unchanged. New optional permissions
+            are listed under CREDENTIAL SETUP; none is required.
     0.7.0 - Requires schema v38. Active directory role rows now say how
             the role is held (assignment_kind 'permanent', 'time_bound'
             or 'activated', with assignment_start/assignment_end), from
@@ -117,10 +151,44 @@ CREDENTIAL SETUP (done once, by the client, in their own Entra tenant)
        rather than a one-off).
     4. You now have three values this script needs: the tenant ID, the
        application (client) ID, and the client secret.
+    5. [v0.8.0] OPTIONAL application permissions. The five above are the
+       only REQUIRED ones (they also cover licences, organization,
+       domains, groups and owners, role definitions and custom-role
+       assignments, service principals and owners, application and
+       delegated grants, named locations, the authentication methods /
+       cross-tenant / admin consent request / directory settings
+       policies, and partner contracts). Each optional permission below
+       unlocks one or more sources; without it (or without the licence)
+       the collector records why in entra_collection_status and the
+       plugins that need it show as NOT ASSESSED:
+         AuditLog.Read.All (Entra ID P1) -- user sign-in activity,
+             service-principal sign-in activity (beta), MFA registration
+             details.
+         Domain.Read.All -- federation configuration of Federated
+             domains (signing certificates, MFA behaviour).
+         RoleManagementPolicy.Read.Directory (Entra ID P2) -- PIM role
+             settings (activation MFA/approval/duration/notifications).
+             This is the precise permission; RoleManagement.Read.Directory
+             (already required) is also documented as sufficient.
+         Policy.Read.DeviceConfiguration -- device registration policy
+             (beta).
+         OnPremDirectorySynchronization.Read.All -- on-prem sync feature
+             flags (password hash sync, soft/hard-match blocking).
+         IdentityRiskyUser.Read.All (Entra ID P2) -- risky users.
+         IdentityRiskEvent.Read.All (Entra ID P2) -- risk detections.
+         OnPremisesPublishingProfiles.ReadWrite.All -- pass-through
+             authentication agents. Microsoft offers no read-only
+             permission for this read, so it is opt-in: only used with
+             --include-pta-agents, and only grant it if you accept a
+             write-capable permission on this app.
 
 WHAT THIS DOES NOT DO
-    Does not create, modify, or delete anything in Entra ID -- both
-    permissions above are read-only. Does not touch on-prem AD, any domain controller, or
+    Does not create, modify, or delete anything in Entra ID -- every
+    request is a GET (the [v0.8.0] JSON batch POST to /$batch only
+    carries GETs), and every permission above is read-only except the
+    explicit opt-in OnPremisesPublishingProfiles.ReadWrite.All for
+    --include-pta-agents, which is write-capable even though this
+    collector only reads with it. Does not touch on-prem AD, any domain controller, or
     any client machine at all -- purely an outbound HTTPS call from
     wherever this script runs to Microsoft's cloud API. Does not require
     --domain-fqdn's on-prem AD to have ever been collected by
@@ -142,6 +210,8 @@ SCOPE, HONESTLY
 
 import argparse
 import atexit
+import base64
+import hashlib
 import getpass
 import email.utils
 import json
@@ -149,7 +219,8 @@ import random
 import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import requests
 import psycopg2
@@ -165,7 +236,7 @@ PG_DBNAME = "adprofiler"
 PG_USER = None
 PG_PASSWORD = None
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 
 # [v0.5.0] Retry policy shared by every Graph/token request (see
 # _send_with_retry()). 429 and transient 5xx responses, plus network
@@ -186,7 +257,14 @@ GRAPH_TOKEN_URL_TMPL = "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.
 GRAPH_USERS_URL = "https://graph.microsoft.com/v1.0/users"
 GRAPH_USER_SELECT = (
     "id,userPrincipalName,mail,proxyAddresses,accountEnabled,"
-    "onPremisesSecurityIdentifier,onPremisesSyncEnabled,userType"
+    "onPremisesSecurityIdentifier,onPremisesSyncEnabled,userType,"
+    # [v0.8.0] More user fields, all User.Read.All. signInActivity is
+    # deliberately NOT here: without AuditLog.Read.All (and P1) it fails
+    # the whole /users call, so it is read in a separate optional pass
+    # (fetch_sign_in_activity()).
+    "displayName,createdDateTime,passwordPolicies,lastPasswordChangeDateTime,"
+    "externalUserState,externalUserStateChangeDateTime,onPremisesLastSyncDateTime,"
+    "assignedPlans"
 )
 GRAPH_PAGE_SIZE = 999  # Graph's own maximum for $top on /users, not a choice made here
 
@@ -242,6 +320,8 @@ AUTHORIZATION_POLICY_FIELDS = (
 AUTHORIZATION_POLICY_DEFAULT_USER_FIELDS = (
     "allowedToCreateApps", "allowedToCreateSecurityGroups", "allowedToCreateTenants",
     "allowedToReadOtherUsers", "permissionGrantPoliciesAssigned",
+    # [v0.8.0] schema v42 column comment.
+    "allowedToReadBitlockerKeysForOwnedDevice",
 )
 
 # [v0.3.0] Application registrations -- read via Application.Read.All, a
@@ -285,6 +365,143 @@ DANGEROUS_GRAPH_PERMISSIONS = {
     "Group.ReadWrite.All",
     "GroupMember.ReadWrite.All",
 }
+
+# ----------------------------------------------------------------------------
+# [v0.8.0] Optional data sources (schema v42). Every source below is read
+# with graph_get_optional(): a 400/403/404 is recorded in
+# entra_collection_status and that source's rows are removed for the
+# client; anything else is retried and then aborts, as for the core steps.
+# ----------------------------------------------------------------------------
+GRAPH_V1 = "https://graph.microsoft.com/v1.0"
+# [v0.8.0] Beta endpoints are used only where v1.0 has no equivalent (or as a
+# fallback when the v1.0 read fails with 400/404). Microsoft can change or
+# remove beta APIs without notice, so these reads may start failing; the
+# failure is then recorded per source like any other.
+GRAPH_BETA = "https://graph.microsoft.com/beta"
+# [v0.8.0] JSON batching: up to 20 GETs per POST (Graph's documented limit).
+# The POST itself carries only GET sub-requests -- nothing is written.
+GRAPH_BATCH_URL = GRAPH_V1 + "/$batch"
+GRAPH_BATCH_MAX_REQUESTS = 20
+# entra_collection_status.status reasons are Graph's own error code and
+# message, trimmed to this length.
+STATUS_REASON_MAX = 300
+
+GRAPH_SUBSCRIBED_SKUS_URL = GRAPH_V1 + "/subscribedSkus"
+GRAPH_ORGANIZATION_URL = GRAPH_V1 + "/organization"
+GRAPH_DOMAINS_URL = GRAPH_V1 + "/domains"
+GRAPH_ROLE_DEFINITIONS_URL = GRAPH_V1 + "/roleManagement/directory/roleDefinitions"
+GRAPH_ROLE_ASSIGNMENTS_URL = GRAPH_V1 + "/roleManagement/directory/roleAssignments"
+GRAPH_PIM_POLICY_ASSIGNMENTS_URL = (
+    GRAPH_V1 + "/policies/roleManagementPolicyAssignments"
+    "?$filter=scopeId eq '/' and scopeType eq 'DirectoryRole'&$expand=policy($expand=rules)"
+)
+GRAPH_SP_SIGN_IN_ACTIVITY_URL = GRAPH_BETA + "/reports/servicePrincipalSignInActivities"
+GRAPH_OAUTH2_GRANTS_URL = GRAPH_V1 + "/oauth2PermissionGrants"
+GRAPH_NAMED_LOCATIONS_URL = GRAPH_V1 + "/identity/conditionalAccess/namedLocations"
+GRAPH_AUTH_METHODS_POLICY_URL = GRAPH_V1 + "/policies/authenticationMethodsPolicy"
+GRAPH_CROSS_TENANT_DEFAULT_URL = GRAPH_V1 + "/policies/crossTenantAccessPolicy/default"
+GRAPH_CROSS_TENANT_PARTNERS_URL = GRAPH_V1 + "/policies/crossTenantAccessPolicy/partners"
+GRAPH_ADMIN_CONSENT_POLICY_URL = GRAPH_V1 + "/policies/adminConsentRequestPolicy"
+GRAPH_GROUP_SETTINGS_URL = GRAPH_V1 + "/groupSettings"
+GRAPH_DEVICE_REGISTRATION_POLICY_PATH = "/policies/deviceRegistrationPolicy"
+GRAPH_ONPREM_SYNC_PATH = "/directory/onPremisesSynchronization"
+GRAPH_CONTRACTS_URL = GRAPH_V1 + "/contracts"
+GRAPH_REGISTRATION_DETAILS_URL = GRAPH_V1 + "/reports/authenticationMethods/userRegistrationDetails"
+GRAPH_RISKY_USERS_URL = (
+    GRAPH_V1 + "/identityProtection/riskyUsers"
+    "?$filter=riskState eq 'atRisk' or riskState eq 'confirmedCompromised'"
+)
+GRAPH_RISK_DETECTIONS_URL = GRAPH_V1 + "/identityProtection/riskDetections"
+RISK_DETECTION_LOOKBACK_DAYS = 90
+RISK_STATES_KEPT = {"atRisk", "confirmedCompromised"}
+# [v0.8.0] Pass-through authentication agents: onPremisesAgent list under
+# the 'authentication' publishing type (beta only). Path written from
+# Microsoft's onPremisesPublishingProfiles documentation
+# (GET /onPremisesPublishingProfiles/{publishingType}/agents); kept as a
+# named constant in case Microsoft moves it. Needs
+# OnPremisesPublishingProfiles.ReadWrite.All -- there is no read-only
+# permission -- so it is only read with --include-pta-agents.
+GRAPH_PTA_AGENTS_URL = GRAPH_BETA + "/onPremisesPublishingProfiles/authentication/agents"
+PTA_SKIPPED_STATUS = ("skipped: requires OnPremisesPublishingProfiles.ReadWrite.All; "
+                      "enable with --include-pta-agents")
+
+# [v0.8.0] Tenants that own Microsoft's first-party applications (v42
+# entra_service_principal comment). Owners are not read for their service
+# principals.
+MICROSOFT_TENANT_IDS = {"f8cdef31-a31e-4b4a-93e4-5f571e91255a", "72f988bf-86f1-41af-91ab-2d7cd011db47"}
+
+# [v0.8.0] Resource APIs whose application permissions (appRoleAssignedTo)
+# go to entra_app_role_grant -- appIds are fixed across tenants (v42
+# entra_app_role_grant comment).
+APP_ROLE_GRANT_RESOURCE_APP_IDS = (
+    "00000003-0000-0000-c000-000000000000",  # Microsoft Graph
+    "00000002-0000-0ff1-ce00-000000000000",  # Office 365 Exchange Online
+    "00000003-0000-0ff1-ce00-000000000000",  # Office 365 SharePoint Online
+    "cfa8b339-82a2-471a-a3c9-0fc0be7a4093",  # Azure Key Vault
+    "00000002-0000-0000-c000-000000000000",  # Windows Azure Active Directory (AAD Graph)
+    "00000004-0000-0ff1-ce00-000000000000",  # Microsoft Teams Services / Skype for Business Online
+    "c5393580-f805-4401-95e8-94b7a6ef2fc2",  # Office 365 Management APIs
+    "00000007-0000-0000-c000-000000000000",  # Dynamics CRM
+    "c161e42e-d4df-4a3d-9b42-e7a3c31f59d4",  # Microsoft Intune API
+)
+# An app role assignment with this appRoleId is "default access" (no
+# specific permission) -- stored with permission_name NULL.
+DEFAULT_ACCESS_APP_ROLE_ID = "00000000-0000-0000-0000-000000000000"
+
+# [v0.8.0] Built-in directory roles treated as privileged when deciding
+# whether a group's app role assignment on a service principal makes the
+# group sensitive ('app_role'): a service principal holding one of these
+# (or a DANGEROUS_GRAPH_PERMISSIONS grant) can take over the tenant or its
+# privileged accounts. Template ids are fixed across tenants.
+PRIVILEGED_ROLE_TEMPLATE_IDS = {
+    "62e90394-69f5-4237-9190-012177145e10",  # Global Administrator
+    "e8611ab8-c189-46e8-94e1-60213ab1f814",  # Privileged Role Administrator
+    "7be44c8a-adaf-4e2a-84d6-ab2649e08a13",  # Privileged Authentication Administrator
+    "9b895d92-2cd3-44c7-9d02-a6ac2d5ea5c3",  # Application Administrator
+    "158c047a-c907-4556-b7ef-446551a6b5f7",  # Cloud Application Administrator
+    "194ae4cb-b126-40b2-bd5b-6091b380977d",  # Security Administrator
+    "fe930be7-5e62-47db-91af-98c3a49a38b1",  # User Administrator
+    "c4e39bd9-1100-46d3-8c65-fb160da0071f",  # Authentication Administrator
+    "729827e3-9c14-49f7-bb1b-9608f156bbb8",  # Helpdesk Administrator
+    "29232cdf-9323-42fd-ade2-1d097af3e4de",  # Exchange Administrator
+    "f28a1f50-f6e7-4571-818b-6a12f2af6b6c",  # SharePoint Administrator
+    "3a2c62db-5318-420d-8d74-23affee5d9d5",  # Intune Administrator
+    "b1be1c3e-b65d-4f19-8427-f6fa0d97feb9",  # Conditional Access Administrator
+    "8ac3fc64-6eca-42ea-9e69-59f4c7b60eb2",  # Hybrid Identity Administrator
+    "fdd7a751-b60b-444a-984c-02652fe8fa1c",  # Groups Administrator
+    "9360feb5-f418-4baa-8175-e2a00bac4301",  # Directory Writers
+    "e00e864a-17c5-4a4b-9c06-f5b95a8d5bd8",  # Partner Tier2 Support
+    "8329153b-31d0-4727-b945-745eb3bc5f31",  # Domain Name Administrator
+    "be2f45a1-457d-42af-a067-6ec1fa63bc45",  # External Identity Provider Administrator
+    "d29b2b05-8046-44ba-8758-1e26182fcf32",  # Directory Synchronization Accounts
+}
+
+# [v0.8.0] Authentication method configurations fetched one by one when
+# Graph does not return them inline with authenticationMethodsPolicy.
+AUTH_METHOD_CONFIG_IDS = (
+    "Sms", "Voice", "Email", "Fido2", "MicrosoftAuthenticator", "TemporaryAccessPass",
+    "SoftwareOath", "X509Certificate",
+)
+
+# [v0.8.0] User fields read through the /microsoft.graph.user cast segment
+# of owner / member collections. Selecting them on a plain directoryObject
+# collection can return 400, and full objects without $select omit them
+# (users only return a default property set), so each owner/member list is
+# read twice: once as full objects (every type -- users, groups, service
+# principals, devices) and once cast to users with these fields; merged by id.
+DIRECTORY_USER_EXTRA_SELECT = "id,userType,onPremisesSyncEnabled,accountEnabled"
+
+# [v0.8.0] Every optional source, in run order. Names are exactly those in
+# the entra_collection_status table comment (schema v42).
+OPTIONAL_SOURCES = (
+    "sign_in_activity", "subscribed_skus", "organization", "domains", "federation",
+    "service_principals", "sp_sign_in_activity", "app_role_grants", "delegated_grants",
+    "app_owners", "groups", "role_definitions", "custom_role_assignments", "pim_policies",
+    "named_locations", "auth_methods_policy", "cross_tenant_policy",
+    "admin_consent_request_policy", "directory_settings", "device_registration_policy",
+    "onprem_sync", "pta_agents", "partner_contracts", "registration_details",
+    "risky_users", "risk_detections",
+)
 
 
 # ============================================================================
@@ -505,6 +722,44 @@ class GraphClient:
         except ValueError:
             raise CollectorAbort(f"Graph request for {what} returned HTTP 200 with a non-JSON body.")
 
+    def post_batch(self, payload, what):
+        """[v0.8.0] POSTs a JSON batch (GET sub-requests only -- nothing is
+        written) to GRAPH_BATCH_URL and returns the raw response for
+        graph_batch_get_all() to interpret. Whole-request 429/5xx/network
+        errors are retried like every GET; 401 refreshes the token once."""
+        return _send_with_retry(
+            lambda: requests.post(
+                GRAPH_BATCH_URL, json=payload,
+                headers={"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"},
+                timeout=120,
+            ),
+            f"Graph request for {what}",
+            on_unauthorized=self._refresh_token,
+        )
+
+
+def _graph_error_reason(status_code, body=None, text=""):
+    """[v0.8.0] "HTTP <status> <code>: <message>" from a Graph error body
+    (dict) -- the same wording graph_get_optional() has used since v0.6.0,
+    shared with JSON batch sub-responses."""
+    detail = ""
+    if isinstance(body, dict):
+        err = body.get("error") or {}
+        if isinstance(err, dict):
+            detail = f"{err.get('code', '')}: {err.get('message', '')}".strip(": ")
+    elif text:
+        detail = text[:200]
+    return f"HTTP {status_code} {detail}".strip()
+
+
+def _status_text(status):
+    """[v0.8.0] A collection status as stored: 'ok', or the reason trimmed
+    to STATUS_REASON_MAX characters."""
+    status = (status or "unknown").strip()
+    if len(status) > STATUS_REASON_MAX:
+        status = status[:STATUS_REASON_MAX - 3] + "..."
+    return status
+
 
 def graph_get_optional(graph, url, what):
     """[v0.6.0] Like graph.get(), but a 400/403/404 (feature not licensed,
@@ -523,12 +778,174 @@ def graph_get_optional(graph, url, what):
             raise CollectorAbort(f"Graph request for {what} returned HTTP 200 with a non-JSON body.")
     if resp.status_code in (400, 403, 404):
         try:
-            err = resp.json().get("error", {})
-            detail = f"{err.get('code', '')}: {err.get('message', '')}".strip(": ")
+            return None, _graph_error_reason(resp.status_code, resp.json())
         except ValueError:
-            detail = resp.text[:200]
-        return None, f"HTTP {resp.status_code} {detail}".strip()
+            return None, _graph_error_reason(resp.status_code, text=resp.text)
     raise CollectorAbort(f"Graph request for {what} failed (HTTP {resp.status_code}): {resp.text}")
+
+
+def graph_get_all_optional(graph, url, what):
+    """[v0.8.0] graph_get_optional() over every @odata.nextLink page.
+    Returns (items, "ok"), or (None, "<reason>") if any page was refused --
+    never a partial list presented as complete."""
+    items = []
+    page = 0
+    while url:
+        page += 1
+        body, status = graph_get_optional(graph, url, what if page == 1 else f"{what} (page {page})")
+        if body is None:
+            return None, status
+        items.extend(body.get("value", []))
+        url = body.get("@odata.nextLink")
+    return items, "ok"
+
+
+def graph_get_single_optional(graph, url, what):
+    """[v0.8.0] One object (no collection). Accepts a one-element "value"
+    wrapper too. Returns (dict, "ok") or (None, "<reason>")."""
+    body, status = graph_get_optional(graph, url, what)
+    if body is None:
+        return None, status
+    if isinstance(body.get("value"), list):
+        body = body["value"][0] if body["value"] else {}
+    return body, "ok"
+
+
+def _graph_get_with_beta_fallback(graph, path, what, single=True):
+    """[v0.8.0] Reads path from v1.0, and from beta when v1.0 answers 400 or
+    404 (endpoint not available in v1.0). A 403 is a permission problem
+    that beta shares, so it is returned as is. Beta can change without
+    notice."""
+    reader = graph_get_single_optional if single else graph_get_all_optional
+    body, status = reader(graph, GRAPH_V1 + path, what)
+    if body is None and (status.startswith("HTTP 400") or status.startswith("HTTP 404")):
+        log_info(f"  {what}: v1.0 unavailable ({status[:80]}); trying the beta endpoint")
+        body, status = reader(graph, GRAPH_BETA + path, f"{what} (beta)")
+    return body, status
+
+
+def graph_batch_get_all(graph, requests_list, what):
+    """[v0.8.0] Runs many GETs through Graph JSON batching
+    (GRAPH_BATCH_MAX_REQUESTS per POST). requests_list is [(key,
+    relative_url)], relative to v1.0 (e.g. "/groups/{id}/owners").
+    Returns {key: (items, "ok") | (None, "<reason>")}: every page of each
+    collection (an @odata.nextLink in a sub-response is followed with
+    ordinary GETs), or the reason for a 400/403/404 sub-response (the
+    caller decides whether one object's failure matters). 429 and 5xx
+    sub-responses are retried, honouring their Retry-After, up to
+    GRAPH_MAX_ATTEMPTS; still failing after that aborts like any other
+    exhausted retry. If Graph refuses the batch request itself (non-200),
+    the chunk is read with ordinary sequential GETs instead."""
+    results = {}
+    for start in range(0, len(requests_list), GRAPH_BATCH_MAX_REQUESTS):
+        chunk = requests_list[start:start + GRAPH_BATCH_MAX_REQUESTS]
+        pending = {str(i): item for i, item in enumerate(chunk)}
+        attempt = 0
+        while pending:
+            attempt += 1
+            payload = {"requests": [{"id": rid, "method": "GET", "url": rel}
+                                    for rid, (_key, rel) in pending.items()]}
+            resp = graph.post_batch(payload, f"{what} (JSON batch of {len(pending)})")
+            body = None
+            if resp.status_code == 200:
+                try:
+                    body = resp.json()
+                except ValueError:
+                    body = None
+            if not isinstance(body, dict) or not isinstance(body.get("responses"), list):
+                log_warn(f"  JSON batch for {what} refused (HTTP {resp.status_code}); "
+                         f"reading these {len(pending)} request(s) one by one instead.")
+                for _rid, (key, rel) in pending.items():
+                    results[key] = graph_get_all_optional(graph, GRAPH_V1 + rel, f"{what} ({rel})")
+                pending = {}
+                break
+            retry, delay = {}, 0.0
+            for sub in body["responses"]:
+                rid = str(sub.get("id"))
+                if rid not in pending:
+                    continue
+                key, rel = pending[rid]
+                code = int(sub.get("status") or 0)
+                sub_body = sub.get("body")
+                if code == 200:
+                    sub_body = sub_body if isinstance(sub_body, dict) else {}
+                    items = list(sub_body.get("value", []))
+                    status = "ok"
+                    next_url = sub_body.get("@odata.nextLink")
+                    while next_url:
+                        page, status = graph_get_optional(graph, next_url, f"{what} ({rel}, next page)")
+                        if page is None:
+                            items = None
+                            break
+                        items.extend(page.get("value", []))
+                        next_url = page.get("@odata.nextLink")
+                    results[key] = (items, status)
+                elif code in GRAPH_RETRYABLE_STATUSES:
+                    retry[rid] = pending[rid]
+                    headers = requests.structures.CaseInsensitiveDict(sub.get("headers") or {})
+                    delay = max(delay, _retry_delay(SimpleNamespace(headers=headers), attempt))
+                elif code in (400, 403, 404):
+                    results[key] = (None, _graph_error_reason(code, sub_body))
+                else:
+                    raise CollectorAbort(
+                        f"Graph request for {what} ({rel}) failed in a JSON batch "
+                        f"(HTTP {code}): {json.dumps(sub_body)[:500]}")
+            # A sub-request Graph did not answer at all is retried too.
+            for rid, item in pending.items():
+                if rid not in retry and item[0] not in results:
+                    retry[rid] = item
+            pending = retry
+            if pending:
+                if attempt >= GRAPH_MAX_ATTEMPTS:
+                    raise CollectorAbort(
+                        f"Graph request for {what}: {len(pending)} JSON batch sub-request(s) still "
+                        f"throttled/failing after {GRAPH_MAX_ATTEMPTS} attempts. Aborting rather "
+                        f"than recording incomplete data. Re-run later.")
+                if not delay:
+                    delay = _retry_delay(None, attempt)
+                log_warn(f"  {len(pending)} JSON batch sub-request(s) for {what} throttled or "
+                         f"failed; retrying in {delay:.0f}s (attempt {attempt + 1} of "
+                         f"{GRAPH_MAX_ATTEMPTS})...")
+                time.sleep(delay)
+    return results
+
+
+def graph_batch_directory_objects(graph, objects, what):
+    """[v0.8.0] For each (key, relative collection url) -- e.g. a group's
+    owners -- reads the collection twice in one JSON batch run: as full
+    objects (all types) and through the /microsoft.graph.user cast with
+    DIRECTORY_USER_EXTRA_SELECT, then merges the user fields into the full
+    objects by id (see DIRECTORY_USER_EXTRA_SELECT for why). Returns
+    {key: (objects, "ok") | (None, "<reason>")}."""
+    reqs = []
+    for key, rel in objects:
+        reqs.append(((key, "all"), rel))
+        base, _, query = rel.partition("?")
+        cast = f"{base}/microsoft.graph.user?$select={DIRECTORY_USER_EXTRA_SELECT}"
+        if query:
+            cast += "&" + query
+        reqs.append(((key, "users"), cast))
+    raw = graph_batch_get_all(graph, reqs, what)
+    merged = {}
+    for key, _rel in objects:
+        everything, status = raw[(key, "all")]
+        users, user_status = raw[(key, "users")]
+        if everything is None:
+            merged[key] = (None, status)
+            continue
+        if users is None:
+            merged[key] = (None, user_status)
+            continue
+        extra = {u.get("id"): u for u in users if u.get("id")}
+        out = []
+        for obj in everything:
+            obj = dict(obj)
+            for field in ("userType", "onPremisesSyncEnabled", "accountEnabled"):
+                if obj.get("id") in extra and field in extra[obj["id"]]:
+                    obj[field] = extra[obj["id"]][field]
+            out.append(obj)
+        merged[key] = (out, "ok")
+    return merged
 
 
 def fetch_all_users(graph):
@@ -860,7 +1277,10 @@ def fetch_applications(graph):
     GRAPH_APPLICATIONS_URL's own comment for why full permission-grant
     parsing is out of scope for this pass)."""
     apps = []
-    select = "id,appId,displayName,passwordCredentials,keyCredentials"
+    # [v0.8.0] More fields, same permission (Application.Read.All).
+    select = ("id,appId,displayName,passwordCredentials,keyCredentials,signInAudience,"
+              "publisherDomain,verifiedPublisher,web,spa,publicClient,isFallbackPublicClient,"
+              "servicePrincipalLockConfiguration,createdDateTime")
     url = f"{GRAPH_APPLICATIONS_URL}?$select={select}&$top=999"
     page = 0
     while url:
@@ -1024,6 +1444,13 @@ def resolve_client_id(pg_conn, domain_fqdn=None, client_id_override=None):
     return row[0]
 
 
+def _assigned_services(user):
+    """[v0.8.0] Distinct assignedPlans[].service whose capabilityStatus is
+    'Enabled', sorted; [] = unlicensed (v42 entra_user.assigned_services)."""
+    return sorted({p.get("service") for p in (user.get("assignedPlans") or [])
+                   if p.get("capabilityStatus") == "Enabled" and p.get("service")})
+
+
 def sync_entra_users(pg_conn, client_id, users):
     """Whole-snapshot replace for this client: delete, then bulk-insert
     fresh rows, both inside one transaction. A partial failure rolls
@@ -1059,20 +1486,31 @@ def sync_entra_users(pg_conn, client_id, users):
                 client_id, u["id"], on_prem_guid, u.get("userPrincipalName"),
                 u.get("mail"), u.get("proxyAddresses") or None, u.get("accountEnabled"),
                 u.get("onPremisesSyncEnabled"), on_prem_sid, u.get("userType"), now,
+                # [v0.8.0] schema v42 columns. The three sign-in columns are
+                # left NULL here and filled by the optional sign_in_activity
+                # pass (sync_sign_in_activity()).
+                u.get("displayName"), u.get("createdDateTime"), u.get("passwordPolicies"),
+                u.get("lastPasswordChangeDateTime"), u.get("externalUserState"),
+                u.get("externalUserStateChangeDateTime"), u.get("onPremisesLastSyncDateTime"),
+                _assigned_services(u),
             ))
 
         cur.execute("DELETE FROM entra_user WHERE client_id = %s;", (client_id,))
-        psycopg2.extras.execute_values(
-            cur,
-            """
-            INSERT INTO entra_user
-                (client_id, entra_object_id, on_prem_object_guid, user_principal_name,
-                 mail, proxy_addresses, account_enabled, on_premises_sync_enabled,
-                 on_premises_security_identifier, user_type, collected_at)
-            VALUES %s
-            """,
-            rows,
-        )
+        if rows:
+            psycopg2.extras.execute_values(
+                cur,
+                """
+                INSERT INTO entra_user
+                    (client_id, entra_object_id, on_prem_object_guid, user_principal_name,
+                     mail, proxy_addresses, account_enabled, on_premises_sync_enabled,
+                     on_premises_security_identifier, user_type, collected_at,
+                     display_name, created_at, password_policies, last_password_change_at,
+                     external_user_state, external_user_state_changed_at,
+                     on_premises_last_sync_at, assigned_services)
+                VALUES %s
+                """,
+                rows,
+            )
     pg_conn.commit()
     return len(users), matched
 
@@ -1201,6 +1639,21 @@ def _strip_odata_annotations(value):
     return value
 
 
+def _strip_odata_keep_type(value):
+    """[v0.8.0] Like _strip_odata_annotations() but keeps every "@odata.type"
+    key: entra_tenant_setting / entra_cross_tenant_partner content (schema
+    v42) holds polymorphic objects whose type is the meaning -- e.g.
+    deviceRegistrationPolicy azureADJoin.allowedToJoin is
+    allDeviceRegistrationMembership ("everyone") or
+    noDeviceRegistrationMembership ("nobody"), both otherwise {}."""
+    if isinstance(value, dict):
+        return {k: _strip_odata_keep_type(v) for k, v in value.items()
+                if k == "@odata.type" or "@odata." not in k}
+    if isinstance(value, list):
+        return [_strip_odata_keep_type(v) for v in value]
+    return value
+
+
 def _slim_ca_policy(p):
     """[v0.7.0] One stored ca_policies element: id, display_name, state,
     grant_controls (unchanged shape -- plugin 10004 reads builtInControls,
@@ -1261,6 +1714,33 @@ def sync_security_posture(pg_conn, client_id, security_defaults_enabled, ca_poli
     return len(slim_policies)
 
 
+def _key_credential(c):
+    """[v0.8.0] One certificate credential as stored (v42
+    entra_application.key_credentials element shape, plus
+    custom_key_identifier)."""
+    return {
+        "key_id": c.get("keyId"), "display_name": c.get("displayName"), "type": c.get("type"),
+        "usage": c.get("usage"), "start_date_time": c.get("startDateTime"),
+        "end_date_time": c.get("endDateTime"),
+        # [v0.8.0] Graph customKeyIdentifier (base64 as returned, or null):
+        # a SAML SSO app's signing certificate and its password credential
+        # share it, so plugins can recognise that pair (plugin 10060).
+        "custom_key_identifier": c.get("customKeyIdentifier"),
+    }
+
+
+def _sp_password_credential(c):
+    """[v0.8.0] One secret on a service principal: the key_credentials
+    element shape (type/usage null for secrets) plus hint (v42
+    entra_service_principal comment)."""
+    return {
+        "key_id": c.get("keyId"), "display_name": c.get("displayName"), "type": None,
+        "usage": None, "start_date_time": c.get("startDateTime"),
+        "end_date_time": c.get("endDateTime"), "hint": c.get("hint"),
+        "custom_key_identifier": c.get("customKeyIdentifier"),
+    }
+
+
 def sync_applications(pg_conn, client_id, applications):
     """Same whole-snapshot-replace pattern as sync_entra_users. Password
     credentials kept as a JSONB array per application (endDateTime is
@@ -1276,12 +1756,29 @@ def sync_applications(pg_conn, client_id, applications):
                 "display_name": c.get("displayName"), "key_id": c.get("keyId"),
                 "hint": c.get("hint"), "end_date_time": c.get("endDateTime"),
                 "start_date_time": c.get("startDateTime"),
+                # [v0.8.0] see _key_credential().
+                "custom_key_identifier": c.get("customKeyIdentifier"),
             }
             for c in (app.get("passwordCredentials") or [])
         ]
+        # [v0.8.0] schema v42 columns.
+        web = app.get("web") or {}
+        implicit = web.get("implicitGrantSettings") or {}
+        lock = app.get("servicePrincipalLockConfiguration")
         rows.append((
             client_id, app["id"], app.get("appId"), app.get("displayName"),
             json.dumps(creds), len(app.get("keyCredentials") or []), now,
+            json.dumps([_key_credential(c) for c in (app.get("keyCredentials") or [])]),
+            app.get("signInAudience"), app.get("publisherDomain"),
+            (app.get("verifiedPublisher") or {}).get("displayName"),
+            web.get("redirectUris") if app.get("web") is not None else None,
+            (app.get("spa") or {}).get("redirectUris") if app.get("spa") is not None else None,
+            ((app.get("publicClient") or {}).get("redirectUris")
+             if app.get("publicClient") is not None else None),
+            implicit.get("enableAccessTokenIssuance"), implicit.get("enableIdTokenIssuance"),
+            app.get("isFallbackPublicClient"),
+            lock.get("isEnabled") if isinstance(lock, dict) else None,
+            app.get("createdDateTime"),
         ))
 
     with pg_conn.cursor() as cur:
@@ -1293,7 +1790,12 @@ def sync_applications(pg_conn, client_id, applications):
                 """
                 INSERT INTO entra_application
                     (client_id, entra_object_id, app_id, display_name,
-                     password_credentials, key_credential_count, collected_at)
+                     password_credentials, key_credential_count, collected_at,
+                     key_credentials, sign_in_audience, publisher_domain,
+                     verified_publisher_name, web_redirect_uris, spa_redirect_uris,
+                     public_client_redirect_uris, implicit_access_token_issuance,
+                     implicit_id_token_issuance, is_fallback_public_client,
+                     service_principal_lock_enabled, created_at)
                 VALUES %s
                 """,
                 rows,
@@ -1335,6 +1837,1311 @@ def sync_dangerous_permission_grants(pg_conn, client_id, grants):
             )
     pg_conn.commit()
     return len(rows)
+
+
+# ============================================================================
+# [v0.8.0] Optional data sources (schema v42)
+#
+# Each source is a collect_<source>(graph, ctx) -> (data, status) and a
+# write_<source>(cur, client_id, now, data). run_optional_sources() runs them
+# in OPTIONAL_SOURCES order; per source, in one transaction, it removes the
+# source's rows for the client (SOURCE_CLEAR_SQL), writes the new rows when
+# the read was 'ok', upserts entra_collection_status, and commits. A
+# non-'ok' read therefore leaves no stale rows that could pass for current
+# data. Failures other than 400/403/404 abort the run, as in the core steps.
+# ============================================================================
+
+def _setting_clear(*names):
+    quoted = ", ".join(f"'{n}'" for n in names)
+    return [f"DELETE FROM entra_tenant_setting WHERE client_id = %s AND setting_name IN ({quoted});"]
+
+
+SOURCE_CLEAR_SQL = {
+    "sign_in_activity": [
+        "UPDATE entra_user SET last_sign_in_at = NULL, last_non_interactive_sign_in_at = NULL, "
+        "last_successful_sign_in_at = NULL WHERE client_id = %s;"],
+    "subscribed_skus": ["DELETE FROM entra_tenant_license WHERE client_id = %s;"],
+    "organization": _setting_clear("organization"),
+    "domains": ["DELETE FROM entra_domain WHERE client_id = %s;"],
+    "federation": ["DELETE FROM entra_domain_federation WHERE client_id = %s;"],
+    "service_principals": ["DELETE FROM entra_service_principal WHERE client_id = %s;"],
+    "sp_sign_in_activity": [
+        "UPDATE entra_service_principal SET last_sign_in_activity_at = NULL WHERE client_id = %s;"],
+    "app_role_grants": ["DELETE FROM entra_app_role_grant WHERE client_id = %s;"],
+    "delegated_grants": ["DELETE FROM entra_delegated_grant WHERE client_id = %s;"],
+    "app_owners": ["DELETE FROM entra_app_owner WHERE client_id = %s;"],
+    "groups": ["DELETE FROM entra_group_member WHERE client_id = %s;",
+               "DELETE FROM entra_group_owner WHERE client_id = %s;",
+               "DELETE FROM entra_group WHERE client_id = %s;"],
+    "role_definitions": ["DELETE FROM entra_role_definition WHERE client_id = %s;"],
+    "custom_role_assignments": ["DELETE FROM entra_custom_role_assignment WHERE client_id = %s;"],
+    "pim_policies": ["DELETE FROM entra_role_management_policy WHERE client_id = %s;"],
+    "named_locations": ["DELETE FROM entra_named_location WHERE client_id = %s;"],
+    "auth_methods_policy": _setting_clear("auth_methods_policy"),
+    "cross_tenant_policy": _setting_clear("cross_tenant_default") + [
+        "DELETE FROM entra_cross_tenant_partner WHERE client_id = %s;"],
+    "admin_consent_request_policy": _setting_clear("admin_consent_request_policy"),
+    "directory_settings": _setting_clear("password_rule_settings", "group_unified_settings"),
+    "device_registration_policy": _setting_clear("device_registration_policy"),
+    "onprem_sync": _setting_clear("onprem_sync"),
+    "pta_agents": ["DELETE FROM entra_pta_agent WHERE client_id = %s;"],
+    "partner_contracts": ["DELETE FROM entra_partner_contract WHERE client_id = %s;"],
+    "registration_details": ["DELETE FROM entra_user_registration WHERE client_id = %s;"],
+    "risky_users": ["DELETE FROM entra_risky_user WHERE client_id = %s;"],
+    "risk_detections": ["DELETE FROM entra_risk_detection WHERE client_id = %s;"],
+}
+
+
+def _lower(value):
+    return value.lower() if isinstance(value, str) else value
+
+
+def _insert_dicts(cur, table, client_id, now, rows, jsonb=()):
+    """[v0.8.0] Bulk-inserts row dicts (all with the same keys) plus
+    client_id and collected_at. Keys named in jsonb are sent as JSON."""
+    if not rows:
+        return 0
+    columns = list(rows[0].keys())
+    values = [
+        tuple([client_id] + [psycopg2.extras.Json(r[c]) if c in jsonb else r[c] for c in columns] + [now])
+        for r in rows
+    ]
+    psycopg2.extras.execute_values(
+        cur,
+        f"INSERT INTO {table} (client_id, {', '.join(columns)}, collected_at) VALUES %s",
+        values,
+    )
+    return len(rows)
+
+
+def _update_from_values(cur, sql_template, client_id, rows):
+    """[v0.8.0] execute_values() for an UPDATE ... FROM (VALUES %%s) whose
+    WHERE also needs client_id: client_id is bound first via mogrify."""
+    if not rows:
+        return
+    sql = cur.mogrify(sql_template, (client_id,)).decode()
+    psycopg2.extras.execute_values(cur, sql, rows)
+
+
+def _put_setting(cur, client_id, now, name, content):
+    """content is already free of @odata annotations except nested
+    "@odata.type" (_strip_odata_keep_type())."""
+    cur.execute(
+        "INSERT INTO entra_tenant_setting (client_id, setting_name, content, collected_at) "
+        "VALUES (%s, %s, %s, %s);",
+        (client_id, name, json.dumps(content, default=str), now),
+    )
+
+
+def _dedupe(rows, key_fields):
+    """Keeps the first row per primary key (Graph can list one object twice
+    across pages or through several paths)."""
+    seen, out = set(), []
+    for r in rows:
+        key = tuple(_lower(r[k]) if isinstance(r[k], str) else r[k] for k in key_fields)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(r)
+    return out
+
+
+def _skipped(source, status):
+    return f"skipped: {source} not read ({status})"
+
+
+# ---- users: sign-in activity (separate optional pass) ----------------------
+
+def collect_sign_in_activity(graph, ctx):
+    """[v0.8.0] /users?$select=id,signInActivity (AuditLog.Read.All +
+    Entra ID P1). Kept out of the core /users select: without the
+    permission or licence Graph fails the whole call. $top=120 is the page
+    ceiling Graph has documented for signInActivity reads (nextLink is
+    followed either way)."""
+    users, status = graph_get_all_optional(
+        graph, f"{GRAPH_USERS_URL}?$select=id,signInActivity&$top=120", "user sign-in activity")
+    if users is None:
+        return None, status
+    activity = {}
+    for u in users:
+        a = u.get("signInActivity") or {}
+        if u.get("id"):
+            activity[u["id"]] = (a.get("lastSignInDateTime"), a.get("lastNonInteractiveSignInDateTime"),
+                                 a.get("lastSuccessfulSignInDateTime"))
+    return activity, "ok"
+
+
+def write_sign_in_activity(cur, client_id, now, data):
+    rows = [(uid, a, b, c) for uid, (a, b, c) in data.items() if a or b or c]
+    _update_from_values(
+        cur,
+        "UPDATE entra_user u SET last_sign_in_at = v.a::timestamptz, "
+        "last_non_interactive_sign_in_at = v.b::timestamptz, "
+        "last_successful_sign_in_at = v.c::timestamptz "
+        "FROM (VALUES %%s) AS v(id, a, b, c) "
+        "WHERE u.client_id = %s AND u.entra_object_id = v.id::uuid",
+        client_id, rows,
+    )
+    return len(rows)
+
+
+# ---- licences, organization, domains, federation ---------------------------
+
+def collect_subscribed_skus(graph, ctx):
+    skus, status = graph_get_all_optional(graph, GRAPH_SUBSCRIBED_SKUS_URL, "subscribed SKUs (licences)")
+    if skus is None:
+        return None, status
+    rows = [{
+        "sku_id": s.get("skuId"), "sku_part_number": s.get("skuPartNumber"),
+        "capability_status": s.get("capabilityStatus"),
+        "enabled_units": (s.get("prepaidUnits") or {}).get("enabled"),
+        "consumed_units": s.get("consumedUnits"),
+        "service_plans": sorted({p.get("servicePlanName") for p in (s.get("servicePlans") or [])
+                                 if p.get("provisioningStatus") == "Success" and p.get("servicePlanName")}),
+    } for s in skus if s.get("skuId")]
+    return _dedupe(rows, ["sku_id"]), "ok"
+
+
+def write_subscribed_skus(cur, client_id, now, data):
+    return _insert_dicts(cur, "entra_tenant_license", client_id, now, data)
+
+
+ORGANIZATION_FIELDS = ("id", "displayName", "onPremisesSyncEnabled", "onPremisesLastSyncDateTime",
+                       "verifiedDomains", "createdDateTime")
+
+
+def collect_organization(graph, ctx):
+    orgs, status = graph_get_all_optional(graph, GRAPH_ORGANIZATION_URL, "organization")
+    if orgs is None:
+        return None, status
+    if not orgs:
+        return None, "ok"
+    return {f: _strip_odata_keep_type(orgs[0].get(f)) for f in ORGANIZATION_FIELDS}, "ok"
+
+
+def write_organization(cur, client_id, now, data):
+    if data is None:
+        return 0
+    _put_setting(cur, client_id, now, "organization", data)
+    return 1
+
+
+def collect_domains(graph, ctx):
+    domains, status = graph_get_all_optional(graph, GRAPH_DOMAINS_URL, "domains")
+    if domains is None:
+        return None, status
+    rows = [{
+        "domain_name": d.get("id"), "authentication_type": d.get("authenticationType"),
+        "is_verified": d.get("isVerified"), "is_default": d.get("isDefault"),
+        "is_initial": d.get("isInitial"), "is_root": d.get("isRoot"),
+        "password_validity_period_days": d.get("passwordValidityPeriodInDays"),
+        "supported_services": d.get("supportedServices") or [],
+    } for d in domains if d.get("id")]
+    return _dedupe(rows, ["domain_name"]), "ok"
+
+
+def write_domains(cur, client_id, now, data):
+    return _insert_dicts(cur, "entra_domain", client_id, now, data)
+
+
+def _parse_certificate(b64):
+    """[v0.8.0] (thumbprint, subject, not_before, not_after) of a base64 DER
+    certificate as Graph returns it in signingCertificate /
+    nextSigningCertificate: thumbprint is the upper-case hex SHA-1 of the
+    DER, subject in RFC 4514 form. The thumbprint needs only the DER; the
+    other fields need the cryptography package and stay None (no abort)
+    when it is missing or the certificate does not parse."""
+    if not b64:
+        return None, None, None, None
+    try:
+        der = base64.b64decode("".join(str(b64).split()), validate=True)
+    except (ValueError, TypeError):
+        return None, None, None, None
+    thumbprint = hashlib.sha1(der).hexdigest().upper()
+    try:
+        from cryptography import x509
+        cert = x509.load_der_x509_certificate(der)
+        not_before = getattr(cert, "not_valid_before_utc", None) or \
+            cert.not_valid_before.replace(tzinfo=timezone.utc)
+        not_after = getattr(cert, "not_valid_after_utc", None) or \
+            cert.not_valid_after.replace(tzinfo=timezone.utc)
+        return thumbprint, cert.subject.rfc4514_string(), not_before, not_after
+    except Exception as exc:  # any parse problem leaves the parsed fields NULL
+        log_warn(f"  Could not parse a federation signing certificate ({type(exc).__name__}); "
+                 f"its subject and validity dates are left empty.")
+        return None, None, None, None
+
+
+def collect_federation(graph, ctx):
+    """[v0.8.0] internalDomainFederation of each Federated domain
+    (/domains/{id}/federationConfiguration, Domain.Read.All). A 404 for one
+    domain (no configuration object) gives no row for it; any other refusal
+    fails the source. No federated domains: 'ok' with no rows."""
+    if ctx["statuses"].get("domains") != "ok":
+        return None, _skipped("domains", ctx["statuses"].get("domains"))
+    rows = []
+    for d in ctx["data"]["domains"]:
+        if (d.get("authentication_type") or "").lower() != "federated":
+            continue
+        name = d["domain_name"]
+        configs, status = graph_get_all_optional(
+            graph, f"{GRAPH_DOMAINS_URL}/{name}/federationConfiguration",
+            f"federation configuration of {name}")
+        if configs is None:
+            if status.startswith("HTTP 404"):
+                log_warn(f"  No federation configuration returned for federated domain {name} ({status}).")
+                continue
+            return None, status
+        for fc in configs:
+            thumb, subject, not_before, not_after = _parse_certificate(fc.get("signingCertificate"))
+            next_thumb, _subj, _nb, next_not_after = _parse_certificate(fc.get("nextSigningCertificate"))
+            rows.append({
+                "domain_name": name, "federation_id": fc.get("id") or name,
+                "display_name": fc.get("displayName"), "issuer_uri": fc.get("issuerUri"),
+                "passive_sign_in_uri": fc.get("passiveSignInUri"),
+                "active_sign_in_uri": fc.get("activeSignInUri"),
+                "sign_out_uri": fc.get("signOutUri"),
+                "metadata_exchange_uri": fc.get("metadataExchangeUri"),
+                "preferred_authentication_protocol": fc.get("preferredAuthenticationProtocol"),
+                "federated_idp_mfa_behavior": fc.get("federatedIdpMfaBehavior"),
+                "prompt_login_behavior": fc.get("promptLoginBehavior"),
+                "is_signed_authentication_request_required": fc.get("isSignedAuthenticationRequestRequired"),
+                "signing_certificate_thumbprint": thumb, "signing_certificate_subject": subject,
+                "signing_certificate_not_before": not_before, "signing_certificate_not_after": not_after,
+                "next_signing_certificate_thumbprint": next_thumb,
+                "next_signing_certificate_not_after": next_not_after,
+            })
+    return _dedupe(rows, ["domain_name", "federation_id"]), "ok"
+
+
+def write_federation(cur, client_id, now, data):
+    return _insert_dicts(cur, "entra_domain_federation", client_id, now, data)
+
+
+# ---- service principals, sign-in activity, grants, owners ------------------
+
+GRAPH_SP_SELECT = (
+    "id,appId,displayName,servicePrincipalType,appOwnerOrganizationId,publisherName,"
+    "verifiedPublisher,signInAudience,accountEnabled,appRoleAssignmentRequired,"
+    "preferredSingleSignOnMode,passwordCredentials,keyCredentials,tags"
+)
+
+
+def collect_service_principals(graph, ctx):
+    sps, status = graph_get_all_optional(
+        graph, f"{GRAPH_SERVICE_PRINCIPALS_URL}?$select={GRAPH_SP_SELECT}&$top=999", "service principals")
+    if sps is None:
+        return None, status
+    rows = [{
+        "entra_object_id": sp.get("id"), "app_id": sp.get("appId"),
+        "display_name": sp.get("displayName"),
+        "service_principal_type": sp.get("servicePrincipalType"),
+        "app_owner_organization_id": sp.get("appOwnerOrganizationId"),
+        "publisher_name": sp.get("publisherName"),
+        "verified_publisher_name": (sp.get("verifiedPublisher") or {}).get("displayName"),
+        "sign_in_audience": sp.get("signInAudience"), "account_enabled": sp.get("accountEnabled"),
+        "app_role_assignment_required": sp.get("appRoleAssignmentRequired"),
+        "preferred_single_sign_on_mode": sp.get("preferredSingleSignOnMode"),
+        "password_credentials": [_sp_password_credential(c) for c in (sp.get("passwordCredentials") or [])],
+        "key_credentials": [_key_credential(c) for c in (sp.get("keyCredentials") or [])],
+        "tags": sp.get("tags") or [],
+    } for sp in sps if sp.get("id")]
+    return _dedupe(rows, ["entra_object_id"]), "ok"
+
+
+def write_service_principals(cur, client_id, now, data):
+    return _insert_dicts(cur, "entra_service_principal", client_id, now, data,
+                         jsonb=("password_credentials", "key_credentials"))
+
+
+def collect_sp_sign_in_activity(graph, ctx):
+    """[v0.8.0] beta /reports/servicePrincipalSignInActivities
+    (AuditLog.Read.All + P1), matched to service principals by appId.
+    Beta: may change without notice."""
+    if ctx["statuses"].get("service_principals") != "ok":
+        return None, _skipped("service_principals", ctx["statuses"].get("service_principals"))
+    items, status = graph_get_all_optional(graph, GRAPH_SP_SIGN_IN_ACTIVITY_URL,
+                                           "service principal sign-in activity (beta)")
+    if items is None:
+        return None, status
+    latest = {}
+    for item in items:
+        app_id = _lower(item.get("appId"))
+        when = (item.get("lastSignInActivity") or {}).get("lastSignInDateTime")
+        if app_id and when and (app_id not in latest or when > latest[app_id]):
+            latest[app_id] = when
+    return latest, "ok"
+
+
+def write_sp_sign_in_activity(cur, client_id, now, data):
+    rows = list(data.items())
+    _update_from_values(
+        cur,
+        "UPDATE entra_service_principal s SET last_sign_in_activity_at = v.ts::timestamptz "
+        "FROM (VALUES %%s) AS v(app_id, ts) "
+        "WHERE s.client_id = %s AND s.app_id = v.app_id::uuid",
+        client_id, rows,
+    )
+    return len(rows)
+
+
+def collect_app_role_grants(graph, ctx):
+    """[v0.8.0] Every appRoleAssignedTo on each resource API in
+    APP_ROLE_GRANT_RESOURCE_APP_IDS present in the tenant (Directory.Read.All,
+    as for the dangerous-grant step, which is kept unchanged)."""
+    rows = []
+    for resource_app_id in APP_ROLE_GRANT_RESOURCE_APP_IDS:
+        sps, status = graph_get_all_optional(
+            graph, f"{GRAPH_SERVICE_PRINCIPALS_URL}?$filter=appId eq '{resource_app_id}'"
+                   f"&$select=id,appId,displayName,appRoles",
+            f"resource service principal {resource_app_id}")
+        if sps is None:
+            return None, status
+        if not sps:
+            continue
+        resource = sps[0]
+        role_names = {_lower(r.get("id")): r.get("value") for r in (resource.get("appRoles") or [])}
+        assignments, status = graph_get_all_optional(
+            graph, f"{GRAPH_SERVICE_PRINCIPALS_URL}/{resource['id']}/appRoleAssignedTo?$top=999",
+            f"application permissions granted on {resource.get('displayName') or resource_app_id}")
+        if assignments is None:
+            return None, status
+        for a in assignments:
+            role_id = _lower(a.get("appRoleId"))
+            rows.append({
+                "assignment_id": a.get("id"), "principal_id": a.get("principalId"),
+                "principal_display_name": a.get("principalDisplayName"),
+                "principal_type": a.get("principalType"),
+                "resource_id": resource["id"], "resource_app_id": resource.get("appId") or resource_app_id,
+                "resource_display_name": resource.get("displayName"),
+                "permission_id": role_id,
+                "permission_name": None if role_id == DEFAULT_ACCESS_APP_ROLE_ID else role_names.get(role_id),
+            })
+    return _dedupe([r for r in rows if r["assignment_id"] and r["principal_id"]], ["assignment_id"]), "ok"
+
+
+def write_app_role_grants(cur, client_id, now, data):
+    return _insert_dicts(cur, "entra_app_role_grant", client_id, now, data)
+
+
+def collect_delegated_grants(graph, ctx):
+    """[v0.8.0] /oauth2PermissionGrants (Directory.Read.All). Client and
+    resource service principals resolved from this run's service principal
+    inventory, or -- when that source was not read -- by looking each
+    distinct one up (left NULL if that fails too). principal_upn from the
+    users read this run."""
+    grants, status = graph_get_all_optional(graph, GRAPH_OAUTH2_GRANTS_URL, "delegated permission grants")
+    if grants is None:
+        return None, status
+    sp_index = {}
+    if ctx["statuses"].get("service_principals") == "ok":
+        sp_index = {_lower(sp["entra_object_id"]): (sp["app_id"], sp["display_name"])
+                    for sp in ctx["data"]["service_principals"]}
+    for sp_id in sorted({_lower(g.get(k)) for g in grants for k in ("clientId", "resourceId") if g.get(k)}):
+        if sp_id in sp_index:
+            continue
+        body, _st = graph_get_optional(
+            graph, f"{GRAPH_SERVICE_PRINCIPALS_URL}/{sp_id}?$select=id,appId,displayName",
+            f"service principal {sp_id}")
+        sp_index[sp_id] = (body.get("appId"), body.get("displayName")) if body else (None, None)
+    upns = {_lower(u.get("id")): u.get("userPrincipalName") for u in ctx["users"]}
+    rows = []
+    for g in grants:
+        if not g.get("id") or not g.get("clientId") or not g.get("resourceId"):
+            continue
+        client = sp_index.get(_lower(g["clientId"]), (None, None))
+        resource = sp_index.get(_lower(g["resourceId"]), (None, None))
+        rows.append({
+            "grant_id": g["id"], "client_sp_id": g["clientId"], "client_display_name": client[1],
+            "consent_type": g.get("consentType"), "principal_id": g.get("principalId"),
+            "principal_upn": upns.get(_lower(g.get("principalId"))) if g.get("principalId") else None,
+            "resource_sp_id": g["resourceId"], "resource_app_id": resource[0],
+            "resource_display_name": resource[1],
+            "scopes": [s for s in (g.get("scope") or "").split(" ") if s],
+        })
+    return _dedupe(rows, ["grant_id"]), "ok"
+
+
+def write_delegated_grants(cur, client_id, now, data):
+    return _insert_dicts(cur, "entra_delegated_grant", client_id, now, data)
+
+
+def _owner_fields(owner, prefix="owner"):
+    return {
+        f"{prefix}_id": owner.get("id"), f"{prefix}_type": owner.get("@odata.type"),
+        f"{prefix}_display_name": owner.get("displayName"),
+        f"{prefix}_upn": owner.get("userPrincipalName"),
+        f"{prefix}_user_type": owner.get("userType"),
+        f"{prefix}_on_premises_sync_enabled": owner.get("onPremisesSyncEnabled"),
+        f"{prefix}_account_enabled": owner.get("accountEnabled"),
+    }
+
+
+def collect_app_owners(graph, ctx):
+    """[v0.8.0] Owners of every application registration and of every
+    service principal not owned by a Microsoft tenant, via JSON batching.
+    One object's 403/404 is skipped with a warning (and its owners are not
+    closed in change history); if every object fails, the source fails."""
+    if ctx["statuses"].get("service_principals") != "ok":
+        return None, _skipped("service_principals", ctx["statuses"].get("service_principals"))
+    owned = {}
+    for app in ctx["applications"]:
+        if app.get("id"):
+            owned[app["id"]] = ("application", app.get("appId"), app.get("displayName"),
+                                f"/applications/{app['id']}/owners")
+    for sp in ctx["data"]["service_principals"]:
+        if _lower(sp.get("app_owner_organization_id")) in MICROSOFT_TENANT_IDS:
+            continue
+        owned[sp["entra_object_id"]] = ("servicePrincipal", sp.get("app_id"), sp.get("display_name"),
+                                        f"/servicePrincipals/{sp['entra_object_id']}/owners")
+    results = graph_batch_directory_objects(
+        graph, [(oid, info[3]) for oid, info in owned.items()], "application / service principal owners")
+    rows, failed, first_failure = [], set(), None
+    for oid, (otype, app_id, name, _rel) in owned.items():
+        owners, status = results[oid]
+        if owners is None:
+            log_warn(f"  Owners of {otype} '{name}' could not be read ({status}); skipped.")
+            failed.add(_lower(oid))
+            first_failure = first_failure or status
+            continue
+        for o in owners:
+            if not o.get("id"):
+                continue
+            rows.append(dict({"owned_object_id": oid, "owned_object_type": otype, "owned_app_id": app_id,
+                              "owned_display_name": name}, **_owner_fields(o)))
+    if owned and len(failed) == len(owned):
+        return None, first_failure
+    return {"rows": _dedupe(rows, ["owned_object_id", "owner_id"]), "failed": failed}, "ok"
+
+
+def write_app_owners(cur, client_id, now, data):
+    return _insert_dicts(cur, "entra_app_owner", client_id, now, data["rows"])
+
+
+# ---- groups ----------------------------------------------------------------
+
+GRAPH_GROUP_SELECT = (
+    "id,displayName,isAssignableToRole,securityEnabled,mailEnabled,groupTypes,membershipRule,"
+    "membershipRuleProcessingState,onPremisesSyncEnabled,onPremisesSecurityIdentifier"
+)
+SENSITIVE_REASON_ORDER = ("role_assignable", "holds_role", "ca_include", "ca_exclude", "app_role")
+
+
+def collect_groups(graph, ctx):
+    """[v0.8.0] Every group, with is_sensitive / sensitive_reasons (v42
+    entra_group comment), plus owners and transitive members of the
+    sensitive ones. Reasons: role_assignable (isAssignableToRole);
+    holds_role (a role member this run, active or eligible); ca_include /
+    ca_exclude (in includeGroups / excludeGroups of a CA policy whose state
+    is not 'disabled'); app_role (assigned an app role on a service
+    principal that holds a PRIVILEGED_ROLE_TEMPLATE_IDS role or a
+    DANGEROUS_GRAPH_PERMISSIONS grant). A single group's 403/404 is skipped
+    with a warning; if every sensitive group fails, the source fails."""
+    groups, status = graph_get_all_optional(
+        graph, f"{GRAPH_GROUPS_URL}?$select={GRAPH_GROUP_SELECT}&$top=999", "groups")
+    if groups is None:
+        return None, status
+    reasons = {}
+
+    def add(gid, reason):
+        if gid:
+            reasons.setdefault(_lower(gid), set()).add(reason)
+
+    for g in groups:
+        if g.get("isAssignableToRole"):
+            add(g.get("id"), "role_assignable")
+    privileged_sps = set()
+    for rm in ctx["role_members"]:
+        member = rm["member"]
+        if rm.get("via_group"):
+            continue
+        if member.get("@odata.type") == "#microsoft.graph.group":
+            add(member.get("id"), "holds_role")
+        if (member.get("@odata.type") == "#microsoft.graph.servicePrincipal"
+                and _lower(rm["role"].get("roleTemplateId")) in PRIVILEGED_ROLE_TEMPLATE_IDS):
+            privileged_sps.add(_lower(member.get("id")))
+    for p in ctx["ca_policies"]:
+        if (p.get("state") or "").lower() == "disabled":
+            continue
+        users = ((p.get("conditions") or {}).get("users") or {})
+        for gid in users.get("includeGroups") or []:
+            add(gid, "ca_include")
+        for gid in users.get("excludeGroups") or []:
+            add(gid, "ca_exclude")
+    for grant in ctx["dangerous_grants"]:
+        if (grant.get("principal_type") or "") == "ServicePrincipal" and grant.get("principal_id"):
+            privileged_sps.add(_lower(grant["principal_id"]))
+    if privileged_sps:
+        assigned = graph_batch_get_all(
+            graph, [(sp, f"/servicePrincipals/{sp}/appRoleAssignedTo") for sp in sorted(privileged_sps)],
+            "app role assignments on privileged service principals")
+        for sp, (items, st) in assigned.items():
+            if items is None:
+                log_warn(f"  App role assignments on service principal {sp} could not be read ({st}); "
+                         f"groups assigned to it may not be marked sensitive.")
+                continue
+            for a in items:
+                if a.get("principalType") == "Group":
+                    add(a.get("principalId"), "app_role")
+
+    rows = []
+    for g in groups:
+        if not g.get("id"):
+            continue
+        why = [r for r in SENSITIVE_REASON_ORDER if r in reasons.get(_lower(g["id"]), set())]
+        rows.append({
+            "entra_object_id": g["id"], "display_name": g.get("displayName"),
+            "is_assignable_to_role": g.get("isAssignableToRole"),
+            "security_enabled": g.get("securityEnabled"), "mail_enabled": g.get("mailEnabled"),
+            "group_types": g.get("groupTypes") or [], "membership_rule": g.get("membershipRule"),
+            "membership_rule_processing_state": g.get("membershipRuleProcessingState"),
+            "on_premises_sync_enabled": g.get("onPremisesSyncEnabled"),
+            "on_premises_security_identifier": g.get("onPremisesSecurityIdentifier"),
+            "is_sensitive": bool(why), "sensitive_reasons": why,
+        })
+    rows = _dedupe(rows, ["entra_object_id"])
+    sensitive = [r for r in rows if r["is_sensitive"]]
+    requests_list = []
+    for r in sensitive:
+        requests_list.append(((r["entra_object_id"], "owners"), f"/groups/{r['entra_object_id']}/owners"))
+        requests_list.append(((r["entra_object_id"], "members"),
+                              f"/groups/{r['entra_object_id']}/transitiveMembers"))
+    results = graph_batch_directory_objects(graph, requests_list, "sensitive group owners / members")
+    owners, members, failed, first_failure = [], [], set(), None
+    for r in sensitive:
+        gid = r["entra_object_id"]
+        got_owners, st_o = results[(gid, "owners")]
+        got_members, st_m = results[(gid, "members")]
+        if got_owners is None or got_members is None:
+            st = st_o if got_owners is None else st_m
+            log_warn(f"  Owners/members of group '{r['display_name']}' could not be read ({st}); skipped.")
+            failed.add(_lower(gid))
+            first_failure = first_failure or st
+            continue
+        for o in got_owners:
+            if o.get("id"):
+                owners.append(dict({"group_id": gid}, **_owner_fields(o)))
+        for m in got_members:
+            if m.get("id"):
+                members.append({
+                    "group_id": gid, "member_id": m["id"], "member_type": m.get("@odata.type"),
+                    "member_display_name": m.get("displayName"),
+                    "member_upn": m.get("userPrincipalName"), "member_user_type": m.get("userType"),
+                    "on_premises_sync_enabled": m.get("onPremisesSyncEnabled"),
+                    "account_enabled": m.get("accountEnabled"),
+                })
+    if sensitive and len(failed) == len(sensitive):
+        return None, first_failure
+    log_info(f"  {len(rows)} group(s), {len(sensitive)} sensitive; {len(owners)} owner and "
+             f"{len(members)} transitive member row(s) of sensitive groups")
+    return {"groups": rows, "owners": _dedupe(owners, ["group_id", "owner_id"]),
+            "members": _dedupe(members, ["group_id", "member_id"]), "failed": failed}, "ok"
+
+
+def write_groups(cur, client_id, now, data):
+    """[v0.8.0] on_prem_object_guid resolved like entra_user's (SID match to
+    directory_object)."""
+    sids = [g["on_premises_security_identifier"] for g in data["groups"]
+            if g["on_premises_security_identifier"]]
+    sid_to_guid = {}
+    if sids:
+        cur.execute("SELECT object_sid, object_guid FROM directory_object "
+                    "WHERE client_id = %s AND object_sid = ANY(%s);", (client_id, sids))
+        sid_to_guid = dict(cur.fetchall())
+    rows = [dict(g, on_prem_object_guid=sid_to_guid.get(g["on_premises_security_identifier"]))
+            for g in data["groups"]]
+    n = _insert_dicts(cur, "entra_group", client_id, now, rows)
+    _insert_dicts(cur, "entra_group_owner", client_id, now, data["owners"])
+    _insert_dicts(cur, "entra_group_member", client_id, now, data["members"])
+    return n
+
+
+# ---- role definitions, custom-role assignments, PIM settings ---------------
+
+def collect_role_definitions(graph, ctx):
+    defs, status = graph_get_all_optional(graph, GRAPH_ROLE_DEFINITIONS_URL, "directory role definitions")
+    if defs is None:
+        return None, status
+    rows = [{
+        "role_definition_id": d.get("id"), "template_id": d.get("templateId"),
+        "display_name": d.get("displayName"), "is_built_in": d.get("isBuiltIn"),
+        "is_enabled": d.get("isEnabled"),
+        "allowed_actions": sorted({a for p in (d.get("rolePermissions") or [])
+                                   for a in (p.get("allowedResourceActions") or [])}),
+    } for d in defs if d.get("id")]
+    return _dedupe(rows, ["role_definition_id"]), "ok"
+
+
+def write_role_definitions(cur, client_id, now, data):
+    return _insert_dicts(cur, "entra_role_definition", client_id, now, data)
+
+
+def collect_custom_role_assignments(graph, ctx):
+    """[v0.8.0] Assignments of custom role definitions, which
+    /directoryRoles does not list. Active: roleAssignments filtered per
+    custom definition. Eligible: taken from this run's
+    roleEligibilityScheduleInstances (which list custom roles too); when
+    those could not be read (no P2 -- see
+    entra_security_posture.role_eligibility_status) only active
+    assignments are stored."""
+    if ctx["statuses"].get("role_definitions") != "ok":
+        return None, _skipped("role_definitions", ctx["statuses"].get("role_definitions"))
+    custom = {_lower(d["role_definition_id"]): d for d in ctx["data"]["role_definitions"]
+              if d.get("is_built_in") is False}
+    rows = []
+    for def_id, d in custom.items():
+        items, status = graph_get_all_optional(
+            graph, f"{GRAPH_ROLE_ASSIGNMENTS_URL}?$filter=roleDefinitionId eq '{d['role_definition_id']}'"
+                   f"&$expand=principal",
+            f"assignments of custom role '{d.get('display_name')}'")
+        if items is None:
+            return None, status
+        for a in items:
+            principal = a.get("principal") or {}
+            pid = a.get("principalId") or principal.get("id")
+            if pid:
+                rows.append({
+                    "role_definition_id": d["role_definition_id"], "principal_id": pid,
+                    "principal_type": principal.get("@odata.type"),
+                    "principal_display_name": principal.get("displayName"),
+                    "principal_upn": principal.get("userPrincipalName"),
+                    "directory_scope_id": a.get("directoryScopeId") or "/", "assignment_type": "active",
+                })
+    for rm in ctx["role_members"]:
+        if rm.get("assignment_type") != "eligible" or rm.get("via_group"):
+            continue
+        if _lower(rm["role"].get("id")) not in custom or not rm["member"].get("id"):
+            continue
+        member = rm["member"]
+        rows.append({
+            "role_definition_id": custom[_lower(rm["role"]["id"])]["role_definition_id"],
+            "principal_id": member["id"], "principal_type": member.get("@odata.type"),
+            "principal_display_name": member.get("displayName"),
+            "principal_upn": member.get("userPrincipalName"),
+            "directory_scope_id": rm.get("directory_scope_id") or "/", "assignment_type": "eligible",
+        })
+    return _dedupe(rows, ["role_definition_id", "principal_id", "directory_scope_id", "assignment_type"]), "ok"
+
+
+def write_custom_role_assignments(cur, client_id, now, data):
+    return _insert_dicts(cur, "entra_custom_role_assignment", client_id, now, data)
+
+
+def _pim_rule(rule):
+    """[v0.8.0] One PIM policy rule as stored: '@odata.type' kept as
+    'rule_type', every other @odata annotation dropped."""
+    out = {}
+    for key, value in (rule or {}).items():
+        if key == "@odata.type":
+            out["rule_type"] = value
+        elif "@odata." not in key:
+            out[key] = _strip_odata_annotations(value)
+    return out
+
+
+def collect_pim_policies(graph, ctx):
+    """[v0.8.0] PIM role settings per directory role (Entra ID P2;
+    RoleManagementPolicy.Read.Directory, or RoleManagement.Read.Directory)."""
+    items, status = graph_get_all_optional(graph, GRAPH_PIM_POLICY_ASSIGNMENTS_URL, "PIM role settings")
+    if items is None:
+        return None, status
+    names = {}
+    for rm in ctx["role_members"]:
+        if rm["role"].get("roleTemplateId"):
+            names.setdefault(_lower(rm["role"]["roleTemplateId"]), rm["role"].get("displayName"))
+    if ctx["statuses"].get("role_definitions") == "ok":
+        for d in ctx["data"]["role_definitions"]:
+            for key in (d.get("template_id"), d.get("role_definition_id")):
+                if key:
+                    names[_lower(key)] = d.get("display_name")
+    rows = []
+    for a in items:
+        template = a.get("roleDefinitionId")
+        if not template:
+            continue
+        policy = a.get("policy") or {}
+        rows.append({
+            "role_template_id": template, "role_display_name": names.get(_lower(template)),
+            "policy_id": a.get("policyId") or policy.get("id"),
+            "rules": [_pim_rule(r) for r in (policy.get("rules") or [])],
+        })
+    return _dedupe(rows, ["role_template_id"]), "ok"
+
+
+def write_pim_policies(cur, client_id, now, data):
+    return _insert_dicts(cur, "entra_role_management_policy", client_id, now, data, jsonb=("rules",))
+
+
+# ---- policies and settings -------------------------------------------------
+
+def collect_named_locations(graph, ctx):
+    items, status = graph_get_all_optional(graph, GRAPH_NAMED_LOCATIONS_URL, "named locations")
+    if items is None:
+        return None, status
+    rows = []
+    for loc in items:
+        kind = loc.get("@odata.type")
+        base = {"location_id": loc.get("id"), "display_name": loc.get("displayName")}
+        if kind == "#microsoft.graph.ipNamedLocation":
+            rows.append(dict(base, location_type="ip", is_trusted=loc.get("isTrusted"),
+                             ip_ranges=[r.get("cidrAddress") for r in (loc.get("ipRanges") or [])
+                                        if r.get("cidrAddress")],
+                             countries=[], include_unknown_countries=None))
+        elif kind == "#microsoft.graph.countryNamedLocation":
+            rows.append(dict(base, location_type="country", is_trusted=None, ip_ranges=[],
+                             countries=loc.get("countriesAndRegions") or [],
+                             include_unknown_countries=loc.get("includeUnknownCountriesAndRegions")))
+        else:
+            log_warn(f"  Named location '{loc.get('displayName')}' has unsupported type {kind}; skipped.")
+    return _dedupe([r for r in rows if r["location_id"]], ["location_id"]), "ok"
+
+
+def write_named_locations(cur, client_id, now, data):
+    return _insert_dicts(cur, "entra_named_location", client_id, now, data)
+
+
+def collect_auth_methods_policy(graph, ctx):
+    """[v0.8.0] policies/authenticationMethodsPolicy (Policy.Read.All) with
+    its authenticationMethodConfigurations; when Graph does not return them
+    inline, each of AUTH_METHOD_CONFIG_IDS is read on its own (404 = that
+    method not present)."""
+    policy, status = graph_get_single_optional(graph, GRAPH_AUTH_METHODS_POLICY_URL,
+                                               "authentication methods policy")
+    if policy is None:
+        return None, status
+    configs = policy.get("authenticationMethodConfigurations")
+    if not configs:
+        configs = []
+        for method_id in AUTH_METHOD_CONFIG_IDS:
+            body, st = graph_get_single_optional(
+                graph, f"{GRAPH_AUTH_METHODS_POLICY_URL}/authenticationMethodConfigurations/{method_id}",
+                f"authentication method configuration {method_id}")
+            if body is None:
+                if st.startswith("HTTP 404"):
+                    continue
+                return None, st
+            configs.append(body)
+    content = _strip_odata_keep_type(dict(policy, authenticationMethodConfigurations=configs))
+    return content, "ok"
+
+
+def write_auth_methods_policy(cur, client_id, now, data):
+    _put_setting(cur, client_id, now, "auth_methods_policy", data)
+    return 1
+
+
+def collect_cross_tenant_policy(graph, ctx):
+    """[v0.8.0] crossTenantAccessPolicy default and partners
+    (Policy.Read.All), each partner with its identitySynchronization (404 =
+    none configured -> null)."""
+    default, status = graph_get_single_optional(graph, GRAPH_CROSS_TENANT_DEFAULT_URL,
+                                                "cross-tenant access default")
+    if default is None:
+        return None, status
+    partners, status = graph_get_all_optional(graph, GRAPH_CROSS_TENANT_PARTNERS_URL,
+                                              "cross-tenant access partners")
+    if partners is None:
+        return None, status
+    rows = []
+    for p in partners:
+        tid = p.get("tenantId")
+        if not tid:
+            continue
+        sync, st = graph_get_single_optional(
+            graph, f"{GRAPH_CROSS_TENANT_PARTNERS_URL}/{tid}/identitySynchronization",
+            f"cross-tenant identity synchronization for {tid}")
+        if sync is None and not st.startswith("HTTP 404"):
+            return None, st
+        content = _strip_odata_keep_type(p)
+        content["identitySynchronization"] = _strip_odata_keep_type(sync) if sync is not None else None
+        rows.append({"partner_tenant_id": tid, "content": content})
+    return {"default": _strip_odata_keep_type(default),
+            "partners": _dedupe(rows, ["partner_tenant_id"])}, "ok"
+
+
+def write_cross_tenant_policy(cur, client_id, now, data):
+    _put_setting(cur, client_id, now, "cross_tenant_default", data["default"])
+    _insert_dicts(cur, "entra_cross_tenant_partner", client_id, now, data["partners"], jsonb=("content",))
+    return 1 + len(data["partners"])
+
+
+def collect_admin_consent_request_policy(graph, ctx):
+    policy, status = graph_get_single_optional(graph, GRAPH_ADMIN_CONSENT_POLICY_URL,
+                                               "admin consent request policy")
+    return (_strip_odata_keep_type(policy), "ok") if policy is not None else (None, status)
+
+
+def write_admin_consent_request_policy(cur, client_id, now, data):
+    _put_setting(cur, client_id, now, "admin_consent_request_policy", data)
+    return 1
+
+
+DIRECTORY_SETTING_NAMES = {"password rule settings": "password_rule_settings",
+                           "group.unified": "group_unified_settings"}
+
+
+def collect_directory_settings(graph, ctx):
+    """[v0.8.0] /groupSettings (Directory.Read.All): 'Password Rule
+    Settings' and 'Group.Unified' as {name: value}. A setting object that
+    does not exist (tenant defaults in force) gives no row."""
+    items, status = graph_get_all_optional(graph, GRAPH_GROUP_SETTINGS_URL, "directory settings")
+    if items is None:
+        return None, status
+    settings = {}
+    for item in items:
+        name = DIRECTORY_SETTING_NAMES.get((item.get("displayName") or "").lower())
+        if name and name not in settings:
+            settings[name] = {v.get("name"): v.get("value") for v in (item.get("values") or []) if v.get("name")}
+    return settings, "ok"
+
+
+def write_directory_settings(cur, client_id, now, data):
+    for name, content in data.items():
+        _put_setting(cur, client_id, now, name, content)
+    return len(data)
+
+
+def collect_device_registration_policy(graph, ctx):
+    """[v0.8.0] deviceRegistrationPolicy (Policy.Read.DeviceConfiguration):
+    v1.0 first, beta when v1.0 does not offer it."""
+    policy, status = _graph_get_with_beta_fallback(
+        graph, GRAPH_DEVICE_REGISTRATION_POLICY_PATH, "device registration policy")
+    return (_strip_odata_keep_type(policy), "ok") if policy is not None else (None, status)
+
+
+def write_device_registration_policy(cur, client_id, now, data):
+    _put_setting(cur, client_id, now, "device_registration_policy", data)
+    return 1
+
+
+def collect_onprem_sync(graph, ctx):
+    """[v0.8.0] directory/onPremisesSynchronization
+    (OnPremDirectorySynchronization.Read.All): the first element (features +
+    configuration). v1.0 first, beta when v1.0 does not offer it."""
+    items, status = _graph_get_with_beta_fallback(
+        graph, GRAPH_ONPREM_SYNC_PATH, "on-premises synchronization settings", single=False)
+    if items is None:
+        return None, status
+    return (_strip_odata_keep_type(items[0]) if items else None), "ok"
+
+
+def write_onprem_sync(cur, client_id, now, data):
+    if data is None:
+        return 0
+    _put_setting(cur, client_id, now, "onprem_sync", data)
+    return 1
+
+
+def collect_pta_agents(graph, ctx):
+    """[v0.8.0] Pass-through authentication agents (beta, opt-in: needs the
+    write-capable OnPremisesPublishingProfiles.ReadWrite.All)."""
+    if not ctx["include_pta_agents"]:
+        return None, PTA_SKIPPED_STATUS
+    items, status = graph_get_all_optional(graph, GRAPH_PTA_AGENTS_URL,
+                                           "pass-through authentication agents (beta)")
+    if items is None:
+        return None, status
+    rows = [{"agent_id": a.get("id"), "machine_name": a.get("machineName"),
+             "external_ip": a.get("externalIp"), "status": a.get("status")}
+            for a in items if a.get("id")]
+    return _dedupe(rows, ["agent_id"]), "ok"
+
+
+def write_pta_agents(cur, client_id, now, data):
+    return _insert_dicts(cur, "entra_pta_agent", client_id, now, data)
+
+
+def collect_partner_contracts(graph, ctx):
+    items, status = graph_get_all_optional(graph, GRAPH_CONTRACTS_URL, "partner contracts")
+    if items is None:
+        return None, status
+    rows = [{"contract_object_id": c.get("id"), "contract_type": c.get("contractType"),
+             "customer_id": c.get("customerId"), "default_domain_name": c.get("defaultDomainName"),
+             "display_name": c.get("displayName")} for c in items if c.get("id")]
+    return _dedupe(rows, ["contract_object_id"]), "ok"
+
+
+def write_partner_contracts(cur, client_id, now, data):
+    return _insert_dicts(cur, "entra_partner_contract", client_id, now, data)
+
+
+# ---- registration details and Identity Protection --------------------------
+
+def collect_registration_details(graph, ctx):
+    items, status = graph_get_all_optional(graph, GRAPH_REGISTRATION_DETAILS_URL,
+                                           "user MFA registration details")
+    if items is None:
+        return None, status
+    rows = [{
+        "entra_object_id": r.get("id"), "user_principal_name": r.get("userPrincipalName"),
+        "user_type": r.get("userType"), "is_admin": r.get("isAdmin"),
+        "is_mfa_registered": r.get("isMfaRegistered"), "is_mfa_capable": r.get("isMfaCapable"),
+        "is_passwordless_capable": r.get("isPasswordlessCapable"),
+        "is_sspr_registered": r.get("isSsprRegistered"),
+        "methods_registered": r.get("methodsRegistered") or [],
+        "default_mfa_method": r.get("defaultMfaMethod"),
+        "is_system_preferred_enabled": r.get("isSystemPreferredAuthenticationMethodEnabled"),
+        "last_updated_at": r.get("lastUpdatedDateTime"),
+    } for r in items if r.get("id")]
+    return _dedupe(rows, ["entra_object_id"]), "ok"
+
+
+def write_registration_details(cur, client_id, now, data):
+    return _insert_dicts(cur, "entra_user_registration", client_id, now, data)
+
+
+def collect_risky_users(graph, ctx):
+    items, status = graph_get_all_optional(graph, GRAPH_RISKY_USERS_URL, "risky users")
+    if items is None:
+        return None, status
+    rows = [{
+        "entra_object_id": r.get("id"), "user_principal_name": r.get("userPrincipalName"),
+        "risk_level": r.get("riskLevel"), "risk_state": r.get("riskState"),
+        "risk_detail": r.get("riskDetail"), "risk_last_updated_at": r.get("riskLastUpdatedDateTime"),
+    } for r in items if r.get("id") and r.get("riskState") in RISK_STATES_KEPT]
+    return _dedupe(rows, ["entra_object_id"]), "ok"
+
+
+def write_risky_users(cur, client_id, now, data):
+    return _insert_dicts(cur, "entra_risky_user", client_id, now, data)
+
+
+def collect_risk_detections(graph, ctx):
+    """[v0.8.0] Risk detections of the last RISK_DETECTION_LOOKBACK_DAYS
+    days, filtered to atRisk / confirmedCompromised here (riskState is not
+    reliably filterable server-side together with detectedDateTime)."""
+    since = (datetime.now(timezone.utc) - timedelta(days=RISK_DETECTION_LOOKBACK_DAYS))
+    url = f"{GRAPH_RISK_DETECTIONS_URL}?$filter=detectedDateTime ge {since.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+    items, status = graph_get_all_optional(graph, url, "risk detections")
+    if items is None:
+        return None, status
+    rows = [{
+        "detection_id": r.get("id"), "entra_object_id": r.get("userId"),
+        "user_principal_name": r.get("userPrincipalName"), "risk_event_type": r.get("riskEventType"),
+        "risk_level": r.get("riskLevel"), "risk_state": r.get("riskState"),
+        "detection_timing_type": r.get("detectionTimingType"), "source": r.get("source"),
+        "detected_at": r.get("detectedDateTime"),
+    } for r in items if r.get("id") and r.get("riskState") in RISK_STATES_KEPT]
+    return _dedupe(rows, ["detection_id"]), "ok"
+
+
+def write_risk_detections(cur, client_id, now, data):
+    return _insert_dicts(cur, "entra_risk_detection", client_id, now, data)
+
+
+# ---- runner ----------------------------------------------------------------
+
+def record_source(pg_conn, client_id, source, status, data=None):
+    """[v0.8.0] One transaction per source: clear the source's rows for the
+    client, write the new ones when status is 'ok', upsert
+    entra_collection_status, commit."""
+    status = _status_text(status)
+    now = datetime.now(timezone.utc)
+    written = 0
+    with pg_conn.cursor() as cur:
+        cur.execute("SET search_path TO ad_intel, public;")
+        for sql in SOURCE_CLEAR_SQL[source]:
+            cur.execute(sql, (client_id,))
+        if status == "ok":
+            written = globals()[f"write_{source}"](cur, client_id, now, data)
+        cur.execute(
+            """
+            INSERT INTO entra_collection_status (client_id, source, status, collected_at)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (client_id, source) DO UPDATE SET
+                status = EXCLUDED.status, collected_at = EXCLUDED.collected_at;
+            """,
+            (client_id, source, status, now),
+        )
+    pg_conn.commit()
+    return status, written
+
+
+def run_optional_sources(graph, pg_conn, client_id, ctx, completed_steps):
+    """[v0.8.0] Runs every OPTIONAL_SOURCES entry; fills ctx["statuses"]
+    and ctx["data"] (used by later sources and by change history)."""
+    for source in OPTIONAL_SOURCES:
+        log_info(f"Source {source}...")
+        data, status = globals()[f"collect_{source}"](graph, ctx)
+        status, written = record_source(pg_conn, client_id, source, status, data)
+        ctx["statuses"][source] = status
+        ctx["data"][source] = data if status == "ok" else None
+        completed_steps.append(source)
+        if status == "ok":
+            log_success(f"  {source}: ok ({written} row(s) written)")
+        elif status.startswith("skipped"):
+            log_info(f"  {source}: {status}")
+        else:
+            log_warn(f"  {source}: not read -- {status}")
+    return ctx["statuses"]
+
+
+# ============================================================================
+# [v0.8.0] Change history (entra_change_history SCD2 + entra_change_baseline)
+# ============================================================================
+
+def _canonical(content):
+    return json.dumps(content, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def update_change_history(pg_conn, client_id, entity_type, entities, run_time,
+                          scope_keys=None, protected_prefixes=()):
+    """[v0.8.0] SCD2 diff of one entity type, in one transaction.
+    entities = {entity_key: (entity_label, content)}. Open versions whose
+    key is outside scope_keys (when given), or starts with one of
+    protected_prefixes (objects whose read failed this run), are left
+    alone. Returns (new, changed, closed)."""
+    new = changed = closed = 0
+    with pg_conn.cursor() as cur:
+        cur.execute("SET search_path TO ad_intel, public;")
+        cur.execute(
+            "SELECT entity_key, content_hash FROM entra_change_history "
+            "WHERE client_id = %s AND entity_type = %s AND valid_to IS NULL;",
+            (client_id, entity_type),
+        )
+        open_versions = dict(cur.fetchall())
+        close_keys, insert_rows = [], []
+        for key, old_hash in open_versions.items():
+            if scope_keys is not None and key not in scope_keys:
+                continue
+            if key not in entities:
+                if any(key.startswith(p) for p in protected_prefixes):
+                    continue
+                close_keys.append(key)
+                closed += 1
+        for key, (label, content) in entities.items():
+            canonical = _canonical(content)
+            digest = hashlib.md5(canonical.encode("utf-8")).hexdigest()
+            if key in open_versions:
+                if open_versions[key] == digest:
+                    continue
+                close_keys.append(key)
+                changed += 1
+            else:
+                new += 1
+            insert_rows.append((client_id, entity_type, key, label, canonical, digest, run_time))
+        if close_keys:
+            cur.execute(
+                "UPDATE entra_change_history SET valid_to = %s WHERE client_id = %s AND entity_type = %s "
+                "AND valid_to IS NULL AND entity_key = ANY(%s);",
+                (run_time, client_id, entity_type, close_keys),
+            )
+        if insert_rows:
+            psycopg2.extras.execute_values(
+                cur,
+                "INSERT INTO entra_change_history (client_id, entity_type, entity_key, entity_label, "
+                "content, content_hash, valid_from) VALUES %s",
+                insert_rows,
+                template="(%s, %s, %s, %s, %s::jsonb, %s, %s)",
+            )
+        cur.execute(
+            """
+            INSERT INTO entra_change_baseline (client_id, entity_type, first_run_at, last_run_at)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (client_id, entity_type) DO UPDATE SET last_run_at = EXCLUDED.last_run_at;
+            """,
+            (client_id, entity_type, run_time, run_time),
+        )
+    pg_conn.commit()
+    return new, changed, closed
+
+
+def _history_federation(ctx):
+    feds = {}
+    for f in sorted(ctx["data"]["federation"], key=lambda r: str(r["federation_id"])):
+        feds.setdefault(_lower(f["domain_name"]), f)
+    entities = {}
+    for d in ctx["data"]["domains"]:
+        f = feds.get(_lower(d["domain_name"]), {})
+        entities[_lower(d["domain_name"])] = (d["domain_name"], {
+            "authentication_type": d.get("authentication_type"),
+            "issuer_uri": f.get("issuer_uri"), "passive_sign_in_uri": f.get("passive_sign_in_uri"),
+            "active_sign_in_uri": f.get("active_sign_in_uri"),
+            "federated_idp_mfa_behavior": f.get("federated_idp_mfa_behavior"),
+            "prompt_login_behavior": f.get("prompt_login_behavior"),
+            "signing_certificate_thumbprint": f.get("signing_certificate_thumbprint"),
+            "next_signing_certificate_thumbprint": f.get("next_signing_certificate_thumbprint"),
+        })
+    return entities
+
+
+def _history_app_credential(ctx):
+    entities = {}
+
+    def add(object_type, object_id, app_id, name, cred_type, cred):
+        key_id = cred.get("key_id")
+        if not object_id or not key_id:
+            return
+        entities[f"{_lower(object_id)}:{_lower(key_id)}"] = (
+            f"{name} ({object_type}): {cred.get('display_name') or key_id}",
+            {"object_type": object_type, "object_id": _lower(object_id), "app_id": _lower(app_id),
+             "display_name": name, "credential_type": cred_type, "key_id": _lower(key_id),
+             "credential_display_name": cred.get("display_name"),
+             "end_date_time": cred.get("end_date_time")})
+
+    for app in ctx["applications"]:
+        for c in app.get("passwordCredentials") or []:
+            add("application", app.get("id"), app.get("appId"), app.get("displayName"), "password",
+                {"key_id": c.get("keyId"), "display_name": c.get("displayName"),
+                 "end_date_time": c.get("endDateTime")})
+        for c in app.get("keyCredentials") or []:
+            add("application", app.get("id"), app.get("appId"), app.get("displayName"), "certificate",
+                _key_credential(c))
+    for sp in ctx["data"]["service_principals"]:
+        for c in sp["password_credentials"]:
+            add("servicePrincipal", sp["entra_object_id"], sp["app_id"], sp["display_name"], "password", c)
+        for c in sp["key_credentials"]:
+            add("servicePrincipal", sp["entra_object_id"], sp["app_id"], sp["display_name"], "certificate", c)
+    return entities
+
+
+def _history_app_permission(ctx):
+    entities = {}
+    for g in ctx["data"]["app_role_grants"]:
+        key = f"{_lower(g['principal_id'])}:{_lower(g['resource_app_id'])}:{_lower(g['permission_id'])}"
+        entities[key] = (
+            f"{g['principal_display_name']} -> {g['resource_display_name']}: "
+            f"{g['permission_name'] or g['permission_id']}",
+            {"grant_kind": "application", "principal_id": _lower(g["principal_id"]),
+             "principal_display_name": g["principal_display_name"],
+             "resource_app_id": _lower(g["resource_app_id"]),
+             "resource_display_name": g["resource_display_name"],
+             "permission_name": g["permission_name"]})
+    for g in ctx["data"]["delegated_grants"]:
+        if g["consent_type"] != "AllPrincipals":
+            continue
+        for scope in g["scopes"]:
+            key = f"{_lower(g['client_sp_id'])}:{_lower(g['resource_app_id'])}:AllPrincipals:{scope}"
+            entities[key] = (
+                f"{g['client_display_name']} -> {g['resource_display_name']}: {scope} (admin consent)",
+                {"grant_kind": "delegated", "principal_id": _lower(g["client_sp_id"]),
+                 "principal_display_name": g["client_display_name"],
+                 "resource_app_id": _lower(g["resource_app_id"]),
+                 "resource_display_name": g["resource_display_name"], "permission_name": scope})
+    return entities
+
+
+def _history_ca_policy(ctx):
+    return {_lower(p["id"]): (p.get("display_name"), p)
+            for p in (_slim_ca_policy(x) for x in ctx["ca_policies"]) if p.get("id")}
+
+
+def _history_tenant_policy(ctx):
+    """Returns (entities, scope_keys): only keys whose own source was read."""
+    entities, scope = {}, set()
+    scope.add("security_defaults")
+    entities["security_defaults"] = ("Security defaults", {"enabled": ctx["security_defaults_enabled"]})
+    if ctx["authorization_policy_status"] == "ok" and ctx["authorization_policy"] is not None:
+        scope.add("authorization_policy")
+        entities["authorization_policy"] = ("Authorization policy", ctx["authorization_policy"])
+    if ctx["statuses"].get("auth_methods_policy") == "ok":
+        policy = ctx["data"]["auth_methods_policy"]
+        content = {"policyMigrationState": policy.get("policyMigrationState")}
+        for m in policy.get("authenticationMethodConfigurations") or []:
+            if m.get("id"):
+                content[m["id"]] = {"state": m.get("state"), "includeTargets": m.get("includeTargets"),
+                                    "excludeTargets": m.get("excludeTargets")}
+        scope.add("auth_methods_policy")
+        entities["auth_methods_policy"] = ("Authentication methods policy", content)
+    if ctx["statuses"].get("cross_tenant_policy") == "ok":
+        scope.add("cross_tenant_default")
+        entities["cross_tenant_default"] = ("Cross-tenant access default",
+                                            ctx["data"]["cross_tenant_policy"]["default"])
+    if ctx["statuses"].get("admin_consent_request_policy") == "ok":
+        scope.add("admin_consent_request_policy")
+        entities["admin_consent_request_policy"] = ("Admin consent request policy",
+                                                    ctx["data"]["admin_consent_request_policy"])
+    return entities, scope
+
+
+def _history_owner(ctx):
+    entities = {}
+
+    def add(owned_type, owned_id, owned_name, o):
+        key = f"{_lower(owned_id)}:{_lower(o['owner_id'])}"
+        entities[key] = (f"{owned_name} ({owned_type}) owned by {o['owner_upn'] or o['owner_display_name']}", {
+            "owned_object_type": owned_type, "owned_object_id": _lower(owned_id),
+            "owned_display_name": owned_name, "owner_id": _lower(o["owner_id"]),
+            "owner_type": o["owner_type"], "owner_display_name": o["owner_display_name"],
+            "owner_upn": o["owner_upn"]})
+
+    for o in ctx["data"]["app_owners"]["rows"]:
+        add(o["owned_object_type"], o["owned_object_id"], o["owned_display_name"], o)
+    names = {_lower(g["entra_object_id"]): g["display_name"] for g in ctx["data"]["groups"]["groups"]}
+    for o in ctx["data"]["groups"]["owners"]:
+        add("group", o["group_id"], names.get(_lower(o["group_id"])), o)
+    protected = tuple(f"{oid}:" for oid in ctx["data"]["app_owners"]["failed"] | ctx["data"]["groups"]["failed"])
+    return entities, protected
+
+
+def _history_partner(ctx):
+    entities = {}
+    for c in ctx["data"]["partner_contracts"]:
+        entities[f"contract:{_lower(c['contract_object_id'])}"] = (
+            c.get("display_name") or c.get("default_domain_name"), dict(c))
+    for p in ctx["data"]["cross_tenant_policy"]["partners"]:
+        entities[f"cross_tenant:{_lower(p['partner_tenant_id'])}"] = (
+            f"Cross-tenant partner {p['partner_tenant_id']}", p["content"])
+    return entities
+
+
+def _history_group_member(ctx):
+    groups = {_lower(g["entra_object_id"]): g for g in ctx["data"]["groups"]["groups"]}
+    entities = {}
+    for m in ctx["data"]["groups"]["members"]:
+        g = groups.get(_lower(m["group_id"]), {})
+        entities[f"{_lower(m['group_id'])}:{_lower(m['member_id'])}"] = (
+            f"{m['member_upn'] or m['member_display_name']} in {g.get('display_name')}", {
+                "group_id": _lower(m["group_id"]), "group_display_name": g.get("display_name"),
+                "group_sensitive_reasons": g.get("sensitive_reasons"), "member_id": _lower(m["member_id"]),
+                "member_type": m["member_type"], "member_display_name": m["member_display_name"],
+                "member_upn": m["member_upn"], "member_user_type": m["member_user_type"],
+                "on_premises_sync_enabled": m["on_premises_sync_enabled"]})
+    protected = tuple(f"{gid}:" for gid in ctx["data"]["groups"]["failed"])
+    return entities, protected
+
+
+# entity_type -> the optional sources it is built from (core steps always
+# succeeded by the time history runs). tenant_policy is handled per key.
+CHANGE_HISTORY_INPUTS = (
+    ("federation", ("domains", "federation")),
+    ("app_credential", ("service_principals",)),
+    ("app_permission", ("app_role_grants", "delegated_grants")),
+    ("ca_policy", ()),
+    ("tenant_policy", ()),
+    ("owner", ("app_owners", "groups")),
+    ("partner", ("partner_contracts", "cross_tenant_policy")),
+    ("group_member", ("groups",)),
+)
+
+
+def update_entra_change_history(pg_conn, client_id, ctx):
+    """[v0.8.0] After every source ran: updates history for each entity
+    type whose input sources were all 'ok' this run; a type with any failed
+    input is skipped entirely (left untouched), so a failed read is never
+    recorded as everything having been removed. Returns {entity_type:
+    (new, changed, closed) or "skipped: ..."}."""
+    run_time = datetime.now(timezone.utc)
+    results = {}
+    for entity_type, inputs in CHANGE_HISTORY_INPUTS:
+        failed = [s for s in inputs if ctx["statuses"].get(s) != "ok"]
+        if failed:
+            results[entity_type] = "skipped (not read: " + ", ".join(failed) + ")"
+            log_info(f"  change history {entity_type}: {results[entity_type]}")
+            continue
+        scope, protected = None, ()
+        if entity_type == "tenant_policy":
+            entities, scope = _history_tenant_policy(ctx)
+        elif entity_type in ("owner", "group_member"):
+            entities, protected = globals()[f"_history_{entity_type}"](ctx)
+        else:
+            entities = globals()[f"_history_{entity_type}"](ctx)
+        results[entity_type] = update_change_history(pg_conn, client_id, entity_type, entities, run_time,
+                                                      scope_keys=scope, protected_prefixes=protected)
+        new, changed, closed = results[entity_type]
+        log_info(f"  change history {entity_type}: {len(entities)} current, {new} new, "
+                 f"{changed} changed, {closed} gone")
+    return results
 
 
 # ============================================================================
@@ -1380,6 +3187,11 @@ def parse_args():
                               "domain string -- look the GUID up once with "
                               "`SELECT client_id, domain_fqdn FROM client;` and "
                               "use it directly from then on.")
+    parser.add_argument("--include-pta-agents", action="store_true",
+                         help="[v0.8.0] Also read pass-through authentication agents (beta). "
+                              "Needs OnPremisesPublishingProfiles.ReadWrite.All -- Microsoft "
+                              "offers no read-only permission for this read, so it is off by "
+                              "default; this collector still only reads with it.")
     parser.add_argument("--version", action="store_true", help="Print version and exit.")
     parser.add_argument("--pg-host", default=None,
                          help="PostgreSQL server hostname or IP. Required unless --version is given.")
@@ -1417,6 +3229,35 @@ COLLECTION_STEPS = [
     ("security posture", ["entra_security_posture"]),
     ("application registrations", ["entra_application"]),
     ("dangerous Graph permission grants", ["entra_dangerous_permission_grant"]),
+    # [v0.8.0] Optional sources (step name = entra_collection_status source;
+    # each also upserts its entra_collection_status row), then history.
+    ("sign_in_activity", ["entra_user (sign-in columns)"]),
+    ("subscribed_skus", ["entra_tenant_license"]),
+    ("organization", ["entra_tenant_setting 'organization'"]),
+    ("domains", ["entra_domain"]),
+    ("federation", ["entra_domain_federation"]),
+    ("service_principals", ["entra_service_principal"]),
+    ("sp_sign_in_activity", ["entra_service_principal (last_sign_in_activity_at)"]),
+    ("app_role_grants", ["entra_app_role_grant"]),
+    ("delegated_grants", ["entra_delegated_grant"]),
+    ("app_owners", ["entra_app_owner"]),
+    ("groups", ["entra_group", "entra_group_owner", "entra_group_member"]),
+    ("role_definitions", ["entra_role_definition"]),
+    ("custom_role_assignments", ["entra_custom_role_assignment"]),
+    ("pim_policies", ["entra_role_management_policy"]),
+    ("named_locations", ["entra_named_location"]),
+    ("auth_methods_policy", ["entra_tenant_setting 'auth_methods_policy'"]),
+    ("cross_tenant_policy", ["entra_tenant_setting 'cross_tenant_default'", "entra_cross_tenant_partner"]),
+    ("admin_consent_request_policy", ["entra_tenant_setting 'admin_consent_request_policy'"]),
+    ("directory_settings", ["entra_tenant_setting 'password_rule_settings'/'group_unified_settings'"]),
+    ("device_registration_policy", ["entra_tenant_setting 'device_registration_policy'"]),
+    ("onprem_sync", ["entra_tenant_setting 'onprem_sync'"]),
+    ("pta_agents", ["entra_pta_agent"]),
+    ("partner_contracts", ["entra_partner_contract"]),
+    ("registration_details", ["entra_user_registration"]),
+    ("risky_users", ["entra_risky_user"]),
+    ("risk_detections", ["entra_risk_detection"]),
+    ("change history", ["entra_change_history", "entra_change_baseline"]),
 ]
 
 
@@ -1557,6 +3398,24 @@ def main():
         log_success(f"{grant_count} highly privileged Graph permission grant(s) found "
                     f"(out of Microsoft's own documented 'use caution' set).")
 
+        # [v0.8.0] Optional sources: a refused read (400/403/404) is recorded
+        # in entra_collection_status and the run carries on.
+        log_header("Collecting Optional Entra Data Sources (schema v42)")
+        ctx = {
+            "users": users, "role_members": role_members, "ca_policies": ca_policies,
+            "dangerous_grants": dangerous_grants, "applications": applications,
+            "security_defaults_enabled": security_defaults_enabled,
+            "authorization_policy": authorization_policy,
+            "authorization_policy_status": authorization_policy_status,
+            "include_pta_agents": args.include_pta_agents,
+            "statuses": {}, "data": {},
+        }
+        source_statuses = run_optional_sources(graph, pg_conn, client_id, ctx, completed_steps)
+
+        log_header("Updating Entra Change History")
+        history_results = update_entra_change_history(pg_conn, client_id, ctx)
+        completed_steps.append("change history")
+
         log_header("Run Summary")
         duration = (datetime.now(timezone.utc) - start_time).total_seconds()
         print(f"  {_C.WHITE}Duration:{_C.RESET}                     {duration:.1f}s")
@@ -1570,6 +3429,14 @@ def main():
         print(f"  {_C.WHITE}Authorization policy:{_C.RESET}          {authorization_policy_status}")
         print(f"  {_C.WHITE}Application registrations:{_C.RESET}     {app_count}")
         print(f"  {_C.WHITE}Dangerous permission grants:{_C.RESET}   {grant_count}")
+        # [v0.8.0] One line per optional source.
+        for source in OPTIONAL_SOURCES:
+            status = source_statuses.get(source, "not run")
+            colour = _C.GREEN if status == "ok" else _C.YELLOW
+            print(f"  {_C.WHITE}{('Source ' + source + ':'):<31}{_C.RESET}{colour}{status}{_C.RESET}")
+        updated = sum(1 for r in history_results.values() if not isinstance(r, str))
+        print(f"  {_C.WHITE}Change history:{_C.RESET}                {updated} of "
+              f"{len(history_results)} entity type(s) updated")
         print(f"  {_C.WHITE}Result:{_C.RESET}                        SUCCESS")
 
     except CollectorAbort as exc:

@@ -134,6 +134,47 @@ PostgreSQL password unless it's already set via `PGPASSWORD` or a
   time-bound or through a PIM activation -- these schedules need Entra
   ID P2 (or ID Governance) like eligibility does, and without it the
   collector records why and carries on.
+- **Optional Entra ID permissions (entra_graph_collector.py 0.8.0)**:
+  the five permissions above are the only required ones. They also
+  cover licences, organization, domains, groups (with owners and
+  members of the sensitive ones), role definitions and custom-role
+  assignments, service principals and their owners, application and
+  delegated permission grants, named locations, and the authentication
+  methods, cross-tenant access, admin consent request and directory
+  (password protection / group) settings. Each optional permission
+  below unlocks more checks; grant only the ones you want, all as
+  **Application** permissions with admin consent. When a permission or
+  its licence is missing, the collector records why for that data
+  source (table `entra_collection_status`) and carries on, and
+  `adaudit.py` shows the plugins that need it as **NOT ASSESSED**
+  rather than passing them.
+
+  | Permission | Type | Required / optional | Unlocks (plugins) | Licence |
+  |---|---|---|---|---|
+  | `User.Read.All` | Application | Required | Users (all Entra plugins) | – |
+  | `RoleManagement.Read.Directory` | Application | Required | Directory roles, PIM eligibility/schedules, role definitions, custom-role assignments | P2 for PIM data |
+  | `Policy.Read.All` | Application | Required | Security Defaults, Conditional Access, authorization, authentication methods, cross-tenant, admin consent request policies, named locations | P1 for Conditional Access |
+  | `Application.Read.All` | Application | Required | App registrations, service principals, owners | – |
+  | `Directory.Read.All` | Application | Required | Permission grants, groups, domains, licences, directory settings, partner contracts | – |
+  | `AuditLog.Read.All` | Application | Optional | User sign-in activity, service-principal sign-in activity, MFA registration details: 10040–10044, 10055, 10066 | P1 |
+  | `Domain.Read.All` | Application | Optional | Federation configuration of federated domains: 10090, 11022 | – |
+  | `RoleManagementPolicy.Read.Directory` | Application | Optional | PIM role settings (activation MFA, approval, duration, notifications): 10050, 10051. The precise permission; `RoleManagement.Read.Directory` (required above) is also documented by Microsoft as sufficient | P2 |
+  | `Policy.Read.DeviceConfiguration` | Application | Optional | Device registration policy (beta API): 10084 | – |
+  | `OnPremDirectorySynchronization.Read.All` | Application | Optional | On-prem sync feature flags (password hash sync, soft/hard-match blocking): 10094 | – |
+  | `IdentityRiskyUser.Read.All` | Application | Optional | Risky users: 10100 | P2 |
+  | `IdentityRiskEvent.Read.All` | Application | Optional | Risk detections (e.g. leaked credentials): 10101 | P2 |
+  | `OnPremisesPublishingProfiles.ReadWrite.All` | Application | Optional, opt-in, **write-capable** | Pass-through authentication agents (beta API): 10095. Microsoft offers no read-only permission for this read, so the collector only uses it when run with `--include-pta-agents`; it still only reads, but the permission itself allows changes, so grant it only if that is acceptable | – |
+
+  Every permission in this table is read-only except
+  `OnPremisesPublishingProfiles.ReadWrite.All`. Without
+  `--include-pta-agents` the PTA agent source is recorded as skipped.
+- **Emergency-access (break-glass) accounts (optional)**: plugins
+  10026, 10042, 10043 and 10055 exempt or check break-glass accounts.
+  By default they recognise them heuristically (cloud-only enabled
+  Global Administrator excluded directly from an all-users Conditional
+  Access policy). To name them explicitly, insert their UPNs once:
+  `INSERT INTO ad_intel.entra_breakglass_account (client_id, user_principal_name, note) VALUES ('<client_id>', 'bg1@contoso.onmicrosoft.com', 'emergency access');`
+  When a client has any row there, exactly those accounts are used.
 
 None of these need to be typed on the command line if you'd rather
 not -- every password/secret prompts securely (hidden input) if you

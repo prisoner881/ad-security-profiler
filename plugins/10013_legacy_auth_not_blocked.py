@@ -39,14 +39,19 @@ reports block policies left in report-only or disabled state.
 
 Tenant-level finding: object_guid is md5('10013:' || client_id), as in
 plugin 10004.
+
+[v1.1] A policy stored without conditions (collector older than 0.7.0)
+now counts as unevaluable: the check was NULL instead of FALSE, so such
+policies were silently ignored and the plugin could fire on data it
+cannot assess.
 """
 
 PLUGIN = {
     "plugin_id": 10013,
     "category": "Hybrid Identity",
     "name": "Legacy Authentication Not Blocked",
-    "version": "1.0",
-    "revision_date": "2026-10-04",
+    "version": "1.1",
+    "revision_date": "2026-10-05",
     "control_id": "HYBRID-10013",
     "framework_tags": [
         "CISA-SCUBA-MS.AAD.1.1",
@@ -110,7 +115,7 @@ PLUGIN = {
         pol AS (
             SELECT p->>'id' AS id,
                    COALESCE(p->>'display_name', p->>'id') COLLATE "C" AS name,
-                   jsonb_typeof(p->'conditions') = 'object' AS evaluable,
+                   COALESCE(jsonb_typeof(p->'conditions') = 'object', FALSE) AS evaluable,
                    COALESCE(p->'grant_controls'->'builtInControls', '[]'::jsonb) ? 'block' AS blocks,
                    COALESCE(p->'conditions'->'clientAppTypes', '[]'::jsonb) ?& ARRAY['exchangeActiveSync', 'other'] AS legacy,
                    COALESCE(p->'conditions'->'users'->'includeUsers', '[]'::jsonb) ? 'All' AS all_users,
