@@ -9,6 +9,19 @@ the script's own docstring now keeps a one-line summary per entry, this
 file keeps the complete detail (root causes, what was verified, why a
 decision was made a particular way) for anyone who wants it.
 
+    0.7.7 - Automatic one-time rescan after an upgrade that changes a
+            derived field. Unchanged objects are never rewritten, so
+            0.7.6's key credential timestamp fix reached no existing row:
+            a lab run with 0.7.6 still showed the Entra-sourced keys with
+            no creation time, and 1022 kept reporting them. The new
+            DERIVED_FIELDS_VERSION constant names the oldest collector whose
+            derived fields are current; when the last succeeded run was
+            made by an older collector, the run behaves as --full-rescan
+            (objects written as "rescanned", not "modified", so change
+            history and the 11xxx plugins are unaffected). Set to 0.7.7, so
+            databases last collected by 0.7.6 or older rescan once. The
+            0.7.6 entry's "re-collect" advice is replaced by this.
+
     0.7.6 - msDS-KeyCredentialLink timestamps of Entra-sourced keys are now
             decoded correctly. For a key whose source is AzureAD (Windows
             Hello for Business keys written back by Entra Connect) the
