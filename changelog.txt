@@ -9,6 +9,12 @@ the script's own docstring now keeps a one-line summary per entry, this
 file keeps the complete detail (root causes, what was verified, why a
 decision was made a particular way) for anyone who wants it.
 
+    0.7.5 - Run Summary edge totals now include ACL edges (acl_edge) and the
+            unresolved delegation-target / RBCD-by-SID edges; they were
+            synced and logged per step but left out of "Edges opened" /
+            "Edges closed" (a first lab run showed 346 opened instead of
+            835). Reporting only: the collected data was always complete.
+
     0.7.4 - Requires schema v43 (schema_migration_v43.sql). No collection
             change: v43 only adds adaudit.py's run lifecycle, plugin roster
             and push state (adaudit.py 0.10.0, adaudit_push.py), but
