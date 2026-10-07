@@ -2,7 +2,7 @@
 """
 adaudit.py -- AD Security & Compliance Plugin Runner
 ======================================================
-VERSION: 0.9.2
+VERSION: 0.10.0
 
 Companion to adprofiler.py. Where adprofiler.py collects AD data,
 adaudit.py analyzes it: discovers every plugin file in plugins/, runs each
@@ -25,6 +25,23 @@ DESIGN:
       as: (status, object_guid, stig_severity, stig_reference,
       tool_severity, tool_reference, fd_severity, summary, detail).
       Zero rows returned = clean pass, nothing to report.
+    - [v0.10.0] Requires schema v43. Pushes results to the FortifyData AD
+      audit ingest API (adaudit_push.py; --push, --push-only, --push-run,
+      --push-skip, --push-dry-run; credentials at runtime via --api-url /
+      --api-company-id / --api-key[-file] or FD_API_URL / FD_COMPANY_ID /
+      FD_API_KEY, or a prompt). The unit pushed is an evaluation run:
+      complete, unfiltered runs are sent oldest first, reconstructed from
+      control_evidence_fact with change labels derived from history, plus
+      the run's plugin roster, so a backlog replays exactly as it would have
+      been sent live. Each run now has a lifecycle (control_evidence_run
+      .status 'running' -> 'complete', or 'aborted' if interrupted -- never
+      pushed) and a stored roster (control_evidence_run_plugin: each finding
+      plugin's pass / warn / fail / error / not_assessed result), which the
+      API needs so an errored or not-assessed plugin can't make its findings
+      look remediated. Filtered runs (--plugin-id / --category /
+      --framework) no longer write to the findings history: they report
+      against it but change nothing, and are never pushed. New exit status
+      5: the push failed (the run itself is recorded and pushed next time).
     - [v0.9.2] Requires schema v42 (Entra ID coverage round: plugins
       10020-10121 and 11022-11029). A plugin may declare
       PLUGIN["requires_sources"]: the Entra data sources
@@ -144,6 +161,10 @@ USAGE:
     python3 adaudit.py --framework PCI-DSS-4.0 "SOC 2"  # only plugins tagged for these frameworks
     python3 adaudit.py --plugins-dir ./plugins   # override plugin location
     python3 adaudit.py --fail-on warn            # exit 4 if any open WARN/FAIL finding
+    python3 adaudit.py --push --api-url us --api-company-id 12 --api-key-file key.txt
+                                                 # evaluate, then push unpushed runs
+    python3 adaudit.py --push-only               # push the backlog, evaluate nothing
+    python3 adaudit.py --push --push-dry-run out/  # write the payloads, send nothing
 
 EXIT STATUS ([v0.7.3]; always 0 before):
     0   Run completed and every selected plugin ran.
@@ -159,9 +180,14 @@ EXIT STATUS ([v0.7.3]; always 0 before):
         one current (not remediated) finding is at or above that level.
         Without --fail-on, findings never affect the exit status --
         finding problems is a successful audit, not a failed run.
+    5   [v0.10.0] The push to FortifyData failed (network, API refusal,
+        count mismatch). The evaluation itself is recorded; unpushed runs
+        are sent, oldest first, on the next push. A new installation
+        waiting for approval (403) is not a failure: exit status is
+        unaffected.
     130 Interrupted (Ctrl-C).
-    When both 3 and 4 apply, 3 is returned: an incomplete run can't
-    vouch for its findings either way.
+    Precedence when several apply: 3, then 5, then 4 -- an incomplete run
+    can't vouch for its findings either way.
 """
 
 import sys
@@ -172,10 +198,14 @@ import re
 from pathlib import Path
 from datetime import datetime, timezone
 
+import os
+
 import psycopg2
 import psycopg2.extras
 
-VERSION = "0.9.2"
+import adaudit_push
+
+VERSION = "0.10.0"
 
 # [test-candidate-branch] Always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
@@ -197,6 +227,7 @@ EXIT_OK = 0
 EXIT_FATAL = 1
 EXIT_INCOMPLETE = 3
 EXIT_FINDINGS = 4
+EXIT_PUSH_FAILED = 5
 EXIT_INTERRUPTED = 130
 
 REQUIRED_PLUGIN_KEYS = {"plugin_id", "category", "name", "base_severity", "query",
@@ -521,8 +552,9 @@ def connect_postgres():
 # the columns and tables of the advisory/compliance gap round plugins, v39
 # the SYSVOL (Group Policy content) tables and views, v40
 # ad_domain.tombstone_lifetime_source (plugin 4011), v41 partition
-# maintenance (no plugin change), v42 the Entra coverage round tables.
-REQUIRED_SCHEMA_VERSION = 42
+# maintenance (no plugin change), v42 the Entra coverage round tables, v43
+# the evaluation run lifecycle, plugin roster and push state.
+REQUIRED_SCHEMA_VERSION = 43
 
 # [v0.9.0] Data sources a client may not have collected: (table/view names a
 # plugin query mentions, probe returning TRUE when the client has the data).
@@ -549,6 +581,52 @@ ENTRA_DATA_SOURCES = frozenset({
     "registration_details", "sign_in_activity", "sp_sign_in_activity", "risky_users",
     "risk_detections",
 })
+
+
+def record_run_roster(conn, evidence_run_id, plugin_summaries, not_assessed_ids, plugin_errors,
+                      load_failures):
+    """[v0.10.0] Stores the run's plugin roster (control_evidence_run_plugin):
+    every finding plugin that ran, with its result, plus every plugin file
+    that failed to load (as 'error'). A passing plugin whose source data was
+    not collected is 'not_assessed'. The push sends this roster with the run;
+    the API only closes as remediated the findings of plugins whose result
+    is clean, so an errored or not-assessed plugin cannot make its findings
+    look fixed."""
+    rows = []
+    for summary in plugin_summaries:
+        rollup = summary["rollup"]
+        if rollup == "pass" and summary["plugin_id"] in not_assessed_ids:
+            rollup = "not_assessed"
+        rows.append((evidence_run_id, summary["plugin_id"], summary["version"], rollup,
+                     summary.get("finding_count", 0), plugin_errors.get(summary["plugin_id"])))
+    ran = {summary["plugin_id"] for summary in plugin_summaries}
+    for failure in load_failures:
+        if failure["plugin_id"] is not None and failure["plugin_id"] not in ran:
+            rows.append((evidence_run_id, failure["plugin_id"], None, "error", 0,
+                         f"plugin file {failure['file']} failed to load: {failure['reason']}"[:2000]))
+    with conn.cursor() as cur:
+        if rows:
+            psycopg2.extras.execute_values(cur, """
+                INSERT INTO control_evidence_run_plugin
+                    (evidence_run_id, plugin_id, plugin_version, rollup, finding_count, error_message)
+                VALUES %s ON CONFLICT (evidence_run_id, plugin_id) DO NOTHING;
+            """, rows)
+    conn.commit()
+
+
+def mark_run_aborted(conn, evidence_run_id):
+    """[v0.10.0] Best effort: an interrupted or failed evaluation run is
+    marked aborted so it is never pushed. If even this fails (database
+    gone), the run stays 'running', which is never pushed either."""
+    try:
+        conn.rollback()
+        with conn.cursor() as cur:
+            cur.execute("UPDATE control_evidence_run SET status = 'aborted', completed_at = now(), "
+                        "push_status = 'skipped' WHERE evidence_run_id = %s AND status = 'running';",
+                        (evidence_run_id,))
+        conn.commit()
+    except psycopg2.Error:
+        pass
 
 
 def compute_not_assessed_ids(conn, client_id, finding_plugins):
@@ -620,9 +698,13 @@ def get_latest_client_and_run(conn):
     return row
 
 
-def run_plugin_query(conn, plugin, client_id, run_id):
+def run_plugin_query(conn, plugin, client_id, run_id, errors=None):
     """Executes one plugin's query inside its own SAVEPOINT, so a broken
-    plugin can't poison the rest of the evidence run's transaction."""
+    plugin can't poison the rest of the evidence run's transaction.
+    [v0.10.0] On failure the reason is also put in errors[plugin_id] (the
+    run's roster records it)."""
+    if errors is None:
+        errors = {}
     savepoint = f"plugin_{plugin['plugin_id']}"
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(f"SAVEPOINT {savepoint};")
@@ -633,6 +715,7 @@ def run_plugin_query(conn, plugin, client_id, run_id):
             cur.execute(f"ROLLBACK TO SAVEPOINT {savepoint};")
             log(f"  [ERROR] plugin {plugin['plugin_id']} ({plugin['name']}) "
                 f"failed to execute: {exc}")
+            errors[plugin["plugin_id"]] = f"query failed: {exc}".strip()[:2000]
             return None
         cur.execute(f"RELEASE SAVEPOINT {savepoint};")
 
@@ -651,6 +734,7 @@ def run_plugin_query(conn, plugin, client_id, run_id):
                 f"missing ones: anything outside the 9-column contract (e.g. a raw timestamp/UUID "
                 f"placed outside detail) would otherwise pass silently today and only break once "
                 f"this data is serialized to JSON for external consumption.")
+            errors[plugin["plugin_id"]] = f"row contract violation: {'; '.join(problems)}"
             return None
 
     return rows
@@ -732,7 +816,8 @@ def insert_evidence_version(pg_cur, evidence_run_id, control_test_id, client_id,
     })
 
 
-def sync_evidence(pg_cur, evidence_run_id, control_test_id, client_id, rows, plugin, run_timestamp):
+def sync_evidence(pg_cur, evidence_run_id, control_test_id, client_id, rows, plugin, run_timestamp,
+                  persist=True):
     """
     SCD2-versions control_evidence_fact for one plugin's results against
     whatever was already open for it -- the same diff-only reconciliation
@@ -759,6 +844,11 @@ def sync_evidence(pg_cur, evidence_run_id, control_test_id, client_id, rows, plu
     needs to be independently taggable -- and this is also exactly the
     shape a future per-finding API push needs, so the console report and
     that future consumer can share one data structure rather than two.
+
+    [v0.10.0] persist=False (filtered runs) computes the same labels against
+    the open findings but writes nothing: a diagnostic run limited by
+    --plugin-id/--category/--framework no longer changes the findings
+    history that pushed runs are reconstructed from.
     """
     open_evidence = get_open_evidence_map(pg_cur, control_test_id, client_id)
     seen_identity_guids = set()
@@ -806,8 +896,9 @@ def sync_evidence(pg_cur, evidence_run_id, control_test_id, client_id, rows, plu
         existing = open_evidence.get(identity_guid)
 
         if existing is None:
-            insert_evidence_version(pg_cur, evidence_run_id, control_test_id, client_id, row,
-                                     plugin, run_timestamp, version_id=1, change_status="new")
+            if persist:
+                insert_evidence_version(pg_cur, evidence_run_id, control_test_id, client_id, row,
+                                         plugin, run_timestamp, version_id=1, change_status="new")
             findings.append(finding_dict(row, "new"))
             continue
 
@@ -822,17 +913,19 @@ def sync_evidence(pg_cur, evidence_run_id, control_test_id, client_id, rows, plu
             findings.append(finding_dict(row, "unchanged"))
             continue
 
-        close_evidence_version(pg_cur, existing["evidence_fact_id"], run_timestamp,
-                                evidence_run_id, "changed")
-        insert_evidence_version(pg_cur, evidence_run_id, control_test_id, client_id, row,
-                                 plugin, run_timestamp, version_id=existing["version_id"] + 1,
-                                 change_status="changed")
+        if persist:
+            close_evidence_version(pg_cur, existing["evidence_fact_id"], run_timestamp,
+                                    evidence_run_id, "changed")
+            insert_evidence_version(pg_cur, evidence_run_id, control_test_id, client_id, row,
+                                     plugin, run_timestamp, version_id=existing["version_id"] + 1,
+                                     change_status="changed")
         findings.append(finding_dict(row, "changed"))
 
     for identity_guid, existing in open_evidence.items():
         if identity_guid not in seen_identity_guids:
-            close_evidence_version(pg_cur, existing["evidence_fact_id"], run_timestamp,
-                                    evidence_run_id, "remediated")
+            if persist:
+                close_evidence_version(pg_cur, existing["evidence_fact_id"], run_timestamp,
+                                        evidence_run_id, "remediated")
             findings.append(finding_dict(existing, "remediated"))
 
     return findings
@@ -1349,6 +1442,100 @@ def write_excel_report(plugin_summaries, all_findings, inventory_results, filena
 
 
 # ============================================================================
+# Push (adaudit_push.py)
+# ============================================================================
+
+def resolve_push_config(args, parser):
+    """[v0.10.0] None when no push was asked for. Credentials come from the
+    options, then the environment (FD_API_URL, FD_COMPANY_ID, FD_API_KEY),
+    then for the key a file, then an interactive prompt. A dry run needs
+    none of them."""
+    pushing = args.push or args.push_only or args.push_run is not None
+    if args.push_dry_run and not pushing:
+        parser.error("--push-dry-run needs --push, --push-only or --push-run")
+    if not pushing:
+        return None
+    url = args.api_url or os.environ.get("FD_API_URL")
+    url = adaudit_push.API_SERVERS.get((url or "").lower(), url)
+    company = args.api_company_id
+    if company is None and os.environ.get("FD_COMPANY_ID"):
+        try:
+            company = int(os.environ["FD_COMPANY_ID"])
+        except ValueError:
+            parser.error("FD_COMPANY_ID must be an integer")
+    if args.push_dry_run:
+        return {"url": url or "https://dry-run.invalid", "company_id": company or 0, "key": None,
+                "dry_run_dir": args.push_dry_run, "gzip": not args.no_gzip,
+                "timeout": args.api_timeout}
+    if not url or company is None:
+        parser.error("pushing needs --api-url (or FD_API_URL) and --api-company-id "
+                     "(or FD_COMPANY_ID)")
+    if not (url.startswith("https://") or re.match(r"http://(localhost|127\.0\.0\.1)(:\d+)?(/|$)", url)):
+        parser.error("--api-url must be https:// (or test / us / eu); plain http is only "
+                     "accepted for localhost, for testing against a local mock")
+    key = None
+    if args.api_key:
+        print("[WARN] API key supplied via --api-key is visible in shell history and process "
+              "listings. Prefer FD_API_KEY, --api-key-file, or the prompt.")
+        key = args.api_key
+    elif os.environ.get("FD_API_KEY"):
+        key = os.environ["FD_API_KEY"]
+    elif args.api_key_file:
+        try:
+            key = args.api_key_file.read_text(encoding="utf-8").splitlines()[0].strip()
+        except (OSError, IndexError) as exc:
+            parser.error(f"cannot read the API key from {args.api_key_file}: {exc}")
+    elif sys.stdin.isatty():
+        key = getpass.getpass(f"FortifyData API key for company {company}: ").strip()
+    if not key:
+        parser.error("pushing needs an API key: --api-key, FD_API_KEY, --api-key-file, or "
+                     "run interactively to be prompted")
+    if key.lower().startswith("apikey "):
+        key = key[7:].strip()
+    return {"url": url, "company_id": company, "key": key, "dry_run_dir": None,
+            "gzip": not args.no_gzip, "timeout": args.api_timeout}
+
+
+def run_push(conn, client_id, sync_run_id, push_cfg, all_plugins, inventory_results, only_run_id):
+    """[v0.10.0] Pushes unpushed runs (or one run). Returns False when the
+    push failed; True when it finished or is waiting for the API to approve
+    a new installation (runs stay queued)."""
+    inventory_plugins = [p for p in all_plugins if p["plugin_type"] == "inventory"]
+
+    def inventory_provider():
+        if inventory_results is not None:
+            return inventory_results
+        results = []
+        for plugin in inventory_plugins:
+            rows = run_inventory_query(conn, plugin, client_id, sync_run_id)
+            if rows is None:
+                conn.rollback()
+            results.append((plugin, rows))
+        conn.commit()
+        return results
+
+    try:
+        api = adaudit_push.ApiClient(push_cfg["url"], push_cfg["company_id"], push_cfg["key"], log,
+                                     compress=push_cfg["gzip"], timeout=push_cfg["timeout"],
+                                     dry_run_dir=push_cfg["dry_run_dir"])
+        pushed, waiting = adaudit_push.push_runs(conn, client_id, api, all_plugins,
+                                                 inventory_provider, VERSION, log, only_run_id)
+    except ImportError as exc:
+        log(f"[ERROR] Push needs the 'requests' package (pip install -r requirements.txt): {exc}")
+        return False
+    except adaudit_push.PushError as exc:
+        conn.rollback()
+        log(f"[ERROR] Push stopped: {exc}")
+        return False
+    if waiting:
+        log(f"Push: {pushed} run(s) pushed; the rest stay queued until FortifyData approves "
+            f"this installation (client_id {client_id}).")
+    else:
+        log(f"Push: {pushed} run(s) pushed.")
+    return True
+
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -1381,6 +1568,41 @@ def main():
     parser.add_argument("--pg-password", default=None,
                          help="PostgreSQL password. If omitted, you will be prompted "
                               "securely (recommended).")
+    push = parser.add_argument_group(
+        "pushing results to FortifyData",
+        "Credentials can be given as options, environment variables (FD_API_URL, "
+        "FD_COMPANY_ID, FD_API_KEY) or, for the key, a file; a missing key is prompted for "
+        "when running interactively.")
+    push.add_argument("--push", action="store_true",
+                      help="After evaluating, push every complete run not yet accepted by the "
+                           "API, oldest first (this run included).")
+    push.add_argument("--push-only", action="store_true",
+                      help="Push unpushed runs without evaluating anything (e.g. after a failed "
+                           "collection, or to drain a backlog).")
+    push.add_argument("--push-run", type=int, metavar="EVIDENCE_RUN_ID", default=None,
+                      help="Push just this evaluation run, even if already pushed (debugging an "
+                           "ingest problem). Nothing is evaluated.")
+    push.add_argument("--push-skip", type=int, metavar="EVIDENCE_RUN_ID", default=None,
+                      help="Mark this run as never to be pushed (a run the API keeps refusing), "
+                           "so later runs can go. Needs no API credentials.")
+    push.add_argument("--push-dry-run", metavar="DIR", default=None,
+                      help="With --push/--push-only/--push-run: write every request body to DIR "
+                           "as JSON instead of sending it. Push state is not changed; no API "
+                           "credentials are needed.")
+    push.add_argument("--api-url", default=None,
+                      help="API base URL, or test / us / eu (env FD_API_URL).")
+    push.add_argument("--api-company-id", type=int, default=None,
+                      help="FortifyData company id the API key is scoped to (env FD_COMPANY_ID).")
+    push.add_argument("--api-key", default=None,
+                      help="API key. Visible in shell history and process listings: prefer "
+                           "FD_API_KEY, --api-key-file, or the prompt.")
+    push.add_argument("--api-key-file", type=Path, default=None,
+                      help="File holding the API key (first line). Keep it readable only by "
+                           "the account that runs adaudit.py.")
+    push.add_argument("--api-timeout", type=int, default=120,
+                      help="Seconds per API request (default 120).")
+    push.add_argument("--no-gzip", action="store_true",
+                      help="Send request bodies uncompressed (troubleshooting only).")
     args = parser.parse_args()
 
     if args.version:
@@ -1403,6 +1625,8 @@ def main():
     else:
         PG_PASSWORD = getpass.getpass(f"PostgreSQL password for {args.pg_user}@{args.pg_host}: ")
 
+    push_cfg = resolve_push_config(args, parser)
+
     print("=" * 62)
     print(f"  adaudit.py v{VERSION} -- AD Security & Compliance Plugin Runner")
     print("=" * 62)
@@ -1419,6 +1643,23 @@ def main():
             f"compliance sheets:")
         for tag in sorted(unknown_tags):
             log(f"    - {tag} (plugin(s) {', '.join(str(i) for i in sorted(unknown_tags[tag]))})")
+
+    all_plugins = plugins
+
+    if args.push_skip is not None or args.push_only or args.push_run is not None:
+        conn = connect_postgres()
+        check_schema_version(conn)
+        client_id, run_id, client_name, completed_at = get_latest_client_and_run(conn)
+        if args.push_skip is not None:
+            try:
+                adaudit_push.skip_run(conn, args.push_skip, log)
+            except adaudit_push.PushError as exc:
+                log(f"[ERROR] {exc}")
+                return EXIT_FATAL
+            return EXIT_OK
+        log(f"Push only, for {client_name}: nothing is evaluated.")
+        ok = run_push(conn, client_id, run_id, push_cfg, all_plugins, None, args.push_run)
+        return EXIT_OK if ok else EXIT_PUSH_FAILED
 
     if args.plugin_id:
         plugins = [p for p in plugins if p["plugin_id"] in args.plugin_id]
@@ -1453,124 +1694,149 @@ def main():
     run_timestamp = datetime.now(timezone.utc)
     is_unfiltered_run = not args.plugin_id and not args.category and not args.framework
 
+    # [v0.10.0] The run is 'running' until everything below is recorded, then
+    # 'complete'; an interrupted or failed run is marked 'aborted' and never
+    # pushed. Filtered runs write no findings history and are never pushed.
     with conn.cursor() as cur:
         cur.execute("""
-            INSERT INTO control_evidence_run (client_id, sync_run_id)
-            VALUES (%s, %s) RETURNING evidence_run_id;
-        """, (client_id, run_id))
+            INSERT INTO control_evidence_run (client_id, sync_run_id, status, is_filtered, push_status)
+            VALUES (%s, %s, 'running', %s, %s) RETURNING evidence_run_id;
+        """, (client_id, run_id, not is_unfiltered_run,
+              "pending" if is_unfiltered_run else "skipped"))
         evidence_run_id = cur.fetchone()[0]
+        cur.execute("UPDATE control_evidence_run SET run_uuid = %s WHERE evidence_run_id = %s;",
+                    (str(adaudit_push.run_uuid_for(client_id, evidence_run_id)), evidence_run_id))
     conn.commit()
+    run_finished = False
+    try:
 
-    # [v0.9.2] Worked out before the plugins run (it depends only on which
-    # data was collected), so a plugin that cannot assess anything this run
-    # leaves its open findings open instead of closing them as remediated.
-    not_assessed_ids = compute_not_assessed_ids(conn, client_id, finding_plugins)
-    not_assessed_kept = 0
+        # [v0.9.2] Worked out before the plugins run (it depends only on which
+        # data was collected), so a plugin that cannot assess anything this run
+        # leaves its open findings open instead of closing them as remediated.
+        not_assessed_ids = compute_not_assessed_ids(conn, client_id, finding_plugins)
+        not_assessed_kept = 0
+        plugin_errors = {}
 
-    plugin_summaries = []
-    all_findings = []
-    executed_control_test_ids = set()
-    for plugin in finding_plugins:
-        with conn.cursor() as cur:
-            control_test_id = sync_plugin_registry(cur, plugin)
-        conn.commit()
-        executed_control_test_ids.add(control_test_id)
-
-        rows = run_plugin_query(conn, plugin, client_id, run_id)
-        if rows is None:
-            plugin_summaries.append({"plugin_id": plugin["plugin_id"], "category": plugin["category"],
-                                      "name": plugin["name"], "version": plugin["version"], "rollup": "error",
-                                      "framework_tags": plugin["framework_tags"]})
-            conn.rollback()
-            continue
-
-        # [fix, following a real production crash] This call used to have
-        # no failure isolation at all -- a bug in any single plugin's
-        # query RESULTS (not the query itself, which run_plugin_query
-        # above already isolates) could raise all the way out of
-        # sync_evidence, through this loop, out of main(), and crash the
-        # entire adaudit run before any of the other 155 plugins got a
-        # chance to run. Confirmed happening in practice: a plugin
-        # returning multiple result rows that shared the same
-        # object_guid collided on identity_guid and hit
-        # idx_cef_one_open_version's uniqueness constraint. Wrapped in
-        # the same SAVEPOINT pattern run_plugin_query already uses
-        # above, for the same reason -- one broken plugin's evidence
-        # write can't be allowed to poison the whole run.
-        if not rows and plugin["plugin_id"] in not_assessed_ids:
-            # [v0.9.2] Zero rows because the plugin's source data is missing
-            # (e.g. an optional Graph permission or licence lapsed), not because
-            # anything was fixed: record nothing, close nothing.
+        plugin_summaries = []
+        all_findings = []
+        executed_control_test_ids = set()
+        for plugin in finding_plugins:
             with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT count(*) FROM control_evidence_fact WHERE control_test_id = %s "
-                    "AND client_id = %s AND valid_to IS NULL;", (control_test_id, client_id))
-                not_assessed_kept += cur.fetchone()[0]
+                control_test_id = sync_plugin_registry(cur, plugin)
+            conn.commit()
+            executed_control_test_ids.add(control_test_id)
+
+            rows = run_plugin_query(conn, plugin, client_id, run_id, errors=plugin_errors)
+            if rows is None:
+                plugin_summaries.append({"plugin_id": plugin["plugin_id"], "category": plugin["category"],
+                                          "name": plugin["name"], "version": plugin["version"], "rollup": "error",
+                                          "framework_tags": plugin["framework_tags"], "finding_count": 0})
+                conn.rollback()
+                continue
+
+            # [fix, following a real production crash] This call used to have
+            # no failure isolation at all -- a bug in any single plugin's
+            # query RESULTS (not the query itself, which run_plugin_query
+            # above already isolates) could raise all the way out of
+            # sync_evidence, through this loop, out of main(), and crash the
+            # entire adaudit run before any of the other 155 plugins got a
+            # chance to run. Confirmed happening in practice: a plugin
+            # returning multiple result rows that shared the same
+            # object_guid collided on identity_guid and hit
+            # idx_cef_one_open_version's uniqueness constraint. Wrapped in
+            # the same SAVEPOINT pattern run_plugin_query already uses
+            # above, for the same reason -- one broken plugin's evidence
+            # write can't be allowed to poison the whole run.
+            if not rows and plugin["plugin_id"] in not_assessed_ids:
+                # [v0.9.2] Zero rows because the plugin's source data is missing
+                # (e.g. an optional Graph permission or licence lapsed), not because
+                # anything was fixed: record nothing, close nothing.
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT count(*) FROM control_evidence_fact WHERE control_test_id = %s "
+                        "AND client_id = %s AND valid_to IS NULL;", (control_test_id, client_id))
+                    not_assessed_kept += cur.fetchone()[0]
+                conn.commit()
+                plugin_summaries.append({"plugin_id": plugin["plugin_id"], "category": plugin["category"],
+                                          "name": plugin["name"], "version": plugin["version"],
+                                          "rollup": "pass", "framework_tags": plugin["framework_tags"],
+                                          "finding_count": 0})
+                continue
+
+            savepoint = f"evidence_{plugin['plugin_id']}"
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(f"SAVEPOINT {savepoint};")
+                try:
+                    findings = sync_evidence(
+                        cur, evidence_run_id, control_test_id, client_id, rows, plugin, run_timestamp,
+                        persist=is_unfiltered_run,
+                    )
+                except Exception as exc:
+                    cur.execute(f"ROLLBACK TO SAVEPOINT {savepoint};")
+                    log(f"  [ERROR] plugin {plugin['plugin_id']} ({plugin['name']}) "
+                        f"failed while recording evidence: {exc}")
+                    plugin_errors[plugin["plugin_id"]] = f"evidence write failed: {exc}".strip()[:2000]
+                    plugin_summaries.append({"plugin_id": plugin["plugin_id"], "category": plugin["category"],
+                                              "name": plugin["name"], "version": plugin["version"], "rollup": "error",
+                                              "framework_tags": plugin["framework_tags"], "finding_count": 0})
+                    conn.commit()
+                    continue
+                cur.execute(f"RELEASE SAVEPOINT {savepoint};")
             conn.commit()
             plugin_summaries.append({"plugin_id": plugin["plugin_id"], "category": plugin["category"],
                                       "name": plugin["name"], "version": plugin["version"],
-                                      "rollup": "pass", "framework_tags": plugin["framework_tags"]})
-            continue
+                                      "rollup": rollup_status(rows),
+                                      "framework_tags": plugin["framework_tags"],
+                                      "finding_count": len(rows)})
+            all_findings.extend(findings)
 
-        savepoint = f"evidence_{plugin['plugin_id']}"
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(f"SAVEPOINT {savepoint};")
-            try:
-                findings = sync_evidence(
-                    cur, evidence_run_id, control_test_id, client_id, rows, plugin, run_timestamp,
+        if not_assessed_kept:
+            log(f"{not_assessed_kept} open finding(s) of plugins whose source data was not "
+                f"collected this run were left open (not assessed, not marked remediated).")
+
+        # [v0.10.0] A filtered run writes no findings history, so it closes nothing.
+        if retired_plugins and is_unfiltered_run:
+            with conn.cursor() as cur:
+                retired_results = close_retired_plugin_evidence(
+                    cur, evidence_run_id, client_id, retired_plugins, run_timestamp,
                 )
-            except Exception as exc:
-                cur.execute(f"ROLLBACK TO SAVEPOINT {savepoint};")
-                log(f"  [ERROR] plugin {plugin['plugin_id']} ({plugin['name']}) "
-                    f"failed while recording evidence: {exc}")
-                plugin_summaries.append({"plugin_id": plugin["plugin_id"], "category": plugin["category"],
-                                          "name": plugin["name"], "version": plugin["version"], "rollup": "error",
-                                          "framework_tags": plugin["framework_tags"]})
-                conn.commit()
-                continue
-            cur.execute(f"RELEASE SAVEPOINT {savepoint};")
-        conn.commit()
-        plugin_summaries.append({"plugin_id": plugin["plugin_id"], "category": plugin["category"],
-                                  "name": plugin["name"], "version": plugin["version"],
-                                  "rollup": rollup_status(rows),
-                                  "framework_tags": plugin["framework_tags"]})
-        all_findings.extend(findings)
+            conn.commit()
+            for plugin, closed in retired_results:
+                if closed:
+                    log(f"Plugin {plugin['plugin_id']} ({plugin['name']}) is retired, superseded by "
+                        f"plugin {plugin['superseded_by']}: closed {closed} open finding(s) as 'retired'.")
 
-    if not_assessed_kept:
-        log(f"{not_assessed_kept} open finding(s) of plugins whose source data was not "
-            f"collected this run were left open (not assessed, not marked remediated).")
+        load_failed_plugin_ids = {f["plugin_id"] for f in load_failures if f["plugin_id"] is not None}
+        if is_unfiltered_run and any(f["plugin_id"] is None for f in load_failures):
+            # A broken file we can't attribute to a plugin_id could be any
+            # plugin's -- closing anything as remediated would be a guess.
+            log("[WARN] A plugin file with no identifiable plugin_id failed to load -- skipping "
+                "the stale-plugin safety net this run so none of its findings are wrongly "
+                "marked remediated.")
+        elif is_unfiltered_run:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                closed, stale_plugin_count = close_stale_plugin_evidence(
+                    cur, evidence_run_id, client_id, executed_control_test_ids, run_timestamp,
+                    load_failed_plugin_ids,
+                )
+            conn.commit()
+            if stale_plugin_count:
+                log(f"Closed {closed} finding(s) from {stale_plugin_count} plugin(s) no longer present "
+                    f"in plugins/ as remediated.")
+        else:
+            log("Filtered run (--plugin-id/--category/--framework) -- skipping the stale-plugin safety net, "
+                "since plugins not selected this run were deliberately skipped, not removed.")
 
-    if retired_plugins:
+        record_run_roster(conn, evidence_run_id, plugin_summaries, not_assessed_ids,
+                          plugin_errors, load_failures)
         with conn.cursor() as cur:
-            retired_results = close_retired_plugin_evidence(
-                cur, evidence_run_id, client_id, retired_plugins, run_timestamp,
-            )
+            cur.execute("UPDATE control_evidence_run SET status = 'complete', completed_at = now() "
+                        "WHERE evidence_run_id = %s;", (evidence_run_id,))
         conn.commit()
-        for plugin, closed in retired_results:
-            if closed:
-                log(f"Plugin {plugin['plugin_id']} ({plugin['name']}) is retired, superseded by "
-                    f"plugin {plugin['superseded_by']}: closed {closed} open finding(s) as 'retired'.")
-
-    load_failed_plugin_ids = {f["plugin_id"] for f in load_failures if f["plugin_id"] is not None}
-    if is_unfiltered_run and any(f["plugin_id"] is None for f in load_failures):
-        # A broken file we can't attribute to a plugin_id could be any
-        # plugin's -- closing anything as remediated would be a guess.
-        log("[WARN] A plugin file with no identifiable plugin_id failed to load -- skipping "
-            "the stale-plugin safety net this run so none of its findings are wrongly "
-            "marked remediated.")
-    elif is_unfiltered_run:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            closed, stale_plugin_count = close_stale_plugin_evidence(
-                cur, evidence_run_id, client_id, executed_control_test_ids, run_timestamp,
-                load_failed_plugin_ids,
-            )
-        conn.commit()
-        if stale_plugin_count:
-            log(f"Closed {closed} finding(s) from {stale_plugin_count} plugin(s) no longer present "
-                f"in plugins/ as remediated.")
-    else:
-        log("Filtered run (--plugin-id/--category/--framework) -- skipping the stale-plugin safety net, "
-            "since plugins not selected this run were deliberately skipped, not removed.")
+        run_finished = True
+    finally:
+        if not run_finished:
+            mark_run_aborted(conn, evidence_run_id)
 
     compliance = build_compliance(plugin_summaries, all_findings,
                                   not_assessed_plugin_ids=not_assessed_ids)
@@ -1602,6 +1868,12 @@ def main():
                            compliance)
         log(f"Wrote Excel findings report to {excel_filename}")
 
+    push_ok = True
+    if push_cfg is not None:
+        all_inventory = [p for p in all_plugins if p["plugin_type"] == "inventory"]
+        reuse = (inventory_results if len(inventory_plugins) == len(all_inventory) else None)
+        push_ok = run_push(conn, client_id, run_id, push_cfg, all_plugins, reuse, None)
+
     # Repeated at the very end so it's the last thing on screen, not
     # buried above the full report.
     log_load_failures(load_failures)
@@ -1617,6 +1889,11 @@ def main():
         for plugin in failed_inventory:
             log(f"    - inventory plugin {plugin['plugin_id']} ({plugin['name']}): query failed")
         return EXIT_INCOMPLETE
+
+    if not push_ok:
+        log(f"[ERROR] The push did not complete (exit status {EXIT_PUSH_FAILED}); this run's "
+            f"results are recorded locally and will be pushed next time.")
+        return EXIT_PUSH_FAILED
 
     if args.fail_on:
         threshold = STATUS_ORDER[args.fail_on]

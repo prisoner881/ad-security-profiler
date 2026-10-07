@@ -9,6 +9,11 @@ the script's own docstring now keeps a one-line summary per entry, this
 file keeps the complete detail (root causes, what was verified, why a
 decision was made a particular way) for anyone who wants it.
 
+    0.7.4 - Requires schema v43 (schema_migration_v43.sql). No collection
+            change: v43 only adds adaudit.py's run lifecycle, plugin roster
+            and push state (adaudit.py 0.10.0, adaudit_push.py), but
+            adprofiler.py checks for an exact schema version.
+
     0.7.3 - Requires schema v42 (schema_migration_v42.sql). No collection
             change: v42 only adds Entra ID tables (entra_graph_collector.py
             0.8.0, adaudit.py 0.9.2), but adprofiler.py checks for an exact
