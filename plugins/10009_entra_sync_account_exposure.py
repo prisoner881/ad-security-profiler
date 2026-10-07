@@ -64,13 +64,21 @@ needs no replication rights. The parenthesis now follows the evidence:
 confirmed, otherwise "Entra Connect account; no directory replication rights
 found on the domain root". Selection and severity are unchanged (an
 unconfirmed account stays medium).
+
+[v1.4] "by design" now also needs the connector to be in use: enabled and
+logged on within 30 days of the collection, the same test plugin 5001
+uses. A connector holding replication rights that is disabled or has not
+logged on for 30 days (typically left behind by an earlier Entra Connect
+installation) is described as "Tier 0, holds directory replication rights;
+connector not in use -- see plugin 5001", since nothing needs those rights
+any more. detail adds connector_in_use. Severity is unchanged.
 """
 
 PLUGIN = {
     "plugin_id": 10009,
     "category": "Hybrid Identity",
     "name": "Entra Connect Directory Synchronization Account Exposure",
-    "version": "1.3",
+    "version": "1.4",
     "revision_date": "2026-10-07",
     "remediation": (
         "Treat this account as Tier 0 and the Entra Connect server as "
@@ -162,9 +170,17 @@ PLUGIN = {
             WHERE pp.client_id = %(client_id)s
               AND pp.privilege_source IN ('dcsync', 'dcsync_via_group')
         ),
+        collection AS (
+            SELECT COALESCE(sr.completed_at, now()) AS collected_at
+            FROM sync_run sr WHERE sr.run_id = %(run_id)s
+        ),
         sync_accounts AS (
             SELECT u.*, do2.dn_current, do2.object_sid,
-                   (dh.object_guid IS NOT NULL) AS has_dcsync
+                   (dh.object_guid IS NOT NULL) AS has_dcsync,
+                   -- [v1.4] same "in use" test as plugin 5001
+                   COALESCE(u.is_enabled IS TRUE
+                            AND u.last_logon_timestamp >= (SELECT collected_at FROM collection)
+                                                          - interval '30 days', false) AS in_use
             FROM ad_user u
             JOIN directory_object do2
                 ON do2.object_guid = u.object_guid AND do2.client_id = u.client_id
@@ -203,8 +219,11 @@ PLUGIN = {
                 ELSE 'medium'
             END AS fd_severity,
             'Directory synchronization account "' || COALESCE(sa.sam_account_name, sa.object_guid::text)
-                || CASE WHEN sa.has_dcsync
+                || CASE WHEN sa.has_dcsync AND sa.in_use
                         THEN '" (Tier 0, holds directory replication rights by design) '
+                        WHEN sa.has_dcsync
+                        THEN '" (Tier 0, holds directory replication rights; connector not in use '
+                             '-- see plugin 5001) '
                         ELSE '" (Entra Connect account; no directory replication rights '
                              'found on the domain root) '
                    END
@@ -227,6 +246,7 @@ PLUGIN = {
                 'description', sa.description,
                 'is_enabled', sa.is_enabled,
                 'replication_rights_confirmed_on_domain_root', sa.has_dcsync,
+                'connector_in_use', sa.in_use,
                 'has_service_principal_names',
                     COALESCE(array_length(sa.service_principal_names, 1), 0) > 0,
                 'service_principal_names', sa.service_principal_names,

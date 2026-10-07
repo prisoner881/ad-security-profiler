@@ -22,14 +22,21 @@ Severity: one row per enabled method (identity md5 of plugin, client and
 method id). High (fail) when the method targets all users (an includeTargets
 element with id 'all_users'); medium (warn) when it targets selected groups
 only. Disabled methods are not reported.
+
+[v1.1] An enabled method with no include targets at all (none configured,
+or none returned by Graph) used to be reported as "enabled for selected
+groups". It is now low (warn) and says that no target groups were found,
+so the scope could not be determined; for Email OTP the detail adds
+allowExternalIdToUseEmailOtp, since an Email OTP configuration without
+targets is normally there for B2B guests' one-time-passcode sign-in.
 """
 
 PLUGIN = {
     "plugin_id": 10030,
     "category": "Hybrid Identity",
     "name": "Weak Authentication Methods Enabled (SMS, Voice Call, Email OTP)",
-    "version": "1.0",
-    "revision_date": "2026-10-05",
+    "version": "1.1",
+    "revision_date": "2026-10-07",
     "control_id": "HYBRID-10030",
     "requires_sources": ["auth_methods_policy"],
     "framework_tags": [
@@ -61,7 +68,7 @@ PLUGIN = {
         "are intercepted by SIM swapping and relayed by adversary-in-the-middle "
         "phishing. CISA SCuBA MS.AAD.3.5 says they SHALL be disabled. One finding per "
         "enabled method: high when it targets all users, medium when it targets "
-        "selected groups. The detail lists the include/exclude targets and whether SMS "
+        "selected groups, low when no target groups were found. The detail lists the include/exclude targets and whether SMS "
         "is usable as a primary sign-in factor."
     ),
     "remediation": (
@@ -92,7 +99,8 @@ PLUGIN = {
                    CASE WHEN jsonb_typeof(m->'includeTargets') = 'array'
                         THEN m->'includeTargets' ELSE '[]'::jsonb END AS include_targets,
                    CASE WHEN jsonb_typeof(m->'excludeTargets') = 'array'
-                        THEN m->'excludeTargets' ELSE '[]'::jsonb END AS exclude_targets
+                        THEN m->'excludeTargets' ELSE '[]'::jsonb END AS exclude_targets,
+                   m->'allowExternalIdToUseEmailOtp' AS external_id_email_otp
               FROM pol
              CROSS JOIN LATERAL jsonb_array_elements(
                    CASE WHEN jsonb_typeof(pol.content->'authenticationMethodConfigurations') = 'array'
@@ -106,6 +114,7 @@ PLUGIN = {
                             WHERE t->>'id' = 'all_users') AS all_users,
                    EXISTS (SELECT 1 FROM jsonb_array_elements(m.include_targets) t
                             WHERE t->'isUsableForSignIn' = 'true'::jsonb) AS usable_for_sign_in,
+                   jsonb_array_length(m.include_targets) = 0 AS no_targets,
                    CASE m.method_id WHEN 'Sms' THEN 'SMS' WHEN 'Voice' THEN 'Voice call'
                                     ELSE 'Email OTP' END AS method_label
               FROM method m
@@ -117,9 +126,11 @@ PLUGIN = {
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
-            CASE WHEN s.all_users THEN 'high' ELSE 'medium' END AS fd_severity,
-            'Weak authentication method ' || s.method_label || ' is enabled for '
-                || CASE WHEN s.all_users THEN 'all users' ELSE 'selected groups' END
+            CASE WHEN s.all_users THEN 'high' WHEN s.no_targets THEN 'low' ELSE 'medium' END AS fd_severity,
+            'Weak authentication method ' || s.method_label || ' is enabled '
+                || CASE WHEN s.all_users THEN 'for all users'
+                        WHEN s.no_targets THEN 'with no target groups found (scope could not be determined)'
+                        ELSE 'for selected groups' END
                 || CASE WHEN s.usable_for_sign_in THEN ' (also usable as a primary sign-in factor)'
                         ELSE '' END AS summary,
             jsonb_build_object(
@@ -129,6 +140,8 @@ PLUGIN = {
                 'usable_for_sign_in', s.usable_for_sign_in,
                 'include_targets', s.include_targets,
                 'exclude_targets', s.exclude_targets,
+                'no_include_targets', s.no_targets,
+                'allow_external_id_to_use_email_otp', s.external_id_email_otp,
                 'scuba_policy', 'MS.AAD.3.5'
             ) AS detail
         FROM scored s

@@ -2,9 +2,14 @@
 """
 entra_graph_collector.py -- Microsoft Entra ID / Graph API Email Collector
 
-VERSION: 0.8.0
+VERSION: 0.8.1
 
 CHANGELOG:
+    0.8.1 - Run Summary: a source name too long for the label column
+            (admin_consent_request_policy, custom_role_assignments,
+            device_registration_policy) ran into its status with no space
+            ("...policy:ok"); the column now widens for it. Output only.
+
     0.8.0 - Requires schema v42. Collects much more of the tenant, each
             new data source optional: a 400/403/404 (permission not
             granted, licence missing, beta endpoint unavailable) no longer
@@ -236,7 +241,7 @@ PG_DBNAME = "adprofiler"
 PG_USER = None
 PG_PASSWORD = None
 
-VERSION = "0.8.0"
+VERSION = "0.8.1"
 
 # [v0.5.0] Retry policy shared by every Graph/token request (see
 # _send_with_retry()). 429 and transient 5xx responses, plus network
@@ -3433,7 +3438,9 @@ def main():
         for source in OPTIONAL_SOURCES:
             status = source_statuses.get(source, "not run")
             colour = _C.GREEN if status == "ok" else _C.YELLOW
-            print(f"  {_C.WHITE}{('Source ' + source + ':'):<31}{_C.RESET}{colour}{status}{_C.RESET}")
+            label = f"Source {source}:"
+            # [v0.8.1] at least one space after a label longer than the column
+            print(f"  {_C.WHITE}{label:<{max(31, len(label) + 1)}}{_C.RESET}{colour}{status}{_C.RESET}")
         updated = sum(1 for r in history_results.values() if not isinstance(r, str))
         print(f"  {_C.WHITE}Change history:{_C.RESET}                {updated} of "
               f"{len(history_results)} entity type(s) updated")

@@ -27,6 +27,14 @@ issue listed in detail):
   consent only for apps from verified publishers / registered in this
   tenant, for permissions classified low-risk -- the "more flexible" option
   SCuBA accepts) -> low 'warn' so the setting stays visible.
+- [v1.1] 'ManagePermissionGrantsForSelf.microsoft-user-default-recommended'
+  ("Let Microsoft manage your consent settings": users may consent to
+  what Microsoft's current recommendation allows, low-risk permissions)
+  -> low 'warn'.
+- [v1.1] any other Microsoft built-in policy
+  ('ManagePermissionGrantsForSelf.microsoft-*', conditions not collected)
+  -> low 'warn', named as a Microsoft built-in policy. v1.0 called these
+  "custom".
 - any other 'ManagePermissionGrantsForSelf.*' entry (a custom consent
   policy whose conditions are not collected) -> low 'warn', review.
 'ManagePermissionGrantsForOwnedResource.*' entries (group/team owner
@@ -47,8 +55,8 @@ PLUGIN = {
     "plugin_id": 10016,
     "category": "Hybrid Identity",
     "name": "Users Can Register Applications or Consent to Apps",
-    "version": "1.0",
-    "revision_date": "2026-10-04",
+    "version": "1.1",
+    "revision_date": "2026-10-07",
     "control_id": "HYBRID-10016",
     "framework_tags": [
         "CISA-SCUBA-MS.AAD.5.1",
@@ -79,7 +87,8 @@ PLUGIN = {
         "that give an attacker's app lasting access to mail and files "
         "regardless of password resets and MFA (SCuBA MS.AAD.5.1/5.2). "
         "Consent limited to verified publishers and low-risk "
-        "permissions, or a custom consent policy, is a low warning. One "
+        "permissions, Microsoft's managed (recommended) consent policy, or "
+        "another built-in or custom consent policy, is a low warning. One "
         "tenant-level finding listing every issue; silent when the "
         "authorization policy could not be read."
     ),
@@ -126,6 +135,10 @@ PLUGIN = {
                         THEN 'users can consent to any application (legacy user consent policy)'
                         WHEN g.g = 'ManagePermissionGrantsForSelf.microsoft-user-default-low'
                         THEN 'users can consent to verified-publisher apps for low-risk permissions'
+                        WHEN g.g = 'ManagePermissionGrantsForSelf.microsoft-user-default-recommended'
+                        THEN 'users can consent under the Microsoft-managed (recommended) user consent policy'
+                        WHEN g.g LIKE 'ManagePermissionGrantsForSelf.microsoft-%%'
+                        THEN 'Microsoft built-in user consent policy assigned (' || substr(g.g, 31) || ')'
                         ELSE 'custom user consent policy assigned (' || substr(g.g, 31) || ')' END
               FROM grants g
         ),

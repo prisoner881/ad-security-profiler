@@ -19,9 +19,12 @@ Condition:
 - user consent is blocked: the authorization policy
   (entra_security_posture.authorization_policy, as plugin 10016 reads it)
   is readable and defaultUserRolePermissions.permissionGrantPoliciesAssigned
-  is an array containing neither
-  'ManagePermissionGrantsForSelf.microsoft-user-default-legacy' nor
-  'ManagePermissionGrantsForSelf.microsoft-user-default-low'.
+  is an array containing no Microsoft built-in user consent policy
+  ('ManagePermissionGrantsForSelf.microsoft-*': default-legacy,
+  default-low, and [v1.1] default-recommended and any newer built-in).
+  v1.0 checked only legacy and low, so a tenant on Microsoft's managed
+  (recommended) consent setting was wrongly reported as blocking user
+  consent while 10016 reported it as allowing it.
 When user consent is allowed, plugin 10016 reports that instead and this
 plugin is silent. A custom ManagePermissionGrantsForSelf policy is treated
 as "blocked" here (it usually covers only specific apps); the policy name
@@ -35,8 +38,8 @@ PLUGIN = {
     "plugin_id": 10069,
     "category": "Hybrid Identity",
     "name": "Admin Consent Workflow Disabled While User Consent Is Blocked",
-    "version": "1.0",
-    "revision_date": "2026-10-05",
+    "version": "1.1",
+    "revision_date": "2026-10-07",
     "control_id": "HYBRID-10069",
     "requires_sources": ["admin_consent_request_policy"],
     "framework_tags": [
@@ -115,7 +118,7 @@ PLUGIN = {
             ) AS detail
         FROM acr a
         JOIN consent c ON c.client_id = a.client_id
-        WHERE NOT (c.pgpa ? 'ManagePermissionGrantsForSelf.microsoft-user-default-legacy')
-          AND NOT (c.pgpa ? 'ManagePermissionGrantsForSelf.microsoft-user-default-low')
+        WHERE NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text(c.pgpa) g
+                           WHERE g LIKE 'ManagePermissionGrantsForSelf.microsoft-%%')
     """,
 }

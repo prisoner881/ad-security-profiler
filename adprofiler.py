@@ -4,7 +4,7 @@
  adprofiler.py -- Active Directory Security & Compliance Profiler (Collector)
 ================================================================================
 
-VERSION: 0.7.5
+VERSION: 0.7.6
 
 PURPOSE:
     Connects to an on-premise Active Directory Domain Controller via LDAP,
@@ -185,7 +185,7 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
-VERSION = "0.7.5"
+VERSION = "0.7.6"
 # [client-test-branch] These are always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
 # connect_postgres() is ever called -- the values here are placeholders,
@@ -739,7 +739,15 @@ def parse_key_credential_link(values):
     key_id, device_id, usage, source, creation_time,
     approximate_last_logon, custom_flags. A value that can't be parsed
     is returned as {"parse_error": True} rather than dropped, so it still
-    counts as a key. The key material itself is not kept."""
+    counts as a key. The key material itself is not kept.
+
+    [v0.7.6] The two timestamps are FILETIMEs only for keys whose source is
+    AD. For source AzureAD (Windows Hello for Business keys written back
+    by Entra Connect) they are .NET DateTime.ToBinary() values: 100 ns
+    ticks since 0001-01-01 in the low 62 bits, the DateTime kind in the top
+    two (as DSInternals decodes them). Read as FILETIMEs they overflowed,
+    so every Entra-sourced key came back with no creation time and plugin
+    1022 rated it "possible Shadow Credentials"."""
     keys = []
     for value in values or []:
         if isinstance(value, bytes):
@@ -753,6 +761,7 @@ def parse_key_credential_link(values):
             if version != 0x200:
                 raise ValueError(f"unsupported version {version:#x}")
             info = {"parse_error": False}
+            raw_times = {}
             pos = 4
             while pos + 3 <= len(blob):
                 length, ident = struct.unpack_from("<HB", blob, pos)
@@ -769,13 +778,34 @@ def parse_key_credential_link(values):
                 elif ident == 0x07 and len(data) >= 2:
                     info["custom_flags"] = data[1]
                 elif ident in (0x08, 0x09) and len(data) == 8:
-                    ts = filetime_to_datetime(struct.unpack("<q", data)[0])
                     key = "approximate_last_logon" if ident == 0x08 else "creation_time"
-                    info[key] = ts.isoformat() if hasattr(ts, "isoformat") else ts
+                    raw_times[key] = struct.unpack("<q", data)[0]
+            # [v0.7.6] Entries are ordered by identifier, but decode the
+            # times only once the source (0x05) is known either way.
+            for key, raw in raw_times.items():
+                if info.get("source") == "AzureAD":
+                    ts = dotnet_binary_to_datetime(raw)
+                else:
+                    ts = filetime_to_datetime(raw)
+                info[key] = ts.isoformat() if hasattr(ts, "isoformat") else ts
         except (ValueError, struct.error) as exc:
             info = {"parse_error": True, "error": str(exc)}
         keys.append(info)
     return keys
+
+
+def dotnet_binary_to_datetime(value):
+    """[v0.7.6] Decodes a .NET DateTime.ToBinary() value: the low 62 bits
+    are 100 ns ticks since 0001-01-01 (UTC ticks for kind Local, the time
+    as written for kinds Utc / Unspecified -- treated as UTC). None when
+    zero or out of range."""
+    ticks = int(value) & 0x3FFFFFFFFFFFFFFF
+    if ticks <= 0:
+        return None
+    try:
+        return datetime(1, 1, 1, tzinfo=timezone.utc) + timedelta(microseconds=ticks // 10)
+    except OverflowError:
+        return None
 
 
 def sid_bytes_to_str(data):
