@@ -2,7 +2,7 @@
 """
 adaudit.py -- AD Security & Compliance Plugin Runner
 ======================================================
-VERSION: 0.10.1
+VERSION: 0.10.2
 
 Companion to adprofiler.py. Where adprofiler.py collects AD data,
 adaudit.py analyzes it: discovers every plugin file in plugins/, runs each
@@ -25,6 +25,15 @@ DESIGN:
       as: (status, object_guid, stig_severity, stig_reference,
       tool_severity, tool_reference, fd_severity, summary, detail).
       Zero rows returned = clean pass, nothing to report.
+    - [v0.10.2] Findings closed this run (change status remediated) are no
+      longer shown as open. The console printed them as "[FAIL] ...
+      [REMEDIATED]" under an "[ OK ]" plugin heading, and the workbook
+      wrote them with Status FAIL / WARN and a red / yellow fill, so a
+      Status = FAIL filter included closed findings. The console now marks
+      them "[ OK ] ... [REMEDIATED]" with their last evidence labelled as
+      such; the workbook gives them Status REMEDIATED, a green fill, and
+      lists them after the open findings of their plugin. Counts, the
+      compliance tabs and the push were already correct.
     - [v0.10.1] A plugin that could not assess anything because its source
       data was not collected (no Entra / SYSVOL data, or a required Entra
       source unreadable) is now shown as [N/A ] in the console and counted
@@ -214,7 +223,7 @@ import psycopg2.extras
 
 import adaudit_push
 
-VERSION = "0.10.1"
+VERSION = "0.10.2"
 
 # [test-candidate-branch] Always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
@@ -1088,7 +1097,10 @@ def print_report(plugin_summaries, all_findings):
                     sev_bits.append(f"stig:{f['stig_severity']}")
                 if f["tool_severity"]:
                     sev_bits.append(f"tool:{f['tool_severity']}")
-                status_marker = finding_marker.get(f["status"], f"[{f['status'].upper()}]")
+                # [v0.10.2] a finding closed this run is no longer open
+                remediated = f["change_status"] == "remediated"
+                status_marker = ("[ OK ]" if remediated else
+                                 finding_marker.get(f["status"], f"[{f['status'].upper()}]"))
                 ctag = change_tag.get(f["change_status"], "")
                 ctag_str = f" {ctag}" if ctag else ""
                 print(f"         {status_marker} #{f['plugin_id']} [v{f['plugin_version']}]"
@@ -1104,9 +1116,10 @@ def print_report(plugin_summaries, all_findings):
                 if f["status"] in finding_marker:
                     if f.get("detail"):
                         evidence_str = ", ".join(f"{k}={v}" for k, v in f["detail"].items())
-                        print(f"                Evidence: {evidence_str}")
+                        label = "Last evidence (before it was fixed)" if remediated else "Evidence"
+                        print(f"                {label}: {evidence_str}")
                     references = f.get("references") or []
-                    if references:
+                    if references and not remediated:
                         print("                References:")
                         for ref in references:
                             print(f"                  - {ref['title']} ({ref['url']})")
@@ -1272,7 +1285,9 @@ def write_excel_report(plugin_summaries, all_findings, inventory_results, filena
     print_report() itself already uses to skip evidence/references
     for a pass) -- the Summary tab is where full FAIL/WARN/PASS/ERROR
     counts live, so nothing is actually lost, just not repeated
-    per-category. Inventory tabs are the one exception: those get
+    per-category. [v0.10.2] Findings closed this run are listed after the
+    open ones of their plugin with Status REMEDIATED (green), not as
+    FAIL/WARN. Inventory tabs are the one exception: those get
     every row, unfiltered, since there's no status to filter by at all.
 
     [v0.8.0] Also a "Compliance Summary" tab right after Summary and one
@@ -1385,9 +1400,13 @@ def write_excel_report(plugin_summaries, all_findings, inventory_results, filena
                                   key=lambda p: (STATUS_ORDER.get(p["rollup"], -1), -p["plugin_id"]),
                                   reverse=True)
         for p in plugins_in_cat:
-            for f in findings_by_plugin.get(p["plugin_id"], []):
-                if f["status"] not in ("fail", "warn"):
-                    continue
+            # [v0.10.2] open findings first, then those closed this run
+            plugin_findings = sorted(
+                (f for f in findings_by_plugin.get(p["plugin_id"], [])
+                 if f["status"] in ("fail", "warn")),
+                key=lambda f: f["change_status"] == "remediated")
+            for f in plugin_findings:
+                remediated = f["change_status"] == "remediated"
                 sev_bits = [f"fd:{f['fd_severity']}"]
                 if f["stig_severity"]:
                     sev_bits.append(f"stig:{f['stig_severity']}")
@@ -1398,11 +1417,13 @@ def write_excel_report(plugin_summaries, all_findings, inventory_results, filena
                     f"{r['title']} ({r['url']})" for r in (f.get("references") or [])
                 )
                 ws.append([
-                    f["plugin_id"], p["name"], f["plugin_version"], f["status"].upper(),
+                    f["plugin_id"], p["name"], f["plugin_version"],
+                    "REMEDIATED" if remediated else f["status"].upper(),
                     "/".join(sev_bits), f["change_status"], f["summary"],
                     evidence_str, references_str,
                 ])
-                fill = fail_fill if f["status"] == "fail" else warn_fill
+                fill = (pass_fill if remediated else
+                        fail_fill if f["status"] == "fail" else warn_fill)
                 for col_idx in range(1, len(finding_headers) + 1):
                     ws.cell(row=ws.max_row, column=col_idx).fill = fill
 
