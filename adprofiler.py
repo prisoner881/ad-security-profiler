@@ -4,7 +4,7 @@
  adprofiler.py -- Active Directory Security & Compliance Profiler (Collector)
 ================================================================================
 
-VERSION: 0.7.6
+VERSION: 0.7.7
 
 PURPOSE:
     Connects to an on-premise Active Directory Domain Controller via LDAP,
@@ -185,7 +185,26 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
-VERSION = "0.7.6"
+VERSION = "0.7.7"
+
+# [v0.7.7] The oldest collector version whose stored derived fields
+# (parsed / typed columns computed from raw attributes) are current. A
+# fix to how those fields are derived only reaches objects whose raw AD
+# attributes change, because unchanged objects are not rewritten -- so
+# when the last succeeded run was made by an older collector, this run
+# rescans every object once, as --full-rescan does. Raise it to the new
+# VERSION whenever a release changes a derived field. 0.7.7 covers
+# 0.7.6's key credential timestamp fix (runs made by 0.7.6 itself did
+# not rewrite unchanged objects either).
+DERIVED_FIELDS_VERSION = "0.7.7"
+
+
+def _version_tuple(text):
+    """'0.7.6' -> (0, 7, 6); anything unparseable sorts as oldest."""
+    try:
+        return tuple(int(p) for p in str(text).split("."))
+    except (TypeError, ValueError):
+        return (0,)
 # [client-test-branch] These are always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
 # connect_postgres() is ever called -- the values here are placeholders,
@@ -5159,13 +5178,21 @@ def main():
 
         with pg_conn.cursor() as cur:
             cur.execute(
-                "SELECT high_watermark_usn FROM sync_run "
+                "SELECT high_watermark_usn, collector_version FROM sync_run "
                 "WHERE client_id = %s AND status = 'succeeded' "
                 "ORDER BY completed_at DESC LIMIT 1;",
                 (client_id,),
             )
             row = cur.fetchone()
         prior_watermark = row[0] if row else None
+        # [v0.7.7] One automatic full rescan after an upgrade that changed
+        # how derived fields are computed (see DERIVED_FIELDS_VERSION).
+        if (row and not stats.full_rescan
+                and _version_tuple(row[1]) < _version_tuple(DERIVED_FIELDS_VERSION)):
+            stats.full_rescan = True
+            log_warn(f"Last run was made by collector {row[1]}; derived fields changed in "
+                     f"{DERIVED_FIELDS_VERSION}, so this run rescans every object once "
+                     "(as --full-rescan) to rewrite them. Later runs are normal deltas.")
         run_type = "delta" if prior_watermark is not None else "baseline"
         log_info(f"Run type: {run_type}"
                  + (f" (prior watermark USN: {prior_watermark})" if prior_watermark else ""))
