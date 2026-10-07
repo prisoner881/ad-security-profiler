@@ -36,12 +36,30 @@ unconstrained delegation; ManageVolume gives raw disk access; logon
 rights on a DC expose Tier 0 credentials on that host. DISA STIG
 restricts each of these on domain controllers.
 
+Service identities: Windows adds IIS application-pool identities
+(S-1-5-82-*, IIS APPPOOL\<pool>), per-service SIDs (S-1-5-80-*,
+NT SERVICE\<service>) and IIS_IUSRS (S-1-5-32-568) to
+SeAssignPrimaryTokenPrivilege and SeImpersonatePrivilege when IIS (for
+example AD CS Web Enrollment) or such a service is installed on a DC; on
+a DC that local change lands in the Default Domain Controllers Policy.
+These entries are reported, but on their own they give a WARN at low
+severity ("IIS or a service with its own identity runs on a DC") rather
+than a FAIL: the exposure is the web server on a Tier 0 host, not a
+misgranted right. The same identities in any other right are treated as
+ordinary extra principals.
+
 Entries are '*SID' or, when secedit could not resolve it, a plain account
-name; names are resolved through well-known names and sAMAccountName,
-and a name that cannot be resolved is reported as written. Severity:
-critical when Everyone, Authenticated Users, Anonymous Logon, Users
-(S-1-5-32-545), Domain Users (-513) or Domain Computers (-515) of any
-domain holds one of these rights; high otherwise. One row per DC
+name; names are resolved through well-known names and sAMAccountName.
+Per principal the detail gives 'sid' (null when a plain name could not be
+mapped to one), 'resolved' (a name was found for it: a directory account,
+a well-known principal or a written-out name), and 'principal_class'
+(well_known, directory, iis_app_pool, service, unknown_sid -- a SID with
+no matching object, e.g. a deleted account -- or unresolved_name).
+Severity: critical when Everyone, Authenticated Users, Anonymous Logon,
+Users (S-1-5-32-545), Domain Users (-513) or Domain Computers (-515) of
+any domain holds one of these rights; high for any other non-default
+principal; low (WARN) when only service identities are present. One row
+per DC
 (object_guid = the DC). Rights not set by any applying GPO keep the DC's
 local defaults and are not reported. Batch/service logon rights are out
 of scope. Zero rows unless SYSVOL has been collected
@@ -52,8 +70,8 @@ PLUGIN = {
     "plugin_id": 9015,
     "category": "Organizational Units",
     "name": "Dangerous User Rights Granted on Domain Controllers",
-    "version": "1.0",
-    "revision_date": "2026-10-04",
+    "version": "1.1",
+    "revision_date": "2026-10-07",
     "control_id": "GPO-9015",
     "framework_tags": [
         "NIST-800-53-AC-3", "NIST-800-53-AC-6", "NIST-800-53-AC-6(1)",
@@ -82,17 +100,23 @@ PLUGIN = {
         "Desktop) to a principal beyond the Windows defaults for a DC, SYSTEM and Tier 0 "
         "administrators. Each of these rights leads to control of the domain. Critical "
         "when a broad group (Everyone, Authenticated Users, Domain Users, Domain "
-        "Computers, Users) holds one, high otherwise. One row per DC. Requires SYSVOL "
-        "collection (adprofiler.py --sysvol)."
+        "Computers, Users) holds one, high otherwise. IIS application-pool and service "
+        "identities that Windows adds to the token rights when IIS or such a service is "
+        "installed on a DC are listed but, on their own, give a low-severity warning that "
+        "a web server or service identity runs on a Tier 0 host. One row per DC. Requires "
+        "SYSVOL collection (adprofiler.py --sysvol)."
     ),
     "remediation": (
         "Edit the winning GPO named in the finding (normally Default Domain Controllers "
         "Policy): Computer Configuration > Policies > Windows Settings > Security "
         "Settings > Local Policies > User Rights Assignment, and remove the listed "
         "principals from each right so only the defaults remain. Unresolved names "
-        "(no SID) usually belong to deleted accounts or a typo -- remove them too. If an "
-        "application needs a right on a DC, move it off the DC or grant the right to a "
-        "dedicated Tier 0 service account (gMSA) only. Run gpupdate /force and verify "
+        "and SIDs with no matching account usually belong to deleted accounts or a typo "
+        "-- remove them too. If an application needs a right on a DC, move it off the DC "
+        "or grant the right to a dedicated Tier 0 service account (gMSA) only. For IIS "
+        "application-pool and service identities (warning only), the fix is to move IIS "
+        "-- typically AD CS Web Enrollment or another web role -- off the domain "
+        "controller; once the role is removed, remove the leftover entries from the GPO. Run gpupdate /force and verify "
         "with 'secedit /export /cfg c:\\temp\\sec.inf /areas USER_RIGHTS' on each DC."
     ),
     "base_severity": "high",
@@ -229,10 +253,29 @@ PLUGIN = {
                            AND o.object_sid::text = r.sid AND o.sam_account_name IS NOT NULL
                          ORDER BY o.object_guid LIMIT 1),
                        (SELECT wk.name FROM wk WHERE wk.sid = r.sid),
-                       CASE WHEN left(r.raw_entry, 1) = '*' THEN r.sid ELSE r.raw_entry END
+                       CASE WHEN left(r.raw_entry, 1) <> '*' THEN r.raw_entry
+                            WHEN r.sid ~ '^S-1-5-82-' THEN 'IIS application pool ' || r.sid
+                            WHEN r.sid ~ '^S-1-5-80-' THEN 'service ' || r.sid
+                            ELSE r.sid END
                    ) AS display_name,
                    (r.sid IN ('S-1-1-0', 'S-1-5-11', 'S-1-5-7', 'S-1-5-32-545')
-                    OR r.sid ~ '^S-1-5-21-[0-9-]+-(513|515)$') AS broad
+                    OR r.sid ~ '^S-1-5-21-[0-9-]+-(513|515)$') AS broad,
+                   CASE WHEN r.sid ~ '^S-1-5-82-' OR split_part(lower(r.raw_entry), chr(92), 1) = 'iis apppool'
+                        THEN 'iis_app_pool'
+                        WHEN r.sid ~ '^S-1-5-80-' OR split_part(lower(r.raw_entry), chr(92), 1) = 'nt service'
+                        THEN 'service'
+                        WHEN EXISTS (SELECT 1 FROM wk WHERE wk.sid = r.sid) THEN 'well_known'
+                        WHEN EXISTS (SELECT 1 FROM directory_object o
+                                      WHERE o.client_id = %(client_id)s AND NOT o.is_deleted
+                                        AND o.object_sid::text = r.sid)
+                        THEN 'directory'
+                        WHEN r.sid IS NOT NULL THEN 'unknown_sid'
+                        ELSE 'unresolved_name'
+                   END AS principal_class,
+                   COALESCE(r.right_lower IN ('seassignprimarytokenprivilege', 'seimpersonateprivilege')
+                            AND (r.sid ~ '^S-1-5-8[02]-' OR r.sid = 'S-1-5-32-568'
+                                 OR split_part(lower(r.raw_entry), chr(92), 1)
+                                    IN ('iis apppool', 'nt service')), false) AS service_only
             FROM resolved r
             WHERE r.sid IS NULL
                OR (NOT EXISTS (SELECT 1 FROM default_allowed da
@@ -242,10 +285,16 @@ PLUGIN = {
         per_right AS (
             SELECT x.dc_guid, x.right_name, x.winning_gpo_guid,
                    bool_or(COALESCE(x.broad, false)) AS broad,
+                   bool_or(NOT x.service_only) AS dangerous,
                    string_agg(x.display_name, ', ' ORDER BY lower(x.display_name), x.raw_entry) AS principals,
                    jsonb_agg(jsonb_build_object(
                        'entry', x.raw_entry, 'sid', x.sid, 'name', x.display_name,
-                       'resolved', x.sid IS NOT NULL, 'broad_principal', COALESCE(x.broad, false))
+                       'resolved', x.principal_class IN ('well_known', 'directory')
+                                   OR (x.principal_class IN ('iis_app_pool', 'service')
+                                       AND left(x.raw_entry, 1) <> '*'),
+                       'principal_class', x.principal_class,
+                       'service_identity', x.service_only,
+                       'broad_principal', COALESCE(x.broad, false))
                        ORDER BY lower(x.display_name), x.raw_entry) AS principal_list
             FROM extra x
             GROUP BY x.dc_guid, x.right_name, x.winning_gpo_guid
@@ -253,6 +302,7 @@ PLUGIN = {
         per_dc AS (
             SELECT pr.dc_guid,
                    bool_or(pr.broad) AS broad,
+                   bool_or(pr.dangerous) AS dangerous,
                    string_agg(pr.right_name || ': ' || pr.principals, '; ' ORDER BY pr.right_name) AS rights_text,
                    jsonb_agg(jsonb_build_object(
                        'right', pr.right_name,
@@ -267,21 +317,27 @@ PLUGIN = {
             GROUP BY pr.dc_guid
         )
         SELECT
-            'fail' AS status,
+            CASE WHEN p.dangerous THEN 'fail' ELSE 'warn' END AS status,
             p.dc_guid AS object_guid,
             NULL AS stig_severity,
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
-            CASE WHEN p.broad THEN 'critical' ELSE 'high' END AS fd_severity,
+            CASE WHEN p.broad THEN 'critical' WHEN p.dangerous THEN 'high' ELSE 'low' END AS fd_severity,
             'Domain controller ' || COALESCE(c.dns_hostname, d.sam_account_name, d.dn_current)
-                || ' is granted dangerous user rights beyond the defaults by Group Policy'
-                || CASE WHEN p.broad THEN ' (including a broad group)' ELSE '' END
+                || CASE WHEN p.dangerous
+                        THEN ' is granted dangerous user rights beyond the defaults by Group Policy'
+                             || CASE WHEN p.broad THEN ' (including a broad group)' ELSE '' END
+                        ELSE ' grants token rights to IIS application-pool or service identities '
+                             || 'by Group Policy (IIS or a service with its own identity is '
+                             || 'installed on the domain controller)'
+                   END
                 || ': ' || p.rights_text AS summary,
             jsonb_build_object(
                 'dc_dn', d.dn_current,
                 'dc_dns_hostname', c.dns_hostname,
                 'broad_principal_present', p.broad,
+                'service_identities_only', NOT p.dangerous,
                 'rights', p.rights,
                 'note', 'effective [Privilege Rights] value of the winning GPO; SYSTEM, Tier 0 principals and Windows DC defaults are not listed'
             ) AS detail
