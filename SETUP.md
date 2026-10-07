@@ -28,6 +28,7 @@ USB drive, secure file transfer, etc.):
 - `sysvol_collector.py` (used by `adprofiler.py --sysvol`)
 - `entra_graph_collector.py`
 - `adaudit.py`
+- `adaudit_push.py` (used by `adaudit.py --push`)
 - `requirements.txt`
 - `schema_init.sql`
 - Every `schema_migration_vNN.sql` file (only needed to upgrade an
@@ -42,6 +43,7 @@ adprofiler/
     sysvol_collector.py
     entra_graph_collector.py
     adaudit.py
+    adaudit_push.py
     requirements.txt
     schema_init.sql
     plugins/
@@ -321,6 +323,47 @@ to load or errored (the end of the output lists which -- the rest of
 the results are still valid); `1` means a fatal error such as no
 database connection. Add `--fail-on fail` (or `--fail-on warn`) to
 also get exit status `4` when there are open findings at that level.
+
+**Optional -- push the results to FortifyData:**
+
+`adaudit.py` can send each run to the FortifyData platform instead of
+(or as well as) handing over the workbook. Add `--push`:
+
+```
+export FD_API_URL=us                 # or eu, test, or a full https:// URL
+export FD_COMPANY_ID=<company id from FortifyData>
+python3 adaudit.py --pg-host <host> --pg-user <user> --pg-dbname <db> \
+  --push --api-key-file ~/adprofiler/fd_api_key.txt
+```
+
+- **Credentials are given at run time**, never stored in the database:
+  `--api-url` / `--api-company-id` / `--api-key`, or the environment
+  variables `FD_API_URL` / `FD_COMPANY_ID` / `FD_API_KEY`, or for the key
+  a file (`--api-key-file`, first line; `chmod 600` it). With none of
+  those, an interactive run prompts for the key. `--api-key` on the
+  command line works but is visible in shell history and process
+  listings.
+- **What is sent:** the run's findings (with their evidence), the
+  result of every check, the newest run's user / computer / group /
+  subnet inventory, and the list of checks. No passwords or other
+  secrets are ever collected, so none can be sent.
+- **The first push from a new installation is refused** until
+  FortifyData approves it. That is expected: `adaudit.py` says so,
+  exits normally, and keeps the runs queued; the next push after
+  approval sends them all.
+- **Nothing is lost when the network is down.** Every complete run is
+  queued in the database and pushed, oldest first, by the next
+  `--push` (or `--push-only`, which pushes without evaluating -- useful
+  in a daily job after a failed collection). Exit status `5` means the
+  push did not finish; the results are still recorded locally.
+- `--push-dry-run <dir>` writes exactly what would be sent to `<dir>`
+  as JSON files and sends nothing (no credentials needed) -- a good way
+  to review what leaves the network.
+- Runs limited with `--plugin-id`, `--category` or `--framework` are
+  diagnostic: they are never pushed and no longer change the findings
+  history.
+- If the platform keeps rejecting one run, `--push-skip <run id>` (the
+  id is in the error message) lets the later runs go.
 
 ## 8. Reviewing results together
 
