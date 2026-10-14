@@ -53,6 +53,24 @@ WHAT LEAVES THE NETWORK
     detail larger than DETAIL_MAX_BYTES is trimmed (largest lists first) and
     marked "_truncated"; the full evidence stays in the local database.
 
+REFUSALS
+    The API answers every refusal with {"reason": ...}. DOMAIN_PENDING (a new
+    installation awaiting approval) keeps the runs queued and exits normally;
+    KEY_NOT_SCOPED, DOMAIN_DISABLED, DOMAIN_NOT_RESOLVED, RUN_NOT_FOUND,
+    RUN_NOT_RECEIVING and INVALID_PAYLOAD stop the push with a message saying
+    what to fix (the runs stay queued); RUN_ALREADY_COMPLETE means an earlier
+    attempt finished the run and only the reply was lost, so it is marked
+    pushed; COUNT_MISMATCH closes the run PARTIAL and it is re-sent. A 403
+    with no reason (an older API) is read as waiting for approval.
+
+BATCHES
+    At most 2,000 findings or 5,000 inventory rows per request, and at most
+    BATCH_MAX_BYTES of JSON: the API refuses a body that inflates past 64 MB.
+    Findings with over-long text fields are shortened (FINDING_FIELD_LIMITS),
+    with a warning, rather than rejected. Inventory is sent only when all four
+    object types are present, because the API removes every stored object of a
+    type a run with any inventory did not send.
+
 DRY RUN
     With a dry-run directory, every request body is written there as JSON
     (numbered, uncompressed) and nothing is sent or recorded: push state is
@@ -87,6 +105,18 @@ INVENTORY_ROWS_PER_BATCH = 5000
 # The API rejects a finding whose serialized detail reaches 65536 bytes;
 # stay clear of the limit.
 DETAIL_MAX_BYTES = 60000
+# The API answers 413 to a request body that inflates past 64 MB, however few
+# items it holds (a finding may carry 60 KB of detail, an inventory group row
+# a very long member list). A batch is closed early once its JSON reaches
+# this size, leaving a wide margin; a single item larger than this still goes
+# alone in a batch of its own.
+BATCH_MAX_BYTES = 16 * 1024 * 1024
+# String limits the API enforces on a finding (database column widths); a
+# longer value is a per-item rejection. Over-long text is shortened here so
+# the finding is still delivered. Identifiers are never shortened.
+FINDING_FIELD_LIMITS = {"plugin_version": 16, "stig_severity": 16, "tool_severity": 16,
+                        "category": 64, "control_id": 64, "name": 255,
+                        "stig_reference": 512, "tool_reference": 512}
 # The API keeps 14 months; a run older than this would be expired on arrival.
 MAX_RUN_AGE = timedelta(days=425)
 
@@ -110,13 +140,70 @@ def run_uuid_for(client_id, evidence_run_id):
 
 class PushError(Exception):
     """The push could not continue; the session stops here and the next
-    invocation retries from the oldest unpushed run."""
+    invocation retries from the oldest unpushed run. `reason` is the API's
+    refusal reason (see REFUSAL_TEXT) when it gave one."""
+
+    def __init__(self, message="", reason=None):
+        super().__init__(message)
+        self.reason = reason
 
 
 class AwaitingApproval(PushError):
-    """403 on open run: the domain is new and waiting for approval at
-    FortifyData (or disabled, or the key is not scoped to the company). Not a
-    failure of this installation: runs stay queued."""
+    """The domain is new and waiting for approval at FortifyData
+    (DOMAIN_PENDING). Not a failure of this installation: runs stay queued."""
+
+
+class RunAlreadyComplete(PushError):
+    """The API already holds this run as complete (RUN_ALREADY_COMPLETE): an
+    earlier attempt finished it and only the reply was lost. The run is done."""
+
+
+# What each refusal reason means and what to do about it. The API sends
+# {"reason": "..."} with every refusal (HTTP 400, 403, 404, 409). A reason not
+# listed here is reported as it came.
+REFUSAL_TEXT = {
+    "KEY_NOT_SCOPED": "the API key is not granted this company id (403). Check --api-company-id "
+                      "(FD_COMPANY_ID) and the key. The runs stay queued until that is fixed.",
+    "DOMAIN_DISABLED": "FortifyData has disabled this domain (403). That is a deliberate decision "
+                       "on their side: contact FortifyData. The runs stay queued.",
+    "DOMAIN_NOT_RESOLVED": "the API has no domain with this installation's client_id under this "
+                           "company id (404). Either the company id is wrong, or the installation "
+                           "is registered under another company. Contact FortifyData. The runs "
+                           "stay queued.",
+    "RUN_NOT_FOUND": "the API holds no run with this run_uuid (404).",
+    "RUN_NOT_RECEIVING": "the API holds this run as aborted and is not receiving it (409).",
+    "INVALID_PAYLOAD": "the API rejected the request as invalid (400): a required field is "
+                       "missing or malformed. Check the payload with --push-dry-run.",
+}
+STATUS_TEXT = {400: "rejected as invalid", 403: "refused", 404: "not found", 409: "conflict",
+               413: "request body too large (the API refuses a body that inflates past 64 MB)"}
+
+
+def reason_of(body):
+    """The refusal reason in an API error body, or None (an older API sent none)."""
+    if isinstance(body, dict) and isinstance(body.get("reason"), str) and body["reason"].strip():
+        return body["reason"].strip().upper()
+    return None
+
+
+def refusal_error(status, body, what, opening=False):
+    """The exception for an API refusal. `opening`: this was open run, where an
+    unexplained 403 (the pre-reason API) still means "waiting for approval"."""
+    reason = reason_of(body)
+    if reason == "RUN_ALREADY_COMPLETE":
+        return RunAlreadyComplete(f"{what}: the API already holds this run as complete.", reason)
+    if reason == "DOMAIN_PENDING" or (reason is None and opening and status == 403):
+        return AwaitingApproval(
+            "the API refused the run (403): the domain is waiting for approval at FortifyData "
+            "(always the case for the first run from a new installation). Runs stay queued.",
+            reason)
+    text = REFUSAL_TEXT.get(reason)
+    if text is None:
+        text = STATUS_TEXT.get(status, f"HTTP {status}") + (f" (reason {reason})" if reason else "")
+    extra = {k: v for k, v in body.items() if k != "reason"} if isinstance(body, dict) else {}
+    if extra:
+        text += f" Details: {to_json(extra)[:500]}"
+    return PushError(f"{what}: {text}", reason)
 
 
 # ============================================================================
@@ -311,18 +398,8 @@ class ApiClient:
     def open_run(self, payload):
         status, body = self.request("POST", f"/api/v2/adaudit/runs/{self.company_id}", payload,
                                     "open run")
-        if status == 403:
-            raise AwaitingApproval(
-                "the API refused the run (403): the domain is waiting for approval at "
-                "FortifyData (always the case for the first run from a new installation), is "
-                "disabled, or the API key is not scoped to this company. Runs stay queued.")
-        if status == 400:
-            raise PushError("open run rejected as invalid (400). The API gives no reason; check "
-                            "the payload with --push-dry-run.")
-        if status == 404:
-            raise PushError("open run: the API could not resolve the domain (404).")
         if status not in (200, 201) or body is None:
-            raise PushError(f"open run failed (HTTP {status}).")
+            raise refusal_error(status, body, "open run", opening=True)
         server = str(body.get("schema_version") or "")
         if server and server.split(".")[0] != CONTRACT_VERSION.split(".")[0]:
             raise PushError(f"the API speaks contract {server}; this adaudit.py was built for "
@@ -334,21 +411,19 @@ class ApiClient:
                                     payload, f"{kind} batch {payload['batch']}/{payload['batch_count']}")
         if status == 200 and body is not None:
             return body
-        reasons = {400: "rejected as invalid (batch numbering, or over the per-batch cap)",
-                   403: "refused: domain pending or disabled, or key not scoped to the company",
-                   404: "the API holds no run with this run_uuid",
-                   409: "the run is already complete, or not receiving"}
-        raise PushError(f"{kind} batch {payload['batch']}: {reasons.get(status, f'HTTP {status}')} "
-                        f"({status}).")
+        raise refusal_error(status, body, f"{kind} batch {payload['batch']}")
 
     def complete(self, payload):
         status, body = self.request("POST", f"/api/v2/adaudit/runs/{self.company_id}/complete",
                                     payload, "complete run")
-        if status in (200, 409):
+        if status == 200:
             return status, body or {}
-        reasons = {400: "rejected as invalid", 403: "refused (domain pending/disabled or key scope)",
-                   404: "the API holds no run with this run_uuid"}
-        raise PushError(f"complete run: {reasons.get(status, f'HTTP {status}')} ({status}).")
+        # 409 is COUNT_MISMATCH (the run is closed PARTIAL: the caller resends it) or,
+        # from an older API, a body naming the run's ingest status. Every other 409
+        # reason is an error of its own.
+        if status == 409 and reason_of(body) in (None, "COUNT_MISMATCH"):
+            return status, body or {}
+        raise refusal_error(status, body, "complete run")
 
     def put_catalogue(self, payload):
         status, body = self.request("PUT", "/api/v2/adaudit/plugins/catalogue", payload,
@@ -425,7 +500,40 @@ def plugin_metadata(cur, plugins):
     return meta
 
 
-def _finding_payload(row, label, meta, detected_at):
+def clip_fields(item, limits=FINDING_FIELD_LIMITS):
+    """Shortens over-long text fields of a finding in place (ending "...") and
+    returns the names of the fields it shortened."""
+    clipped = []
+    for field, limit in limits.items():
+        value = item.get(field)
+        if isinstance(value, str) and len(value) > limit:
+            item[field] = value[:limit - 3] + "..."
+            clipped.append(field)
+    return clipped
+
+
+def split_batches(items, max_items, max_bytes, size_of):
+    """Splits items, in order, into batches of at most max_items items whose
+    summed size_of() stays within max_bytes (an item larger than max_bytes
+    gets a batch of its own)."""
+    batches, current, size = [], [], 0
+    for item in items:
+        n = size_of(item)
+        if current and (len(current) >= max_items or size + n > max_bytes):
+            batches.append(current)
+            current, size = [], 0
+        current.append(item)
+        size += n
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _json_size(item):
+    return len(to_json(item).encode("utf-8"))
+
+
+def _finding_payload(row, label, meta, detected_at, clipped=None):
     m = meta.get(row["plugin_id"], {})
     item = {
         "identity_guid": str(row["identity_guid"]),
@@ -448,6 +556,9 @@ def _finding_payload(row, label, meta, detected_at):
         "framework_tags": m.get("framework_tags") or None,
         "detected_at": iso(detected_at),
     }
+    for field in clip_fields(item):
+        if clipped is not None:
+            clipped[field] = clipped.get(field, 0) + 1
     return {k: v for k, v in item.items() if v is not None}
 
 
@@ -480,7 +591,7 @@ def build_findings(conn, client_id, evidence_run_id, meta):
                       for r in cur.fetchall()}
 
     counts = {"new": 0, "changed": 0, "unchanged": 0, "remediated": 0, "retired": 0,
-              "skipped_pass": 0}
+              "skipped_pass": 0, "clipped": {}}
     findings = []
     for key, row in now.items():
         if row["status"] not in ("fail", "warn"):
@@ -494,7 +605,7 @@ def build_findings(conn, client_id, evidence_run_id, meta):
         else:
             label = "CHANGED"
         counts[label.lower()] += 1
-        findings.append(_finding_payload(row, label, meta, first_seen.get(key)))
+        findings.append(_finding_payload(row, label, meta, first_seen.get(key), counts["clipped"]))
     for key, earlier in then.items():
         if key in now:
             continue
@@ -503,7 +614,7 @@ def build_findings(conn, client_id, evidence_run_id, meta):
             continue
         label = "RETIRED" if row.get("change_status") == "retired" else "REMEDIATED"
         counts[label.lower()] += 1
-        findings.append(_finding_payload(row, label, meta, first_seen.get(key)))
+        findings.append(_finding_payload(row, label, meta, first_seen.get(key), counts["clipped"]))
     findings.sort(key=lambda f: (f["plugin_id"], f["identity_guid"]))
     return findings, counts, prev
 
@@ -531,7 +642,7 @@ def build_roster(conn, evidence_run_id, meta):
     return roster
 
 
-def build_inventories(inventory_results):
+def build_inventories(inventory_results, log=None):
     """inventory_results: [(plugin, rows-or-None)]. Returns {type: rows}, or
     None when any inventory query failed -- then no inventory is sent and the
     API keeps its previous snapshot, rather than removing objects of a type
@@ -542,10 +653,22 @@ def build_inventories(inventory_results):
         if object_type is None:
             continue
         if rows is None:
+            if log:
+                log(f"  [WARN] The {object_type.lower()} inventory query failed.")
             return None
         name_key = INVENTORY_NAME_KEY[object_type]
         inventories[object_type] = [r for r in json_safe([dict(r) for r in rows])
                                     if r.get(name_key)]
+    # The API treats a run that stores any inventory row as the complete picture and
+    # removes every stored object of a type this run did not send. So all four types
+    # must be present: a missing one (plugin file absent, failed to load, or filtered
+    # out) would wipe that type from the API.
+    missing = sorted(t for t in INVENTORY_NAME_KEY if t not in inventories)
+    if missing:
+        if log:
+            log(f"  [WARN] No inventory plugin ran for: {', '.join(m.lower() for m in missing)} "
+                f"(its plugin file is missing or failed to load).")
+        return None
     return inventories
 
 
@@ -681,6 +804,9 @@ def _push_one(api, conn, run, meta, inventories, tool_version, schema_version, l
 
     findings, counts, prev = build_findings(conn, run["client_id"], rid, meta)
     roster = build_roster(conn, rid, meta)
+    if counts["clipped"]:
+        log("  [WARN] Over-long text was shortened so the API would accept the finding(s): "
+            + ", ".join(f"{field} x{n}" for field, n in sorted(counts["clipped"].items())) + ".")
     tally = {r: sum(1 for e in roster if e["rollup"] == r.upper())
              for r in ("fail", "warn", "pass", "error", "not_assessed")}
     log(f"Pushing evaluation run {rid} (collected {iso(run['collected_at'])}, evaluated "
@@ -724,7 +850,7 @@ def _push_one(api, conn, run, meta, inventories, tool_version, schema_version, l
 
     rejected = []
     batches_sent = 0
-    f_batches = [findings[i:i + FINDINGS_PER_BATCH] for i in range(0, len(findings), FINDINGS_PER_BATCH)]
+    f_batches = split_batches(findings, FINDINGS_PER_BATCH, BATCH_MAX_BYTES, _json_size)
     for number, batch in enumerate(f_batches, start=1):
         resp = api.send_batch("findings", {"run_uuid": run_uuid, "batch": number,
                                            "batch_count": len(f_batches), "findings": batch})
@@ -738,8 +864,8 @@ def _push_one(api, conn, run, meta, inventories, tool_version, schema_version, l
     inventory_rows = 0
     if inventories:
         flat = [(t, row) for t in sorted(inventories) for row in inventories[t]]
-        i_batches = [flat[i:i + INVENTORY_ROWS_PER_BATCH]
-                     for i in range(0, len(flat), INVENTORY_ROWS_PER_BATCH)]
+        i_batches = split_batches(flat, INVENTORY_ROWS_PER_BATCH, BATCH_MAX_BYTES,
+                                  lambda pair: _json_size(pair[1]))
         for number, batch in enumerate(i_batches, start=1):
             grouped = {}
             for object_type, row in batch:
@@ -837,12 +963,18 @@ def push_runs(conn, client_id, api, plugins, inventory_provider, tool_version, l
             newest = index == len(runs) - 1
             inventories = None
             if newest and run["sync_run_id"] == latest_sync:
-                inventories = build_inventories(inventory_provider())
+                inventories = build_inventories(inventory_provider(), log)
                 if inventories is None:
-                    log("  [WARN] An inventory query failed; sending no inventory with this run "
-                        "(the API keeps its previous snapshot).")
+                    log("  [WARN] Sending no inventory with this run (the API keeps its previous "
+                        "snapshot rather than removing objects it was not sent).")
             try:
                 _push_one(api, conn, run, meta, inventories or {}, tool_version, schema_version, log)
+            except RunAlreadyComplete:
+                log(f"  Run {run['evidence_run_id']} was already completed by the API (an earlier "
+                    f"attempt finished and only the reply was lost); marked pushed.")
+                if not api.dry_run:
+                    _set_state(conn, run["evidence_run_id"], push_status="pushed",
+                               pushed_at=datetime.now(timezone.utc), last_push_error=None)
             except AwaitingApproval as exc:
                 if not api.dry_run:
                     _set_state(conn, run["evidence_run_id"], last_push_error=str(exc)[:4000])
@@ -851,7 +983,8 @@ def push_runs(conn, client_id, api, plugins, inventory_provider, tool_version, l
             except PushError as exc:
                 if not api.dry_run:
                     _set_state(conn, run["evidence_run_id"], last_push_error=str(exc)[:4000])
-                raise PushError(f"evaluation run {run['evidence_run_id']}: {exc}") from exc
+                raise PushError(f"evaluation run {run['evidence_run_id']}: {exc}",
+                                exc.reason) from exc
             pushed += 1
         return pushed, False
     finally:

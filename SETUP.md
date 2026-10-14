@@ -351,6 +351,13 @@ python3 adaudit.py --pg-host <host> --pg-user <user> --pg-dbname <db> \
   FortifyData approves it. That is expected: `adaudit.py` says so,
   exits normally, and keeps the runs queued; the next push after
   approval sends them all.
+- **Other refusals stop the push** with a message that says what to
+  fix, and the runs stay queued: the API key is not granted the company
+  id (`KEY_NOT_SCOPED`: check `--api-company-id` and the key), the
+  domain was disabled by FortifyData (`DOMAIN_DISABLED`), or the
+  installation is not registered under this company id
+  (`DOMAIN_NOT_RESOLVED`: wrong company id, or registered under another
+  company -- contact FortifyData).
 - **Nothing is lost when the network is down.** Every complete run is
   queued in the database and pushed, oldest first, by the next
   `--push` (or `--push-only`, which pushes without evaluating -- useful

@@ -2,7 +2,7 @@
 """
 adaudit.py -- AD Security & Compliance Plugin Runner
 ======================================================
-VERSION: 0.10.2
+VERSION: 0.10.3
 
 Companion to adprofiler.py. Where adprofiler.py collects AD data,
 adaudit.py analyzes it: discovers every plugin file in plugins/, runs each
@@ -25,6 +25,22 @@ DESIGN:
       as: (status, object_guid, stig_severity, stig_reference,
       tool_severity, tool_reference, fd_severity, summary, detail).
       Zero rows returned = clean pass, nothing to report.
+    - [v0.10.3] Push, following the API's engine notes of 14 October 2026.
+      The API now says why it refuses a request, and the push acts on it:
+      a key not granted the company id (KEY_NOT_SCOPED) or a disabled
+      domain (DOMAIN_DISABLED) stops with a message saying what to fix,
+      where both used to be read as "waiting for approval" and queued
+      silently for ever; only DOMAIN_PENDING means waiting. A run the API
+      already holds as complete (RUN_ALREADY_COMPLETE: the reply to a
+      successful "complete" was lost and the retry was refused) is marked
+      pushed, not PARTIAL. Inventory is sent only when all four object
+      types are present: the API removes every stored object of a type
+      that a run with any inventory rows did not send, so a missing
+      inventory plugin (file absent or failed to load) would have wiped
+      that type -- subnets, for example. Batches are also closed at 16 MB
+      of JSON, because the API refuses a request body over 64 MB however
+      few items it holds, and over-long text fields on a finding are
+      shortened (with a warning) instead of being rejected by the API.
     - [v0.10.2] Findings closed this run (change status remediated) are no
       longer shown as open. The console printed them as "[FAIL] ...
       [REMEDIATED]" under an "[ OK ]" plugin heading, and the workbook
@@ -223,7 +239,7 @@ import psycopg2.extras
 
 import adaudit_push
 
-VERSION = "0.10.2"
+VERSION = "0.10.3"
 
 # [test-candidate-branch] Always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
