@@ -42,14 +42,20 @@ collected or not -- lets practically anyone impersonate any user to the
 computer: 'fail'/critical, with a summary suffix. detail gains
 trustee_details (label, SID, kind, object class, broad flag) and
 broad_principal_trustee. Still one row per resource computer.
+
+[v1.7] RBCD configured on a domain controller (or RODC) object is now
+'fail'/critical whoever the trustee is (PingCastle
+P-DelegationDCsourcedeleg): the trustee can impersonate any user --
+Domain Admins included unless protected -- to the DC's own services,
+which is domain compromise. No Windows feature needs RBCD on a DC.
 """
 
 PLUGIN = {
     "plugin_id": 2022,
     "category": "Computer Accounts",
     "name": "Computer Account Has Resource-Based Constrained Delegation Configured",
-    "version": "1.6",
-    "revision_date": "2026-10-04",
+    "version": "1.7",
+    "revision_date": "2026-10-20",
     "remediation": (
         "Confirm each trustee is a deliberate, understood delegation "
         "relationship, not leftover from a decommissioned service or an "
@@ -220,14 +226,13 @@ PLUGIN = {
                               AND c.valid_to IS NULL
         )
         SELECT
-            CASE WHEN bool_or(t.is_broad) THEN 'fail' ELSE 'warn' END AS status,
+            CASE WHEN bool_or(t.is_broad) OR t.is_domain_controller THEN 'fail' ELSE 'warn' END AS status,
             t.object_guid,
             NULL AS stig_severity,
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
-            CASE WHEN bool_or(t.is_broad) THEN 'critical'
-                 WHEN t.is_domain_controller THEN 'high'
+            CASE WHEN bool_or(t.is_broad) OR t.is_domain_controller THEN 'critical'
                  ELSE 'medium' END AS fd_severity,
             (CASE WHEN t.is_domain_controller THEN 'Domain Controller ' ELSE 'Computer Account ' END)
                 || COALESCE(t.sam_account_name, t.object_guid::text)

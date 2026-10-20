@@ -19,7 +19,15 @@ dangerous right beyond the Windows defaults for a DC:
                                            NETWORK SERVICE, SERVICE (S-1-5-6)
     SeAssignPrimaryTokenPrivilege          LOCAL SERVICE, NETWORK SERVICE
     SeTcbPrivilege, SeCreateTokenPrivilege,
-    SeSyncAgentPrivilege                   nobody
+    SeSyncAgentPrivilege,
+    SeTrustedCredManAccessPrivilege        nobody
+
+[v1.2] SeTrustedCredManAccessPrivilege ("Access Credential Manager as a
+trusted caller") added: by default only Winlogon holds it, as a built-in
+capability that is never granted by policy; any principal given it can
+read every saved credential in Credential Manager on the DC (PingCastle
+P-TrustedCredManAccessPrivilege). Plugin 9024 checks the same rights in
+GPOs that apply to other computers.
 
 Always accepted: SYSTEM (S-1-5-18) and Tier 0 principals -- any SID that
 resolves to a v_privileged_principal object, plus Domain Admins (-512),
@@ -70,8 +78,8 @@ PLUGIN = {
     "plugin_id": 9015,
     "category": "Organizational Units",
     "name": "Dangerous User Rights Granted on Domain Controllers",
-    "version": "1.1",
-    "revision_date": "2026-10-07",
+    "version": "1.2",
+    "revision_date": "2026-10-20",
     "control_id": "GPO-9015",
     "framework_tags": [
         "NIST-800-53-AC-3", "NIST-800-53-AC-6", "NIST-800-53-AC-6(1)",
@@ -176,7 +184,8 @@ PLUGIN = {
                    ('semanagevolumeprivilege', 'SeManageVolumePrivilege'),
                    ('sesyncagentprivilege', 'SeSyncAgentPrivilege'),
                    ('seinteractivelogonright', 'SeInteractiveLogonRight'),
-                   ('seremoteinteractivelogonright', 'SeRemoteInteractiveLogonRight')
+                   ('seremoteinteractivelogonright', 'SeRemoteInteractiveLogonRight'),
+                   ('setrustedcredmanaccessprivilege', 'SeTrustedCredManAccessPrivilege')
         ),
         default_allowed (right_lower, sid) AS (
             VALUES ('sedebugprivilege', 'S-1-5-32-544'),
