@@ -32,15 +32,29 @@ evidence lists them too. (The collector filter itself still names
 javaObject/javaSerializedObject as attributes; javaSerializedData and
 javaReferenceAddress are not collected -- detection still works through
 the mandatory javaClassName attribute.)
+
+[v1.2] Also lists the accounts that actually carry Java attributes
+(ad_user.java_attributes, adprofiler 0.9.0: javaClassName, javaCodeBase,
+javaFactory, javaSerializedData, javaRemoteLocation -- the attributes
+PingCastle's S-JavaSchema rule looks for), and rates the finding by them:
+low while the extension is only in the schema; medium when accounts carry
+Java attributes; high when an enabled account has javaCodeBase, the
+attribute that tells a Java client doing a JNDI lookup of that account
+where to load code from. With data collected before 0.9.0 the rating is
+the schema-only one.
 """
 
 PLUGIN = {
     "plugin_id": 4021,
     "category": "Domain",
     "name": "Java RFC 2713 Schema Extension Present in the Forest",
-    "version": "1.1",
-    "revision_date": "2026-10-04",
+    "version": "1.2",
+    "revision_date": "2026-10-21",
     "remediation": (
+        "First clear the Java attributes from the listed accounts (Set-ADUser <name> "
+        "-Clear javaCodeBase,javaClassName,javaFactory,javaSerializedData,"
+        "javaRemoteLocation) after checking with the owners of any Java application that "
+        "reads them. "
         "Confirm whether any current application actually depends on "
         "this schema extension -- most environments carrying it do so "
         "from historical Java/LDAP integration tooling nobody currently "
@@ -78,7 +92,9 @@ PLUGIN = {
         "referencing these attributes can trigger Java deserialization "
         "in a vulnerable client). Presence alone doesn't confirm active "
         "exploitability, but it's dormant attack surface most "
-        "environments have no ongoing reason to carry."
+        "environments have no ongoing reason to carry. Low for the schema extension alone, "
+        "medium when accounts carry Java attributes, high when an enabled account has "
+        "javaCodeBase set."
     ),
     "base_severity": "low",
     "query": """
@@ -107,6 +123,27 @@ PLUGIN = {
             -- [v1.1] isDefunct=TRUE (the remediation) clears the object
             SELECT * FROM java WHERE is_defunct IS DISTINCT FROM 'true'
         ),
+        -- [v1.2] accounts that carry the attributes (adprofiler 0.9.0)
+        holder AS (
+            SELECT u.object_guid, u.sam_account_name, u.is_enabled, u.java_attributes,
+                   'javaCodeBase' = ANY (u.java_attributes) AS has_codebase
+            FROM ad_user u
+            JOIN directory_object o
+              ON o.object_guid = u.object_guid AND o.client_id = u.client_id AND NOT o.is_deleted
+            WHERE u.client_id = %(client_id)s AND u.valid_to IS NULL
+              AND u.java_attributes IS NOT NULL
+        ),
+        hagg AS (
+            SELECT count(*) AS n,
+                   count(*) FILTER (WHERE is_enabled) AS n_enabled,
+                   count(*) FILTER (WHERE is_enabled AND has_codebase) AS n_codebase,
+                   to_jsonb((array_agg(jsonb_build_object(
+                       'account', sam_account_name, 'enabled', is_enabled,
+                       'java_attributes', to_jsonb(java_attributes))
+                       ORDER BY (is_enabled AND has_codebase) DESC, is_enabled DESC,
+                                lower(sam_account_name)))[1:50]) AS accounts
+            FROM holder
+        ),
         agg AS (
             SELECT count(*) AS n,
                    string_agg(schema_cn, ', ' ORDER BY lower(schema_cn), schema_cn) AS names,
@@ -124,13 +161,22 @@ PLUGIN = {
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
-            'low' AS fd_severity,
+            CASE WHEN h.n_codebase > 0 THEN 'high' WHEN h.n > 0 THEN 'medium' ELSE 'low' END AS fd_severity,
             'Java RFC 2713 schema extension is present in the forest schema ('
-                || agg.n || ' non-defunct object(s): ' || agg.names || ')' AS summary,
+                || agg.n || ' non-defunct object(s): ' || agg.names || ')'
+                || CASE WHEN h.n > 0
+                        THEN '; ' || h.n || ' account(s) carry Java attributes (' || h.n_enabled
+                             || ' enabled, ' || h.n_codebase || ' enabled with javaCodeBase)'
+                        ELSE '' END AS summary,
             jsonb_build_object(
-                'schema_objects', agg.objects
+                'schema_objects', agg.objects,
+                'accounts_with_java_attributes', h.n,
+                'enabled_accounts_with_java_attributes', h.n_enabled,
+                'enabled_accounts_with_javacodebase', h.n_codebase,
+                'accounts_first_50', h.accounts
             ) AS detail
         FROM agg
+        CROSS JOIN hagg h
         LEFT JOIN ad_domain d
           ON d.client_id = %(client_id)s
          AND d.valid_to IS NULL

@@ -9,6 +9,38 @@ the script's own docstring now keeps a one-line summary per entry, this
 file keeps the complete detail (root causes, what was verified, why a
 decision was made a particular way) for anyone who wants it.
 
+    0.9.0 - Schema v45. Data for three more PingCastle-equivalent checks:
+            - mS-DS-CreatorSID is collected on computers
+              (ad_computer.creator_sid): the account that joined the computer
+              through MachineAccountQuota (plugins 2044, 11001).
+            - The owner of every computer is read, in one paged search with
+              the SD Flags control set to owner only, and stored in
+              directory_object.owner_sid (before, only DCs and
+              AdminSDHolder-protected objects had one). Plugin 2044
+              (A-LAPS-Joined-Computers). It also feeds v_privileged_principal:
+              the owner of a Tier 0 computer, such as an enterprise CA host,
+              now counts as Tier 0 (tier0_ownership), so plugins that use the
+              view can report findings they could not see before.
+            - Every domain controller's DFS Replication SYSVOL subscription
+              is read (two searches in all) and folded into the DC's stored
+              attributes under adprofiler:sysvolSubscription:
+              ad_computer.sysvol_subscription_found / sysvol_read_only /
+              sysvol_replication_enabled (plugins 2045 P-RODCSYSVOLWrite,
+              2046).
+            - When the forest schema has the RFC 2713 Java attributes, one
+              search finds the objects that carry them; the attribute names
+              (never values) are folded into those users' stored attributes
+              under adprofiler:javaAttributes: ad_user.java_attributes
+              (plugin 4021, S-JavaSchema). Forests without the extension make
+              no search.
+            DERIVED_FIELDS_VERSION stays at 0.8.0: no rescan is needed. On the
+            first 0.9.0 run the computers that have a creator SID, the domain
+            controllers, and any users with Java attributes are recorded as
+            "modified" once (their stored attributes gain the new values);
+            nothing else changes in their history. If one of the new reads
+            fails, the run continues and those values are absent for that
+            run. Apply schema_migration_v45.sql first.
+
     0.8.0 - Schema v44. Data for six PingCastle-equivalent checks:
             - The whole dSHeuristics string is stored (ad_domain.dsheuristics;
               only characters 7, 16 and 21 were kept), for List Object mode,

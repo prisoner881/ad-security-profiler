@@ -49,14 +49,22 @@ created through the quota. Scope note: the window is "first seen in the
 audited run"; if adaudit is not run for some sync run, objects first seen
 in that run are never reported, and each finding closes as remediated on
 the next run by design (it is an event, not a state).
+
+[v1.2] Names the creator. adprofiler 0.9.0 collects mS-DS-CreatorSID,
+which AD sets only when the computer was created through
+MachineAccountQuota (by an account without the Create Computer Objects
+right). With 0.9.0 data the severity no longer guesses from the quota:
+medium when the computer was created through the quota (the summary names
+the account), low when it was not; high still wins when an attack-path
+signal applies. With older data the v1.1 rating applies.
 """
 
 PLUGIN = {
     "plugin_id": 11001,
     "category": "Change Detection",
     "name": "Machine Account Created Since Previous Collection Run",
-    "version": "1.1",
-    "revision_date": "2026-10-04",
+    "version": "1.2",
+    "revision_date": "2026-10-21",
     "remediation": (
         "Reconcile each new computer account against your provisioning "
         "records: an account created by an imaging or MDM workflow "
@@ -66,10 +74,9 @@ PLUGIN = {
         "hosts but do not match your naming convention exactly -- "
         "CISA's AA26-237A red team deliberately named its rogue "
         "machine account to blend into the environment, and near-miss "
-        "naming is the cheapest available signal. Confirm who created "
-        "the account by reading the mS-DS-CreatorSID attribute on the "
-        "object directly (Get-ADComputer <name> -Properties "
-        "mS-DS-CreatorSID); if the creator is an ordinary user rather "
+        "naming is the cheapest available signal. When the account was "
+        "created through MachineAccountQuota the finding names the "
+        "creator (mS-DS-CreatorSID); if the creator is an ordinary user rather "
         "than a provisioning service or domain administrator, treat "
         "the account as suspect and investigate that user's activity. "
         "Correlate with Security event ID 4741 (computer account "
@@ -124,7 +131,9 @@ PLUGIN = {
         "high when the new object shows an attack-path signal (holds "
         "RBCD rights to another object, unconstrained delegation, a "
         "userPrincipalName, or a dNSHostName duplicating another "
-        "computer's), medium when MachineAccountQuota is non-zero, and "
+        "computer's), medium when it was created through "
+        "MachineAccountQuota (the creator is named; with data from "
+        "collectors before adprofiler 0.9.0: when the quota is non-zero), and "
         "low otherwise; managed service accounts are labelled and rated "
         "low. Suppressed on a client's first collection run; objects "
         "first seen in a sync run that was never audited are not "
@@ -139,6 +148,14 @@ PLUGIN = {
                   AND sr.run_id < %(run_id)s
                   AND sr.status = 'succeeded'
             ) AS have_prior
+        ),
+        -- [v1.2] mS-DS-CreatorSID is collected from adprofiler 0.9.0 on
+        creator_known AS (
+            SELECT COALESCE(bool_or(string_to_array(sr.collector_version, '.')::int[] >= ARRAY[0, 9, 0]),
+                            false) AS yes
+            FROM sync_run sr
+            WHERE sr.client_id = %(client_id)s AND sr.run_id = %(run_id)s
+              AND sr.collector_version ~ '^[0-9]+(\.[0-9]+)*$'
         ),
         domain_quota AS (
             SELECT max(d.machine_account_quota) AS maq
@@ -196,13 +213,19 @@ PLUGIN = {
             NULL AS tool_reference,
             CASE WHEN cardinality(c.signals) > 0 THEN 'high'
                  WHEN c.is_managed_service_account THEN 'low'
+                 WHEN c.creator_sid IS NOT NULL THEN 'medium'
+                 WHEN ck.yes THEN 'low'
                  WHEN COALESCE(dq.maq, 0) > 0 THEN 'medium'
                  ELSE 'low' END AS fd_severity,
             CASE WHEN c.is_managed_service_account THEN 'Managed service account "'
                  ELSE 'Computer account "' END
                 || COALESCE(c.sam_account_name, c.dn_current)
                 || '" was created since the previous collection run'
-                || CASE WHEN COALESCE(dq.maq, 0) > 0 AND NOT c.is_managed_service_account
+                || CASE WHEN c.creator_sid IS NOT NULL
+                        THEN ' (created by ' || COALESCE(cr.sam_account_name, c.creator_sid)
+                             || ' through MachineAccountQuota)'
+                        WHEN ck.yes THEN ''
+                        WHEN COALESCE(dq.maq, 0) > 0 AND NOT c.is_managed_service_account
                         THEN ' (MachineAccountQuota is ' || dq.maq
                              || ', so any authenticated user could have created it)'
                         ELSE '' END
@@ -223,11 +246,15 @@ PLUGIN = {
                 'user_principal_name', c.user_principal_name,
                 'attack_path_signals', to_jsonb(c.signals),
                 'machine_account_quota', dq.maq,
-                'created_by_attribute_note',
-                    'mS-DS-CreatorSID is not collected by this project; read it '
-                    'directly from the object to identify the creator'
+                'created_by_sid', c.creator_sid,
+                'created_by', cr.sam_account_name,
+                'created_through_machine_account_quota',
+                    CASE WHEN c.creator_sid IS NOT NULL THEN true WHEN ck.yes THEN false END
             ) AS detail
         FROM new_computer c
         CROSS JOIN domain_quota dq
+        CROSS JOIN creator_known ck
+        LEFT JOIN directory_object cr
+          ON cr.object_sid = c.creator_sid AND cr.client_id = %(client_id)s AND NOT cr.is_deleted
     """,
 }

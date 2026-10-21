@@ -4,7 +4,7 @@
  adprofiler.py -- Active Directory Security & Compliance Profiler (Collector)
 ================================================================================
 
-VERSION: 0.8.0
+VERSION: 0.9.0
 
 PURPOSE:
     Connects to an on-premise Active Directory Domain Controller via LDAP,
@@ -186,7 +186,7 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
-VERSION = "0.8.0"
+VERSION = "0.9.0"
 
 # [v0.7.7] The oldest collector version whose stored derived fields
 # (parsed / typed columns computed from raw attributes) are current. A
@@ -199,7 +199,9 @@ VERSION = "0.8.0"
 # not rewrite unchanged objects either). 0.7.8: OU name and description
 # stored as text instead of array literals. 0.8.0: the new schema v44
 # columns (users' script_path; the domain's dSHeuristics string,
-# msDS-Other-Settings and NetBIOS name) on every existing object.
+# msDS-Other-Settings and NetBIOS name) on every existing object. 0.9.0
+# does not raise it: its new columns come from attributes and folded-in
+# keys that version exactly the objects that have them.
 DERIVED_FIELDS_VERSION = "0.8.0"
 
 
@@ -293,7 +295,28 @@ COMPUTER_ATTRS = [
     # bloat attributes_full); is_gmsa / is_dmsa come from targeted
     # searches instead, see update_managed_service_account_flags().
     "altSecurityIdentities", "managedBy", "msDS-KrbTgtLink",
+    # [v0.9.0] The account that created the computer through
+    # MachineAccountQuota (plugins 2044, 11001). Set only on computers an
+    # ordinary user joined, so most computers don't change.
+    "mS-DS-CreatorSID",
 ]
+
+# [v0.9.0] Keys folded into a computer's / user's attributes_full from a
+# separate search, so a change to them versions the object like any other
+# change (the same technique as DERIVED_DOMAIN_SETTINGS_KEY).
+#   SYSVOL_SUBSCRIPTION_KEY, on domain controllers only: the DC's DFS
+#   Replication SYSVOL subscription (plugins 2045, 2046).
+#   JAVA_ATTRIBUTES_KEY, on users that carry them: the names of the RFC 2713
+#   Java attributes that are set, never their values (plugin 4021).
+SYSVOL_SUBSCRIPTION_KEY = "adprofiler:sysvolSubscription"
+JAVA_ATTRIBUTES_KEY = "adprofiler:javaAttributes"
+SYSVOL_SUBSCRIPTION_FILTER = "(&(objectClass=msDFSR-Subscription)(cn=SYSVOL Subscription))"
+SYSVOL_SUBSCRIPTION_ATTRS = ["msDFSR-ReadOnly", "msDFSR-Enabled"]
+DC_FILTER = ("(&(objectCategory=computer)(|(userAccountControl:1.2.840.113556.1.4.803:=8192)"
+             "(userAccountControl:1.2.840.113556.1.4.803:=67108864)))")
+# The attributes PingCastle's S-JavaSchema rule looks for on accounts.
+JAVA_OBJECT_ATTRS = ("javaClassName", "javaCodeBase", "javaFactory",
+                     "javaSerializedData", "javaRemoteLocation")
 # [v0.1.1] The two LAPS expiration attributes are deliberately NOT in this
 # static list. Unlike built-in AD attributes (pwdLastSet, userAccountControl,
 # etc.), ms-Mcs-AdmPwdExpirationTime and msLAPS-PasswordExpirationTime only
@@ -1035,6 +1058,41 @@ def store_owner_and_sd_control(pg_cur, client_id, object_guid, owner_sid, sd_con
         "WHERE object_guid = %s AND client_id = %s",
         (owner_sid, sd_control, object_guid, client_id),
     )
+
+
+def store_computer_owners(conn, pg_cur, client_id, base_dn, dn_to_guid, page_size):
+    """[v0.9.0] Reads the owner of every computer object in one paged
+    search (SD Flags = OWNER only) and stores those that differ from
+    directory_object.owner_sid. A read that fails leaves the stored owners
+    as they are. Returns the number of owners read."""
+    pg_cur.execute(
+        "SELECT object_guid::text, owner_sid FROM directory_object "
+        "WHERE client_id = %s AND object_class = 'computer' AND NOT is_deleted",
+        (client_id,),
+    )
+    stored = {str(guid).lower(): owner for guid, owner in pg_cur.fetchall()}
+    read = updated = 0
+    try:
+        for dn, _, raw in ldap_paged_search(
+                conn, base_dn, "(objectClass=computer)", ["nTSecurityDescriptor"], page_size,
+                controls=security_descriptor_control(sdflags=0x01)):
+            object_guid = dn_to_guid.get(dn.lower())
+            values = _raw_values(raw, "nTSecurityDescriptor")
+            if not object_guid or not values:
+                continue
+            owner_sid, _, _ = parse_security_descriptor(values[0])
+            if owner_sid is None:
+                continue
+            read += 1
+            if stored.get(str(object_guid).lower()) != owner_sid:
+                store_owner_and_sd_control(pg_cur, client_id, object_guid, owner_sid, None)
+                updated += 1
+    except (LDAPException, LDAPCollectionError) as exc:
+        log_warn(f"Could not read computer owners (non-fatal; stored owners kept): "
+                 f"{describe_read_error(exc)}")
+        return read
+    log_success(f"Computer object ownership: {read} read, {updated} changed or new")
+    return read
 
 
 def resolve_object_type_name(object_type_guid):
@@ -1877,7 +1935,9 @@ REQUIRED_SCHEMA_COLUMNS = {
                 "alt_security_identities", "cleartext_password_attributes",
                 "account_expires", "assigned_authn_policy_silo", "assigned_authn_policy",
                 # [v0.8.0, schema v44]
-                "script_path"},
+                "script_path",
+                # [v0.9.0, schema v45]
+                "java_attributes"},
     "ad_group": {"object_guid", "client_id", "version_id", "valid_from", "valid_to",
                  "sam_account_name", "group_type", "admin_count",
                  "is_protected_group", "member_count_direct",
@@ -1894,7 +1954,10 @@ REQUIRED_SCHEMA_COLUMNS = {
                      # [v0.6.0, schema v38]
                      "alt_security_identities", "cleartext_password_attributes",
                      "managed_by", "krbtgt_link", "is_gmsa", "is_dmsa",
-                     "dmsa_preceded_by", "dmsa_state"},
+                     "dmsa_preceded_by", "dmsa_state",
+                     # [v0.9.0, schema v45]
+                     "creator_sid", "sysvol_subscription_found", "sysvol_read_only",
+                     "sysvol_replication_enabled"},
     "ad_domain": {"object_guid", "client_id", "version_id", "valid_from", "valid_to",
                   "dns_root", "functional_level", "tombstone_lifetime_days",
                   "tombstone_lifetime_is_default", "tombstone_lifetime_source",
@@ -2045,7 +2108,7 @@ REQUIRED_IDENTITY_COLUMNS = {
 # the structural check remains the backstop for a schema altered
 # outside the approved migration files, where the version number could
 # claim to be current while the actual structure doesn't match it.
-EXPECTED_SCHEMA_VERSION = 44  # [v0.8.0] v44: dSHeuristics / msDS-Other-Settings / NetBIOS name, scriptPath, SYSVOL script commands
+EXPECTED_SCHEMA_VERSION = 45  # [v0.9.0] v45: computer creator SID, DC SYSVOL subscriptions, users' Java attributes
 
 
 def check_schema_version(pg_conn):
@@ -2664,6 +2727,11 @@ def build_attributes_full(dn, attributes, raw_attributes):
             raw = raw_attributes.get("objectSid")
             full["objectSid"] = sid_bytes_to_str(raw[0]) if raw else None
             continue
+        if key.lower() == "ms-ds-creatorsid":
+            # [v0.9.0] Binary SID, like objectSid.
+            raw = _raw_values(raw_attributes, "mS-DS-CreatorSID")
+            full["mS-DS-CreatorSID"] = sid_bytes_to_str(raw[0]) if raw else None
+            continue
         if key == "sIDHistory":
             # [v0.5.16] Binary SIDs, like objectSid -- but ldap3 has no
             # formatter for this attribute, so it arrived as raw bytes and
@@ -3092,6 +3160,8 @@ def user_typed_columns(full):
         "assigned_authn_policy_silo": full.get("msDS-AssignedAuthNPolicySilo"),
         "assigned_authn_policy": full.get("msDS-AssignedAuthNPolicy"),
         "script_path": _first_value(full.get("scriptPath")),  # [v0.8.0, schema v44]
+        # [v0.9.0, schema v45]
+        "java_attributes": full.get(JAVA_ATTRIBUTES_KEY) or None,
     }
 
 
@@ -3160,6 +3230,11 @@ def computer_typed_columns(full):
         "krbtgt_link": full.get("msDS-KrbTgtLink"),
         "dmsa_preceded_by": full.get("msDS-ManagedAccountPrecededByLink"),
         "dmsa_state": _as_int(full.get("msDS-DelegatedMSAState")),
+        # [v0.9.0, schema v45]
+        "creator_sid": full.get("mS-DS-CreatorSID"),
+        "sysvol_subscription_found": (full.get(SYSVOL_SUBSCRIPTION_KEY) or {}).get("found"),
+        "sysvol_read_only": (full.get(SYSVOL_SUBSCRIPTION_KEY) or {}).get("read_only"),
+        "sysvol_replication_enabled": (full.get(SYSVOL_SUBSCRIPTION_KEY) or {}).get("enabled"),
     }
 
 
@@ -4741,6 +4816,83 @@ def read_authn_silos(conn, config_nc):
     return silos, len(policy_entries)
 
 
+def _ldap_bool(raw_attributes, attr_name):
+    """[v0.9.0] A Boolean-syntax attribute's raw value ("TRUE"/"FALSE") as
+    True/False; None when the attribute is absent."""
+    values = _raw_values(raw_attributes, attr_name)
+    if not values:
+        return None
+    return str(_decode(values[0])).strip().upper() == "TRUE"
+
+
+def read_sysvol_subscriptions(conn, base_dn, page_size):
+    """[v0.9.0] Each domain controller's DFS Replication SYSVOL subscription
+    (CN=SYSVOL Subscription,CN=Domain System Volume,CN=DFSR-LocalSettings,
+    <DC computer object>) -> {dc_dn_lower: {"found", "read_only",
+    "enabled"}}, for every writable and read-only DC. A DC without the
+    object gets found=False (expected while SYSVOL still replicates with
+    FRS -- plugin 2046 only judges it when another DC has one). read_only /
+    enabled are None when the attribute is absent (msDFSR-ReadOnly absent
+    means writable). Two searches in all: the DCs, and every SYSVOL
+    subscription in the domain. None when either could not be read, so
+    nothing is recorded rather than "no subscription" for every DC."""
+    try:
+        dc_dns = [dn for dn, _, _ in ldap_paged_search(
+            conn, base_dn, DC_FILTER, [ldap3.NO_ATTRIBUTES], page_size)]
+        subscriptions = {}
+        marker = ",cn=dfsr-localsettings,"
+        for dn, _, raw in ldap_paged_search(conn, base_dn, SYSVOL_SUBSCRIPTION_FILTER,
+                                            SYSVOL_SUBSCRIPTION_ATTRS, page_size):
+            pos = dn.lower().find(marker)
+            if pos < 0:
+                continue
+            subscriptions[dn[pos + len(marker):].lower()] = {
+                "found": True,
+                "read_only": _ldap_bool(raw, "msDFSR-ReadOnly"),
+                "enabled": _ldap_bool(raw, "msDFSR-Enabled"),
+            }
+    except (LDAPException, LDAPCollectionError) as exc:
+        log_warn(f"Could not read the domain controllers' SYSVOL subscriptions (non-fatal): "
+                 f"{describe_read_error(exc)}")
+        return None
+    return {dn.lower(): subscriptions.get(dn.lower(), {"found": False, "read_only": None, "enabled": None})
+            for dn in dc_dns}
+
+
+def read_java_attribute_holders(conn, config_nc, base_dn, page_size):
+    """[v0.9.0] {object_dn_lower: [names of the RFC 2713 Java attributes it
+    carries]} for every object in the domain that has one, or {} when the
+    forest's schema has none of JAVA_OBJECT_ATTRS (most forests: no search
+    is made). Attributes marked isDefunct are left out of the search, since
+    a filter on a defunct attribute fails. Values are requested only to see
+    which attributes are populated and are never kept. None when the
+    search could not be completed."""
+    schema_filter = ("(&(objectClass=attributeSchema)(|"
+                     + "".join(f"(lDAPDisplayName={a})" for a in JAVA_OBJECT_ATTRS) + "))")
+    canonical = {a.lower(): a for a in JAVA_OBJECT_ATTRS}
+    try:
+        present = []
+        for entry in ldap_search(conn, f"CN=Schema,{config_nc}", schema_filter, ldap3.SUBTREE,
+                                 ["lDAPDisplayName", "isDefunct"], what="the Java schema attributes"):
+            raw = entry.get("raw_attributes", {})
+            name = canonical.get(str(_decode((_raw_values(raw, "lDAPDisplayName") or [b""])[0])).lower())
+            if name and not _ldap_bool(raw, "isDefunct"):
+                present.append(name)
+        if not present:
+            return {}
+        holders = {}
+        holder_filter = "(|" + "".join(f"({a}=*)" for a in sorted(present)) + ")"
+        for dn, _, raw in ldap_paged_search(conn, base_dn, holder_filter, sorted(present), page_size):
+            names = sorted(a for a in present if _raw_values(raw, a))
+            if names:
+                holders[dn.lower()] = names
+    except (LDAPException, LDAPCollectionError) as exc:
+        log_warn(f"Could not read which objects carry Java attributes (non-fatal): "
+                 f"{describe_read_error(exc)}")
+        return None
+    return holders
+
+
 def collect_domain_extra_settings(conn, base_dn, config_nc, forest_root_dn):
     """[v0.6.0] Forest/domain-level facts that live outside the domain
     object, for ad_domain (schema v38). Folded into the domain's derived
@@ -5335,11 +5487,34 @@ def main():
                  f"{', '.join(dict.fromkeys(optional_present)) or 'none'}")
 
         with pg_conn.cursor() as cur:
+            # [v0.9.0] Read before the users and computers so they are folded
+            # into those objects' attributes_full (see SYSVOL_SUBSCRIPTION_KEY,
+            # JAVA_ATTRIBUTES_KEY). If a read fails, the key is simply absent
+            # this run: the objects concerned get a new version without it and
+            # the typed columns read NULL ("not collected").
+            java_holders = read_java_attribute_holders(ldap_conn, config_nc, base_dn, args.page_size)
+            if java_holders is not None:
+                log_info(f"Objects carrying RFC 2713 Java attributes: {len(java_holders)}")
+            sysvol_subscriptions = read_sysvol_subscriptions(ldap_conn, base_dn, args.page_size)
+            if sysvol_subscriptions is not None:
+                log_info(f"Domain controller SYSVOL subscriptions: "
+                         f"{sum(1 for v in sysvol_subscriptions.values() if v['found'])} found for "
+                         f"{len(sysvol_subscriptions)} DC(s)")
+
+            def java_attributes_for(dn):
+                names = (java_holders or {}).get(dn.lower())
+                return {JAVA_ATTRIBUTES_KEY: names} if names else {}
+
+            def sysvol_subscription_for(dn):
+                sub = (sysvol_subscriptions or {}).get(dn.lower())
+                return {SYSVOL_SUBSCRIPTION_KEY: sub} if sub else {}
+
             user_filter = "(&(objectClass=user)(objectCategory=person))"
             users = collect_object_class(
                 ldap_conn, cur, client_id, run_id, args.dc_host, base_dn,
                 user_filter, user_attrs, args.page_size, "users",
                 "ad_user", user_typed_columns, dn_to_guid, stats, run_timestamp,
+                extra_attributes_for=java_attributes_for,
             )
 
             computers = collect_object_class(
@@ -5347,6 +5522,7 @@ def main():
                 "(objectClass=computer)", computer_attrs, args.page_size,
                 "computers", "ad_computer", computer_typed_columns,
                 dn_to_guid, stats, run_timestamp,
+                extra_attributes_for=sysvol_subscription_for,
             )
             msa_counts = update_managed_service_account_flags(
                 ldap_conn, cur, client_id, base_dn, config_nc, args.page_size)
@@ -5616,6 +5792,15 @@ def main():
                 store_owner_and_sd_control(cur, client_id, obj_guid, owner_sid, obj_sd_control)
             log_success(f"Protected (adminCount=1) object ownership: {protected_owner_reads} read, "
                         f"{protected_owner_failures} read failure(s)")
+
+            # [v0.9.0] Owner of every computer (plugin 2044: a computer still
+            # owned by the ordinary account that joined it can have its LAPS
+            # password and delegation settings taken over by that account).
+            # One paged search with the SD Flags control set to OWNER only
+            # (0x01), so each entry carries a few dozen bytes, not the DACL.
+            # sd_control is not stored from this read (an owner-only
+            # descriptor's control bits say nothing about the DACL).
+            store_computer_owners(ldap_conn, cur, client_id, base_dn, dn_to_guid, args.page_size)
 
 
             # [v0.5.4] The sync_edges("acl_edge", ...) call that used to sit
