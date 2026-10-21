@@ -29,13 +29,15 @@ Classification of the command (first token, quotes removed):
 
 Data: ad_display_specifier.admin_context_menu (JSON array of the attribute's
 values), ad_domain.dns_root.
+
+[v1.2] dead reference link replaced; no query change.
 """
 
 PLUGIN = {
     "plugin_id": 5020,
     "category": "ACLs",
     "name": "Display Specifier Admin Context Menu Runs a Program Outside SYSVOL",
-    "version": "1.1",
+    "version": "1.2",
     "revision_date": "2026-10-21",
     "control_id": "ACL-5020",
     "framework_tags": [
@@ -52,8 +54,10 @@ PLUGIN = {
         "MITRE-ATTCK-T1484",
     ],
     "references": [
-        {"title": "Microsoft: Adding a menu item to the administrative context menu (adminContextMenu)",
-         "url": "https://learn.microsoft.com/en-us/windows/win32/ad/registering-the-context-menu-for-a-class"},
+        {"title": "Microsoft: Registering the Context Menu COM Object in a Display Specifier (adminContextMenu)",
+         "url": "https://learn.microsoft.com/en-us/windows/win32/ad/registering-the-context-menu-com-object-in-a-display-specifier"},
+        {"title": "Microsoft: Admin-Context-Menu attribute",
+         "url": "https://learn.microsoft.com/en-us/windows/win32/adschema/a-admincontextmenu"},
         {"title": "PingCastle health check rules (P-DisplaySpecifier)",
          "url": "https://www.pingcastle.com/PingCastleFiles/ad_hc_rules_list.html"},
         {"title": "MITRE ATT&CK T1546: Event Triggered Execution",

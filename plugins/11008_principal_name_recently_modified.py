@@ -88,14 +88,16 @@ directory is quiet:
     SELECT jsonb_pretty(attributes_full -> 'msDS-ReplAttributeMetaData')
     FROM directory_object_version
     WHERE valid_to IS NULL LIMIT 1;
+
+[v1.3] dead reference link replaced; no query change.
 """
 
 PLUGIN = {
     "plugin_id": 11008,
     "category": "Change Detection",
     "name": "Principal Name Attribute Modified Recently (Replication Metadata)",
-    "version": "1.2",
-    "revision_date": "2026-10-04",
+    "version": "1.3",
+    "revision_date": "2026-10-21",
     "remediation": (
         "Reconcile each change against a known administrative action. The "
         "evidence names the attribute, the originating domain controller and "
@@ -151,8 +153,10 @@ PLUGIN = {
         "CVE-2026-27912",
     ],
     "references": [
-        {"title": "MS-DRSR: DS_REPL_ATTR_META_DATA",
-         "url": "https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-drsr/9d5b9f9b-e5f3-4d1a-b0a1-1a0f2b5a45f4"},
+        {"title": "Microsoft: DS_REPL_ATTR_META_DATA structure (ntdsapi.h)",
+         "url": "https://learn.microsoft.com/en-us/windows/win32/api/ntdsapi/ns-ntdsapi-ds_repl_attr_meta_data"},
+        {"title": "Microsoft: ms-DS-Repl-Attribute-Meta-Data attribute",
+         "url": "https://learn.microsoft.com/en-us/windows/win32/adschema/a-msds-replattributemetadata"},
         {"title": "Semperis: KerberLoss and ResetNightmare",
          "url": "https://www.semperis.com/blog/identity-crisis-novel-vulnerabilities-leading-to-kerberos-downgrade-dos-and-full-domain-takeover/"},
     ],

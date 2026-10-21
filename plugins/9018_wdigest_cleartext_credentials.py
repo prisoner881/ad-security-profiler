@@ -32,14 +32,16 @@ resolved), so the finding stands for the GPO.
 
 Gating: returns nothing unless SYSVOL has been collected for the client
 (ad_gpo_sysvol has an 'ok' row).
+
+[v1.1] dead reference link replaced; no query change.
 """
 
 PLUGIN = {
     "plugin_id": 9018,
     "category": "Organizational Units",
     "name": "WDigest Stores Cleartext Credentials",
-    "version": "1.0",
-    "revision_date": "2026-10-04",
+    "version": "1.1",
+    "revision_date": "2026-10-21",
     "control_id": "GPO-9018",
     "framework_tags": [
         "NIST-800-53-IA-5(1)", "NIST-800-53-SC-28", "NIST-CSF-2.0-PR.DS-01", "PCI-DSS-4.0-8.3.2",
@@ -49,7 +51,7 @@ PLUGIN = {
     ],
     "references": [
         {"title": "Microsoft Security Advisory 2871997: Update to improve credentials protection and management",
-         "url": "https://learn.microsoft.com/en-us/security-updates/securityadvisories/2014/2871997"},
+         "url": "https://learn.microsoft.com/en-us/security-updates/securityadvisories/2016/2871997"},
         {"title": "MITRE ATT&CK T1003.001: OS Credential Dumping: LSASS Memory",
          "url": "https://attack.mitre.org/techniques/T1003/001/"},
     ],

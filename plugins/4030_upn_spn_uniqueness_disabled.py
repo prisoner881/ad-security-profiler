@@ -45,14 +45,16 @@ either way would be wrong.
 when every check was off (value 7). The summary now says "fully
 disabled" for 7 and "disabled" otherwise, followed by the list of
 disabled checks.
+
+[v1.2] dead reference link replaced; no query change.
 """
 
 PLUGIN = {
     "plugin_id": 4030,
     "category": "Domain",
     "name": "UPN, SPN or SPN Alias Uniqueness Verification Disabled",
-    "version": "1.1",
-    "revision_date": "2026-10-04",
+    "version": "1.2",
+    "revision_date": "2026-10-21",
     "remediation": (
         "Re-enable the checks by setting character 21 of dSHeuristics back to "
         "0, or by clearing the attribute entirely if nothing else in it is "
@@ -110,7 +112,7 @@ PLUGIN = {
         {"title": "Microsoft KB5008382: Verification of uniqueness for UPN, SPN and SPN alias (CVE-2021-42282)",
          "url": "https://support.microsoft.com/en-us/topic/kb5008382-verification-of-uniqueness-for-user-principal-name-service-principal-name-and-the-service-principal-name-alias-cve-2021-42282-4651b175-290c-4e59-8fcb-e4e5cd0cdb29"},
         {"title": "MS-ADTS 6.1.1.2.4.1.2: dSHeuristics",
-         "url": "https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-adts/10e15bbc-0f19-4e3f-abfd-0e97b0e85b46"},
+         "url": "https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-adts/e5899be4-862e-496f-9a38-33950617d2c5"},
         {"title": "Semperis: KerberLoss and ResetNightmare",
          "url": "https://www.semperis.com/blog/identity-crisis-novel-vulnerabilities-leading-to-kerberos-downgrade-dos-and-full-domain-takeover/"},
     ],

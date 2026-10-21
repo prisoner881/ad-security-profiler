@@ -34,14 +34,16 @@ which stored ACE masks essentially never carry, so it was always false
 inherit-only ACEs are deliberately still counted, since an unscoped
 right inherited by every descendant is the dangerous part of the ADPREP
 bug pattern.
+
+[v1.3] dead reference link replaced; no query change.
 """
 
 PLUGIN = {
     "plugin_id": 5009,
     "category": "ACLs",
     "name": "Enterprise Key Admins Holds Excessive Rights on the Domain Root",
-    "version": "1.2",
-    "revision_date": "2026-10-03",
+    "version": "1.3",
+    "revision_date": "2026-10-21",
     "remediation": (
         "Remove the overly broad ACE and replace it with the correctly-"
         "scoped one Microsoft's own remediation guidance specifies: "
@@ -71,8 +73,11 @@ PLUGIN = {
         "MITRE-ATTCK-T1098",
     ],
     "references": [
-        {"title": "Microsoft: Unwanted access control entry after running adprep or dcpromo (KB4469393)",
-         "url": "https://mskb.pkisolutions.com/kb/4469393"},
+        {"title": "Microsoft: Active Directory domain-wide schema updates (operation 89 replaces the Enterprise "
+                  "Key Admins Full Control ACE)",
+         "url": "https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/deploy/domain-wide-updates"},
+        {"title": "PingCastle health check rules (P-DelegationKeyAdmin)",
+         "url": "https://www.pingcastle.com/PingCastleFiles/ad_hc_rules_list.html"},
     ],
     "description": (
         "A specific, Microsoft-acknowledged bug in adprep /domainprep "
