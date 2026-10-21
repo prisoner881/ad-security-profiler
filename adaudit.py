@@ -2,7 +2,7 @@
 """
 adaudit.py -- AD Security & Compliance Plugin Runner
 ======================================================
-VERSION: 0.10.4
+VERSION: 0.10.5
 
 Companion to adprofiler.py. Where adprofiler.py collects AD data,
 adaudit.py analyzes it: discovers every plugin file in plugins/, runs each
@@ -25,6 +25,9 @@ DESIGN:
       as: (status, object_guid, stig_severity, stig_reference,
       tool_severity, tool_reference, fd_severity, summary, detail).
       Zero rows returned = clean pass, nothing to report.
+    - [v0.10.5] Requires schema v45 (adprofiler.py 0.9.0): plugins 2044-2046
+      and the 4021 / 11001 updates read the computer creator SID, the DCs'
+      SYSVOL subscription columns and the users' Java attributes.
     - [v0.10.4] Requires schema v44 (adprofiler.py 0.8.0): plugins 1052,
       4038, 4039 and 9040-9042 read the columns and SYSVOL data it adds.
     - [v0.10.3] Push, following the API's engine notes of 14 October 2026.
@@ -241,7 +244,7 @@ import psycopg2.extras
 
 import adaudit_push
 
-VERSION = "0.10.4"
+VERSION = "0.10.5"
 
 # [test-candidate-branch] Always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
@@ -591,8 +594,10 @@ def connect_postgres():
 # maintenance (no plugin change), v42 the Entra coverage round tables, v43
 # the evaluation run lifecycle, plugin roster and push state, v44 the
 # dSHeuristics / msDS-Other-Settings / NetBIOS / scriptPath columns and the
-# SYSVOL script commands (plugins 1052, 4038, 4039, 9040-9042).
-REQUIRED_SCHEMA_VERSION = 44
+# SYSVOL script commands (plugins 1052, 4038, 4039, 9040-9042), v45 the
+# computer creator SID, DC SYSVOL subscriptions and users' Java attributes
+# (plugins 2044-2046, 4021, 11001).
+REQUIRED_SCHEMA_VERSION = 45
 
 # [v0.9.0] Data sources a client may not have collected: (table/view names a
 # plugin query mentions, probe returning TRUE when the client has the data).

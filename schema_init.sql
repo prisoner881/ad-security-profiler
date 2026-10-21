@@ -5411,6 +5411,44 @@ COMMENT ON COLUMN ad_intel.gpo_preference_item_edge.preference_type IS
     'for FolderOptions {properties: the Properties attributes, children: [{tag, attributes}]}. '
     '(schema v44)';
 
+-- ============================================================================
+-- v45 ADDITIONS -- see schema_migration_v45.sql.
+-- ============================================================================
+
+ALTER TABLE ad_intel.ad_computer
+    ADD COLUMN IF NOT EXISTS creator_sid ad_intel.sid_text,
+    ADD COLUMN IF NOT EXISTS sysvol_subscription_found boolean,
+    ADD COLUMN IF NOT EXISTS sysvol_read_only boolean,
+    ADD COLUMN IF NOT EXISTS sysvol_replication_enabled boolean;
+COMMENT ON COLUMN ad_intel.ad_computer.creator_sid IS
+    'mS-DS-CreatorSID: the account that created the computer through MachineAccountQuota. '
+    'Set by AD only for computers an account without the Create Computer Objects right joined '
+    'to the domain; NULL otherwise (or collected before adprofiler 0.9.0). (schema v45)';
+COMMENT ON COLUMN ad_intel.ad_computer.sysvol_subscription_found IS
+    'Domain controllers only: whether the DC has a DFS Replication SYSVOL subscription '
+    '(CN=SYSVOL Subscription,CN=Domain System Volume,CN=DFSR-LocalSettings,<DC>). FALSE is '
+    'expected while SYSVOL replicates with FRS. NULL = not a DC, or not collected (adprofiler '
+    'before 0.9.0, or the subscriptions could not be read). (schema v45)';
+COMMENT ON COLUMN ad_intel.ad_computer.sysvol_read_only IS
+    'msDFSR-ReadOnly of the DC''s SYSVOL subscription: TRUE on a correctly configured read-only '
+    'DC. NULL = attribute absent (which means writable) or not collected. (schema v45)';
+COMMENT ON COLUMN ad_intel.ad_computer.sysvol_replication_enabled IS
+    'msDFSR-Enabled of the DC''s SYSVOL subscription: FALSE = SYSVOL replication is turned off '
+    'on this DC. NULL = attribute absent or not collected. (schema v45)';
+
+ALTER TABLE ad_intel.ad_user
+    ADD COLUMN IF NOT EXISTS java_attributes text[];
+COMMENT ON COLUMN ad_intel.ad_user.java_attributes IS
+    'Names of the RFC 2713 Java attributes set on the account (javaClassName, javaCodeBase, '
+    'javaFactory, javaSerializedData, javaRemoteLocation); values are never stored. NULL = none, '
+    'the forest schema has no Java extension, or collected before adprofiler 0.9.0. (schema v45)';
+
+COMMENT ON COLUMN ad_intel.directory_object.owner_sid IS
+    'Owner SID from the object''s security descriptor, when this project has collected one for '
+    'it: the domain root, AdminSDHolder, OUs, PKI objects, AdminSDHolder-protected objects, and '
+    'from schema v45 (adprofiler 0.9.0) every computer. NULL means "not collected", not "no '
+    'owner". (schema v45)';
+
 
 -- ============================================================================
 -- v31 ADDITIONS -- schema version tracking.
@@ -5426,7 +5464,7 @@ CREATE TABLE schema_migration_history (
 -- pretense of having stepped through intermediate versions that were
 -- never actually separately applied to this database.
 INSERT INTO schema_migration_history (version_number, description) VALUES
-    (44, 'Fresh install via schema_init.sql, consolidated through v44');
+    (45, 'Fresh install via schema_init.sql, consolidated through v45');
 
 -- ============================================================================
 -- PARTITIONED TABLE REGISTRY + INITIAL PARTITION CREATION
