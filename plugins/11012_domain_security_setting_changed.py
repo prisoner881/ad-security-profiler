@@ -14,7 +14,11 @@ Compared on the domain object (ad_domain):
   (pwdProperties 0x10), DOMAIN_PASSWORD_NO_CLEAR_CHANGE (0x4),
   dSHeuristics anonymous access / UPN-SPN uniqueness / AdminSDHolder
   exclusion mask (dwAdminSDExMask), domain functional level, Recycle Bin
-  enabled, and smart-card-only password hash rolling (SCRIL).
+  enabled, and smart-card-only password hash rolling (SCRIL); [1.1]
+  dSHeuristics characters 3 (List Object mode), 8 (anonymous NSPI), 28
+  (LDAPAddAuthZVerifications) and 29 (LDAPOwnerModify), and
+  DenyUnauthenticatedBind in msDS-Other-Settings -- the settings plugins
+  4038 and 4039 check.
 Compared on each Fine-Grained Password Policy (ad_fgpp):
   minimum length, complexity, reversible encryption, lockout threshold,
   lockout duration and lockout observation window.
@@ -44,16 +48,26 @@ raised from 0, minimum length lowered, complexity disabled, history
 lowered, lockout disabled (threshold to 0), reversible encryption
 enabled, NO_CLEAR_CHANGE cleared, anonymous access enabled, uniqueness
 checks disabled, AdminSDHolder exclusion bits added, SCRIL hash rolling
-disabled. One row per changed object (the domain or the FGPP).
-Suppressed on a client's first collection run.
+disabled, anonymous NSPI enabled, the CVE-2021-42291 LDAP hardening
+(characters 28/29) moved off 1 or set to 2, DenyUnauthenticatedBind moved
+off 1. One row per changed object (the domain or the FGPP). Suppressed on
+a client's first collection run.
+
+[v1.1] Adds the dSHeuristics characters 3, 8, 28 and 29 and
+DenyUnauthenticatedBind (ad_domain.dsheuristics / ds_other_settings,
+adprofiler 0.8.0). A character past the end of the string, or a missing
+DenyUnauthenticatedBind, shows as "unset". Both sides must have been
+collected: a version collected before adprofiler 0.8.0, or with the
+Directory Service object unreadable (NULL), is not compared, so the first
+0.8.0 run produces no findings for these fields.
 """
 
 PLUGIN = {
     "plugin_id": 11012,
     "category": "Change Detection",
     "name": "Security-Relevant Domain or Password Policy Setting Changed",
-    "version": "1.0",
-    "revision_date": "2026-10-04",
+    "version": "1.1",
+    "revision_date": "2026-10-21",
     "control_id": "CHANGE-11012",
     "framework_tags": [
         "NIST-800-53-CM-3", "NIST-800-53-SI-4", "NIST-800-53-AU-6", "NIST-800-53-CM-6",
@@ -76,6 +90,11 @@ PLUGIN = {
          "url": "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/password-policy"},
         {"title": "Microsoft: KB5008382 -- UPN and SPN uniqueness (CVE-2021-42282)",
          "url": "https://support.microsoft.com/en-us/topic/kb5008382-verification-of-uniqueness-for-user-principal-name-service-principal-name-and-the-service-principal-name-alias-cve-2021-42282-4651b175-290c-4e59-8fcb-e4e5cd0cdb29"},
+        {"title": "Microsoft [MS-ADTS]: dSHeuristics",
+         "url": "https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-adts/e5899be4-862e-496f-9a38-33950617d2c5"},
+        {"title": "Microsoft [MS-ADTS]: LDAP configurable settings (msDS-Other-Settings, "
+                  "DenyUnauthenticatedBind)",
+         "url": "https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-adts/41cbdb2c-eab1-45b0-8236-ae777b1c5406"},
         {"title": "MITRE ATT&CK T1484: Domain or Tenant Policy Modification",
          "url": "https://attack.mitre.org/techniques/T1484/"},
         {"title": "CISA AA26-237A: Joint Red Team Assessment Findings",
@@ -86,11 +105,14 @@ PLUGIN = {
         "Password Policies that changed since the previous successful collection run, "
         "with old and new values: MachineAccountQuota, password length/complexity/"
         "history/age, lockout threshold/duration/window, reversible encryption, "
-        "dSHeuristics anonymous access, UPN/SPN uniqueness and AdminSDHolder "
-        "exclusion mask, functional level, Recycle Bin and smart-card hash rolling. "
+        "dSHeuristics anonymous access, UPN/SPN uniqueness, AdminSDHolder "
+        "exclusion mask, List Object mode, anonymous NSPI and the CVE-2021-42291 "
+        "LDAP hardening (characters 28/29), DenyUnauthenticatedBind, functional "
+        "level, Recycle Bin and smart-card hash rolling. "
         "Severity is medium, high when the change weakens security (for example "
         "MachineAccountQuota raised from 0, anonymous LDAP enabled, complexity "
-        "disabled or reversible encryption enabled, minimum length lowered). Values "
+        "disabled or reversible encryption enabled, minimum length lowered, anonymous "
+        "NSPI enabled, LDAP hardening or DenyUnauthenticatedBind moved off 1). Values "
         "collected for the first time (NULL before) are not treated as changes, so "
         "the schema v38 rescan does not produce findings. Suppressed on a client's "
         "first collection run."
@@ -107,7 +129,8 @@ PLUGIN = {
         "restore dSHeuristics with Set-ADObject 'CN=Directory Service,CN=Windows NT,"
         "CN=Services,CN=Configuration,<forest DN>' -Replace @{dSHeuristics='<value>'} "
         "(7th character not 2, 21st character 0, 16th character -- dwAdminSDExMask -- "
-        "0). Note that the default domain password policy is normally set through the "
+        "0, characters 3 and 8 0, characters 28 and 29 1); add DenyUnauthenticatedBind=1 "
+        "back to msDS-Other-Settings on the same object. Note that the default domain password policy is normally set through the "
         "Default Domain Policy GPO, which overwrites direct changes on the next refresh."
     ),
     "base_severity": "medium",
@@ -155,6 +178,25 @@ PLUGIN = {
                 ORDER BY p.valid_from DESC
                 LIMIT 1
             ) p ON TRUE
+            CROSS JOIN LATERAL (
+                SELECT CASE WHEN ok THEN COALESCE(NULLIF(substr(p.dsheuristics, 3, 1), ''), 'unset') END AS p3,
+                       CASE WHEN ok THEN COALESCE(NULLIF(substr(c.dsheuristics, 3, 1), ''), 'unset') END AS c3,
+                       CASE WHEN ok THEN COALESCE(NULLIF(substr(p.dsheuristics, 8, 1), ''), 'unset') END AS p8,
+                       CASE WHEN ok THEN COALESCE(NULLIF(substr(c.dsheuristics, 8, 1), ''), 'unset') END AS c8,
+                       CASE WHEN ok THEN COALESCE(NULLIF(substr(p.dsheuristics, 28, 1), ''), 'unset') END AS p28,
+                       CASE WHEN ok THEN COALESCE(NULLIF(substr(c.dsheuristics, 28, 1), ''), 'unset') END AS c28,
+                       CASE WHEN ok THEN COALESCE(NULLIF(substr(p.dsheuristics, 29, 1), ''), 'unset') END AS p29,
+                       CASE WHEN ok THEN COALESCE(NULLIF(substr(c.dsheuristics, 29, 1), ''), 'unset') END AS c29,
+                       CASE WHEN p.ds_other_settings IS NOT NULL AND c.ds_other_settings IS NOT NULL
+                            THEN COALESCE((SELECT e.value FROM jsonb_each_text(p.ds_other_settings) e
+                                           WHERE lower(e.key) = 'denyunauthenticatedbind'
+                                           ORDER BY e.key LIMIT 1), 'unset') END AS pdeny,
+                       CASE WHEN p.ds_other_settings IS NOT NULL AND c.ds_other_settings IS NOT NULL
+                            THEN COALESCE((SELECT e.value FROM jsonb_each_text(c.ds_other_settings) e
+                                           WHERE lower(e.key) = 'denyunauthenticatedbind'
+                                           ORDER BY e.key LIMIT 1), 'unset') END AS cdeny
+                FROM (SELECT p.dsheuristics IS NOT NULL AND c.dsheuristics IS NOT NULL AS ok) o
+            ) dh
             CROSS JOIN LATERAL (VALUES
                 (1, 'MachineAccountQuota', p.machine_account_quota::text, c.machine_account_quota::text,
                  p.machine_account_quota = 0 AND COALESCE(c.machine_account_quota, 10) > 0),
@@ -194,7 +236,18 @@ PLUGIN = {
                  p.recycle_bin_enabled AND c.recycle_bin_enabled IS FALSE),
                 (17, 'smart-card-only password hash rolling (SCRIL)', p.smartcard_hash_rolling_enabled::text,
                  c.smartcard_hash_rolling_enabled::text,
-                 p.smartcard_hash_rolling_enabled AND c.smartcard_hash_rolling_enabled IS NOT TRUE)
+                 p.smartcard_hash_rolling_enabled AND c.smartcard_hash_rolling_enabled IS NOT TRUE),
+                -- [v1.1] old_v is NULL unless both sides were collected (adprofiler 0.8.0+),
+                -- so these are skipped like any not-previously-collected field.
+                (18, 'dSHeuristics List Object mode (character 3 fDoListObject)', dh.p3, dh.c3, false),
+                (19, 'dSHeuristics anonymous NSPI access (character 8 fAllowAnonNSPI)', dh.p8, dh.c8,
+                 dh.p8 IN ('unset', '0') AND dh.c8 NOT IN ('unset', '0')),
+                (20, 'dSHeuristics LDAPAddAuthZVerifications (character 28)', dh.p28, dh.c28,
+                 (dh.p28 = '1' AND dh.c28 <> '1') OR (dh.c28 = '2' AND dh.p28 <> '2')),
+                (21, 'dSHeuristics LDAPOwnerModify (character 29)', dh.p29, dh.c29,
+                 (dh.p29 = '1' AND dh.c29 <> '1') OR (dh.c29 = '2' AND dh.p29 <> '2')),
+                (22, 'msDS-Other-Settings DenyUnauthenticatedBind', dh.pdeny, dh.cdeny,
+                 dh.pdeny = '1' AND dh.cdeny <> '1')
             ) AS f(ord, field, old_v, new_v, weakens)
         ),
         fgpp_cur AS (
