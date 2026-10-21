@@ -101,6 +101,16 @@ Use CM-11 for user app consent and registration, and AC-20 / PCI 8.2.7 / A.5.19 
 ### T17. Audit logging configuration: which security events domain controllers record (audit policy)
 `NIST-800-53-AU-2`, `NIST-800-53-AU-12`, `NIST-800-53-AU-3`, `NIST-CSF-2.0-DE.CM-03`, `PCI-DSS-4.0-10.2.1`, `PCI-DSS-4.0-10.2.1.2`, `PCI-DSS-4.0-10.2.1.5`, `CIS-CSC-8-8.2`, `CIS-CSC-8-8.5`, `ISO-27001-2022-A.8.15`, `SOC2-CC7.2`, `HIPAA-164.312(b)`
 
+### T18. Protection of network traffic and update channels: LDAP/SMB signing and integrity on clients, hardened UNC paths, update server transport
+`NIST-800-53-SC-8`, `NIST-800-53-SC-23`, `NIST-800-53-CM-6`, `NIST-CSF-2.0-PR.DS-02`, `PCI-DSS-4.0-4.2.1`, `CIS-CSC-8-3.10`, `ISO-27001-2022-A.8.20`, `SOC2-CC6.7`
+
+Titles: SC-8 Transmission Confidentiality and Integrity; SC-23 Session Authenticity.
+
+### T19. Endpoint protection and session controls: anti-malware and attack surface reduction, host firewall rules, idle and disconnected session limits
+`NIST-800-53-SI-3`, `NIST-800-53-SC-7`, `NIST-800-53-AC-11`, `NIST-800-53-AC-12`, `NIST-CSF-2.0-DE.CM-01`, `PCI-DSS-4.0-5.2.1`, `PCI-DSS-4.0-8.2.8`, `CIS-CSC-8-10.1`, `CIS-CSC-8-4.4`, `CIS-CSC-8-4.5`, `CIS-CSC-8-4.3`, `ISO-27001-2022-A.8.7`, `SOC2-CC6.8`
+
+Titles: SI-3 Malicious Code Protection; SC-7 Boundary Protection; AC-11 Device Lock; AC-12 Session Termination; CIS 10.1 Deploy and Maintain Anti-Malware Software; CIS 4.4 Implement and Manage a Firewall on Servers; CIS 4.5 Implement and Manage a Firewall on End-User Devices; CIS 4.3 Configure Automatic Session Locking on Enterprise Assets; PCI 5.2.1 anti-malware deployed; PCI 8.2.8 re-authentication after 15 minutes idle.
+
 ### CISA SCuBA Entra ID (MS.AAD)
 
 | Tag | Policy |

@@ -22,8 +22,8 @@ PLUGIN = {
     "plugin_id": 2007,
     "category": "Computer Accounts",
     "name": "Computer Account Password Has Not Rotated Recently",
-    "version": "1.3",
-    "revision_date": "2026-10-03",
+    "version": "1.4",
+    "revision_date": "2026-10-20",
     "remediation": (
         "If the machine still exists, confirm it can actually reach a "
         "domain controller and that its computer account password "
@@ -64,10 +64,21 @@ PLUGIN = {
         "machine can show a recent logon while password rotation has "
         "separately stopped working, or vice versa. 90 days (3x the "
         "default rotation interval) is used as a conservative threshold "
-        "here, not a cited external standard."
+        "here, not a cited external standard. Failover cluster name "
+        "objects (CNO/VCO, SPN MSClusterVirtualServer or MSServerCluster) "
+        "are labelled as such; one whose password is over three years old "
+        "while the account is still in use (logged on in the last 45 days) "
+        "is medium (PingCastle S-PwdLastSet-Cluster): the cluster service "
+        "is not rotating it."
     ),
     "base_severity": "low",
     "query": """
+        WITH cluster AS (
+            SELECT DISTINCT s.object_guid
+            FROM spn_edge s
+            WHERE s.client_id = %(client_id)s AND s.valid_to IS NULL
+              AND (s.spn ILIKE 'MSClusterVirtualServer/%%' OR s.spn ILIKE 'MSServerCluster/%%')
+        )
         SELECT
             'warn' AS status,
             c.object_guid,
@@ -75,8 +86,12 @@ PLUGIN = {
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
-            CASE WHEN c.is_domain_controller THEN 'medium' ELSE 'low' END AS fd_severity,
-            (CASE WHEN c.is_domain_controller THEN 'Domain Controller ' ELSE '' END)
+            CASE WHEN c.is_domain_controller THEN 'medium'
+                 WHEN cl.object_guid IS NOT NULL AND c.pwd_last_set < now() - interval '3 years'
+                      AND c.last_logon_timestamp >= now() - interval '45 days' THEN 'medium'
+                 ELSE 'low' END AS fd_severity,
+            (CASE WHEN c.is_domain_controller THEN 'Domain Controller '
+                  WHEN cl.object_guid IS NOT NULL THEN 'Cluster Name Object ' ELSE '' END)
                 || 'Computer Account ' || c.sam_account_name
                 || ' password has not rotated since '
                 || to_char(c.pwd_last_set AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS summary,
@@ -86,9 +101,12 @@ PLUGIN = {
                 'pwd_last_set', c.pwd_last_set,
                 'password_age_days', EXTRACT(DAY FROM now() - c.pwd_last_set)::int,
                 'is_enabled', c.is_enabled,
-                'is_domain_controller', c.is_domain_controller
+                'is_domain_controller', c.is_domain_controller,
+                'is_cluster_account', (cl.object_guid IS NOT NULL),
+                'last_logon_timestamp', c.last_logon_timestamp
             ) AS detail
         FROM ad_computer c
+        LEFT JOIN cluster cl ON cl.object_guid = c.object_guid
         WHERE c.valid_to IS NULL
           AND c.client_id = %(client_id)s
           AND c.pwd_last_set IS NOT NULL

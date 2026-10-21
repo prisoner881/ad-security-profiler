@@ -15,7 +15,11 @@ key_algorithm, key_size, signature_hash_algorithm, parse_error}.
 
 Per certificate:
   - RSA key shorter than 2048 bits                         -> medium
-  - signature hash MD5 or SHA-1                            -> medium
+  - signature hash MD5 or SHA-1 (MD2 / MD4 too, when the
+    parser could name them)                                -> medium
+  - [v1.1] DSA key                                         -> low
+  - [v1.1] RSA key of 2048-3071 bits on a certificate valid
+    after 2030 (NIST SP 800-57: 112-bit security ends 2030) -> low
     (skipped for a self-signed certificate -- subject CN equal to
     issuer CN -- because a root's signature over itself is not relied on
     for trust; the hash of certificates it ISSUES is what matters)
@@ -43,8 +47,8 @@ PLUGIN = {
     "plugin_id": 6013,
     "category": "Certificate Services",
     "name": "Weak or Expiring CA Certificates in NTAuth, Root/AIA Stores and Enterprise CAs",
-    "version": "1.0",
-    "revision_date": "2026-10-04",
+    "version": "1.1",
+    "revision_date": "2026-10-20",
     "control_id": "PKI-6013",
     "framework_tags": [
         "NIST-800-53-SC-12",
@@ -137,7 +141,11 @@ PLUGIN = {
             CROSS JOIN LATERAL (VALUES
                 (CASE WHEN c.key_alg = 'rsa' AND c.key_size < 2048
                       THEN 'RSA ' || c.key_size || '-bit key' END, 2),
-                (CASE WHEN c.sig_hash IN ('md5', 'sha1')
+                (CASE WHEN c.key_alg = 'dsa' THEN 'DSA key' END, 1),
+                (CASE WHEN c.key_alg = 'rsa' AND c.key_size >= 2048 AND c.key_size < 3072
+                       AND c.not_after > timestamptz '2030-12-31 23:59:59+00'
+                      THEN 'RSA ' || c.key_size || '-bit key valid beyond 2030 (3072 bits needed)' END, 1),
+                (CASE WHEN c.sig_hash IN ('md2', 'md4', 'md5', 'sha1')
                        AND c.subject_cn IS DISTINCT FROM c.issuer_cn
                       THEN upper(c.sig_hash) || ' signature' END, 2),
                 (CASE WHEN c.not_after < ref.t THEN 'expired' END, 1),

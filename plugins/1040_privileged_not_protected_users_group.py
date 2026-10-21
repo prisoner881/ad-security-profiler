@@ -56,8 +56,8 @@ PLUGIN = {
     "plugin_id": 1040,
     "category": "User Accounts",
     "name": "Privileged Account Not a Member of the Protected Users Group",
-    "version": "1.5",
-    "revision_date": "2026-10-07",
+    "version": "1.6",
+    "revision_date": "2026-10-20",
     "remediation": (
         "Add this account to the built-in Protected Users group, "
         "provided the domain functional level is at least Windows "
@@ -185,5 +185,32 @@ PLUGIN = {
           -- 1025 for the same account, applied here rather than
           -- treated as a fresh judgment call.
           AND COALESCE(udo.object_sid, '') NOT LIKE '%%-502'
+        UNION ALL
+        -- [v1.6] The Protected Users group itself (RID 525) is missing: it is
+        -- created when the PDC emulator runs Windows Server 2012 R2 or later,
+        -- so its absence means no account can be protected at all
+        -- (PingCastle A-ProtectedUsers). One row, identity = the domain.
+        SELECT
+            'warn' AS status,
+            dom.object_guid,
+            NULL AS stig_severity,
+            NULL AS stig_reference,
+            NULL AS tool_severity,
+            NULL AS tool_reference,
+            'low' AS fd_severity,
+            'The Protected Users group (RID 525) does not exist in domain '
+                || COALESCE(dom.dns_root, '(unknown)')
+                || ': the PDC emulator has never run Windows Server 2012 R2 or later, so no '
+                || 'privileged account can be protected by it' AS summary,
+            jsonb_build_object('dns_root', dom.dns_root, 'protected_users_group_present', false) AS detail
+        FROM ad_domain dom
+        JOIN directory_object ddo
+          ON ddo.object_guid = dom.object_guid AND ddo.client_id = dom.client_id AND NOT ddo.is_deleted
+        WHERE dom.client_id = %(client_id)s AND dom.valid_to IS NULL
+          AND ddo.object_sid IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM directory_object g
+                          WHERE g.client_id = %(client_id)s AND NOT g.is_deleted
+                            AND g.object_class = 'group'
+                            AND g.object_sid = ddo.object_sid || '-525')
     """,
 }
