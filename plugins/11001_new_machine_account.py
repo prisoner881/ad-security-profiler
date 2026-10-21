@@ -57,13 +57,17 @@ right). With 0.9.0 data the severity no longer guesses from the quota:
 medium when the computer was created through the quota (the summary names
 the account), low when it was not; high still wins when an attack-path
 signal applies. With older data the v1.1 rating applies.
+
+[v1.3] The collector-version pattern uses [.] instead of a backslash
+escape, which Python reported as an invalid escape sequence
+(SyntaxWarning) when loading the plugin. No change in behaviour.
 """
 
 PLUGIN = {
     "plugin_id": 11001,
     "category": "Change Detection",
     "name": "Machine Account Created Since Previous Collection Run",
-    "version": "1.2",
+    "version": "1.3",
     "revision_date": "2026-10-21",
     "remediation": (
         "Reconcile each new computer account against your provisioning "
@@ -155,7 +159,7 @@ PLUGIN = {
                             false) AS yes
             FROM sync_run sr
             WHERE sr.client_id = %(client_id)s AND sr.run_id = %(run_id)s
-              AND sr.collector_version ~ '^[0-9]+(\.[0-9]+)*$'
+              AND sr.collector_version ~ '^[0-9]+([.][0-9]+)*$'
         ),
         domain_quota AS (
             SELECT max(d.machine_account_quota) AS maq
