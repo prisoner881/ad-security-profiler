@@ -1,7 +1,12 @@
 """
 sysvol_collector.py -- SYSVOL / NETLOGON reader for adprofiler.py
 =================================================================
-VERSION: 1.0 (ships with adprofiler.py 0.7.0, schema v39)
+VERSION: 1.1 (ships with adprofiler.py 0.8.0, schema v44)
+
+1.1: the commands in scripts.ini / psscripts.ini are stored (gpo_setting_edge
+     source 'scripts', CmdLine only), and the Files and FolderOptions
+     preference types are read (plugins 9040-9042).
+1.0: first version (adprofiler.py 0.7.0, schema v39).
 
 Group Policy settings are not in LDAP: a GPO's LDAP object (the GPC) only
 points at its folder on the SYSVOL share (the GPT), where the settings
@@ -18,6 +23,7 @@ computer and user applies Group Policy from it):
     <GPO folder>\\Machine|User\\Registry.pol                        admin templates
     <GPO folder>\\Machine\\Microsoft\\Windows NT\\Audit\\audit.csv      advanced audit policy
     <GPO folder>\\Machine|User\\Preferences\\<Type>\\<Type>.xml        GPP items
+    <GPO folder>\\Machine|User\\Scripts\\scripts.ini, psscripts.ini   script commands
     <GPO folder>\\Machine|User\\Scripts\\...                          scripts (scanned)
     \\\\<DC>\\NETLOGON\\...                                             logon scripts (scanned)
 
@@ -27,7 +33,9 @@ SECRETS ARE NEVER STORED:
     - String registry values whose name suggests a credential
       (DefaultPassword for AutoAdminLogon, ...) are stored as '<redacted>'.
     - Scripts: only the names of the credential patterns found and their
-      line numbers -- never the matched text.
+      line numbers -- never the matched text. Of scripts.ini /
+      psscripts.ini only each script's command (CmdLine) is kept, never
+      its Parameters, which can carry credentials.
 
 FAILURE HANDLING: SYSVOL collection never fails the run. If the share
 cannot be reached at all, nothing changes in the database except
@@ -61,7 +69,15 @@ SCRIPT_EXTENSIONS = {".bat", ".cmd", ".ps1", ".psm1", ".vbs", ".vbe", ".js", ".k
                      ".txt", ".ini", ".cfg", ".config", ".xml", ".sh", ".py"}
 
 # GPP types that can carry a cpassword, plus Groups (local group changes).
-PREFERENCE_TYPES = ("Groups", "ScheduledTasks", "Services", "DataSources", "Drives", "Printers")
+PREFERENCE_TYPES = ("Groups", "ScheduledTasks", "Services", "DataSources", "Drives", "Printers",
+                    # [1.1] files copied by GPO (plugin 9041); file type
+                    # associations (plugin 9042)
+                    "Files", "FolderOptions")
+# [1.1] Script lists in a GPO's Machine|User\Scripts folder -> value_type.
+SCRIPT_LIST_FILES = (("scripts.ini", "script"), ("psscripts.ini", "powershell"))
+SCRIPT_LIST_SECTIONS = {"startup": "Startup", "shutdown": "Shutdown", "logon": "Logon", "logoff": "Logoff"}
+MAX_PREFERENCE_ATTR_CHARS = 500
+MAX_PREFERENCE_CHILDREN = 50
 
 REDACTED = "<redacted>"
 SECRET_NAME_RE = re.compile(r"password|passwd|passphrase|pwd|secret|apikey|api_key",
@@ -403,12 +419,46 @@ def parse_gpp_xml(data, preference_type):
             if not cpassword:
                 cpassword = next((p.attrib.get("cpassword", "") for p in props.iter()
                                   if p.attrib.get("cpassword")), "")
+        elif _local(el.tag) == "File":
+            details.update({"from_path": a.get("fromPath") or None,
+                            "target_path": a.get("targetPath") or None})
+        elif preference_type == "FolderOptions":
+            # [1.1] The layout differs per item kind (FileType, OpenWith,
+            # GlobalFolderOptions...), so the attributes are kept as they are.
+            details.update({
+                "properties": _limited_attributes(a),
+                "children": [{"tag": _local(c.tag), "attributes": _limited_attributes(c.attrib)}
+                             for c in props.iter() if c is not props][:MAX_PREFERENCE_CHILDREN],
+            })
         items.append({
             "item_uid": uid, "item_name": name or None, "action": a.get("action"),
             "has_cpassword": bool(cpassword.strip()), "account_name": account,
             "details": details,
         })
     return items
+
+
+def _limited_attributes(attrib):
+    """[1.1] XML attributes as a sorted dict, each value cut to
+    MAX_PREFERENCE_ATTR_CHARS; cpassword is never kept."""
+    return {k: (v or "")[:MAX_PREFERENCE_ATTR_CHARS]
+            for k, v in sorted(attrib.items()) if k.lower() != "cpassword"}
+
+
+def script_list_settings(data, file_name, value_type):
+    """[1.1] scripts.ini / psscripts.ini -> ('scripts', section, key,
+    value_type, CmdLine) rows; key = '<file>:<index>'. Parameters are not
+    returned (they can carry credentials); [ScriptsConfig] is skipped."""
+    rows = []
+    for section, items in parse_inf(data).items():
+        name = SCRIPT_LIST_SECTIONS.get(section.strip().lower())
+        if name is None:
+            continue
+        for key, value in items:
+            m = re.match(r"^(\d+)cmdline$", key.strip(), re.IGNORECASE)
+            if m and value.strip():
+                rows.append(("scripts", name, f"{file_name}:{int(m.group(1))}", value_type, value.strip()))
+    return rows
 
 
 def scan_script(data):
@@ -605,6 +655,15 @@ def read_gpo_folder(reader, gpo_path, max_script_files):
                 raise _GpoReadFailed("error", f"{rel}: unparseable ({exc})")
             for item in items:
                 result["preferences"].append((scope, ptype, item))
+
+        for file_name, value_type in SCRIPT_LIST_FILES:
+            rel = f"{folder}\\Scripts\\{file_name}"
+            data = _read_optional(reader, share, f"{gpo_path}\\{rel}", MAX_POLICY_FILE_BYTES)
+            if data is None:
+                continue
+            result["files_read"].append(rel)
+            for row in script_list_settings(data, file_name, value_type):
+                result["settings"].append((scope,) + row)
 
         scripts = []
         _walk_scripts(reader, share, f"{gpo_path}\\{folder}\\Scripts", 0, [max_script_files], scripts)

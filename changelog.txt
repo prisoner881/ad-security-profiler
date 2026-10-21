@@ -9,6 +9,29 @@ the script's own docstring now keeps a one-line summary per entry, this
 file keeps the complete detail (root causes, what was verified, why a
 decision was made a particular way) for anyone who wants it.
 
+    0.8.0 - Schema v44. Data for six PingCastle-equivalent checks:
+            - The whole dSHeuristics string is stored (ad_domain.dsheuristics;
+              only characters 7, 16 and 21 were kept), for List Object mode,
+              anonymous NSPI and the CVE-2021-42291 LDAP hardening (plugin
+              4038).
+            - msDS-Other-Settings is read with it (ad_domain.ds_other_settings,
+              {name: value}), for DenyUnauthenticatedBind (plugin 4039).
+            - The domain's NetBIOS name is read from its crossRef
+              (ad_domain.netbios_name), so \\CORP\NETLOGON counts as the
+              domain's own share (plugins 1052, 9040, 9041).
+            - scriptPath is collected on users (ad_user.script_path, plugin
+              1052).
+            - sysvol_collector 1.1: the commands in scripts.ini /
+              psscripts.ini (gpo_setting_edge source 'scripts', CmdLine only,
+              never Parameters), and the Files and FolderOptions Group Policy
+              Preferences (plugins 9040-9042).
+            DERIVED_FIELDS_VERSION is raised to 0.8.0, so the first run
+            rescans every object once. Users with a logon script and the
+            domain object are recorded as "modified" on that run (their
+            stored attributes gain scriptPath / the new settings); nothing
+            else changes in their history. Apply schema_migration_v44.sql
+            first.
+
     0.7.8 - OU name and description are stored as text. Both attributes
             are multi-valued in the schema, so ldap3 returns lists, and
             ou_typed_columns() stored them as-is: Postgres turned them into

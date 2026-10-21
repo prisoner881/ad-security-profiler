@@ -2,7 +2,7 @@
 """
 adaudit.py -- AD Security & Compliance Plugin Runner
 ======================================================
-VERSION: 0.10.3
+VERSION: 0.10.4
 
 Companion to adprofiler.py. Where adprofiler.py collects AD data,
 adaudit.py analyzes it: discovers every plugin file in plugins/, runs each
@@ -25,6 +25,8 @@ DESIGN:
       as: (status, object_guid, stig_severity, stig_reference,
       tool_severity, tool_reference, fd_severity, summary, detail).
       Zero rows returned = clean pass, nothing to report.
+    - [v0.10.4] Requires schema v44 (adprofiler.py 0.8.0): plugins 1052,
+      4038, 4039 and 9040-9042 read the columns and SYSVOL data it adds.
     - [v0.10.3] Push, following the API's engine notes of 14 October 2026.
       The API now says why it refuses a request, and the push acts on it:
       a key not granted the company id (KEY_NOT_SCOPED) or a disabled
@@ -239,7 +241,7 @@ import psycopg2.extras
 
 import adaudit_push
 
-VERSION = "0.10.3"
+VERSION = "0.10.4"
 
 # [test-candidate-branch] Always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
@@ -587,8 +589,10 @@ def connect_postgres():
 # the SYSVOL (Group Policy content) tables and views, v40
 # ad_domain.tombstone_lifetime_source (plugin 4011), v41 partition
 # maintenance (no plugin change), v42 the Entra coverage round tables, v43
-# the evaluation run lifecycle, plugin roster and push state.
-REQUIRED_SCHEMA_VERSION = 43
+# the evaluation run lifecycle, plugin roster and push state, v44 the
+# dSHeuristics / msDS-Other-Settings / NetBIOS / scriptPath columns and the
+# SYSVOL script commands (plugins 1052, 4038, 4039, 9040-9042).
+REQUIRED_SCHEMA_VERSION = 44
 
 # [v0.9.0] Data sources a client may not have collected: (table/view names a
 # plugin query mentions, probe returning TRUE when the client has the data).
