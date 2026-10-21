@@ -9,6 +9,15 @@ the script's own docstring now keeps a one-line summary per entry, this
 file keeps the complete detail (root causes, what was verified, why a
 decision was made a particular way) for anyone who wants it.
 
+    0.7.8 - OU name and description are stored as text. Both attributes
+            are multi-valued in the schema, so ldap3 returns lists, and
+            ou_typed_columns() stored them as-is: Postgres turned them into
+            array literals in the text columns (ad_ou.ou_name read
+            '{"Domain Controllers"}'), which showed up in the labels of
+            plugins 1037, 9039 and 10111-10113. The first value is stored
+            now. DERIVED_FIELDS_VERSION is raised to 0.7.8, so the first
+            0.7.8 run rescans every object once and corrects existing rows.
+
     0.7.7 - Automatic one-time rescan after an upgrade that changes a
             derived field. Unchanged objects are never rewritten, so
             0.7.6's key credential timestamp fix reached no existing row:

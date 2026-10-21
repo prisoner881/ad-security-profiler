@@ -16,11 +16,16 @@ admin (PingCastle P-DisplaySpecifier). A command on the domain's own SYSVOL
 or NETLOGON share is protected like Group Policy files and is reported only
 for inventory.
 
+Windows defaults are not reported: every forest has a "Manage..." entry
+running RsAdmin.msc (Remote Storage) on remoteStorageServicePoint-Display,
+once per installed language.
+
 Classification of the command (first token, quotes removed):
-  * UNC path on \\<domain>\SYSVOL or \\<domain>\NETLOGON  -> low (inventory)
-  * any other UNC path, or an http(s):// URL             -> high (fail)
-  * anything else (local path, bare program name)          -> medium: it runs
-    from each administrator's own machine, outside the directory's control.
+  * UNC path outside SYSVOL/NETLOGON, or an http(s):// URL -> high (fail)
+  * anything else (local path, bare program name)          -> low: it runs
+    from each administrator's own machine, so changing it already takes
+    admin rights there; reported because it is not a Windows default.
+  * UNC path on \\<domain>\SYSVOL or \\<domain>\NETLOGON  -> info (inventory)
 
 Data: ad_display_specifier.admin_context_menu (JSON array of the attribute's
 values), ad_domain.dns_root.
@@ -30,8 +35,8 @@ PLUGIN = {
     "plugin_id": 5020,
     "category": "ACLs",
     "name": "Display Specifier Admin Context Menu Runs a Program Outside SYSVOL",
-    "version": "1.0",
-    "revision_date": "2026-10-20",
+    "version": "1.1",
+    "revision_date": "2026-10-21",
     "control_id": "ACL-5020",
     "framework_tags": [
         "NIST-800-53-CM-6",
@@ -59,8 +64,9 @@ PLUGIN = {
         "the AD administration consoles that runs a program, and the program "
         "is not on the domain's SYSVOL/NETLOGON share. It runs as the "
         "administrator who clicks it, so whoever controls its location runs "
-        "code as a domain admin. High for other UNC paths and URLs, medium "
-        "for local paths, low for SYSVOL-hosted programs."
+        "code as a domain admin. High for other UNC paths and URLs, low "
+        "for local paths, info for SYSVOL-hosted programs. The Windows "
+        "default RsAdmin.msc entry is not reported."
     ),
     "remediation": (
         "Review the entry with ADSI Edit (Configuration > CN=DisplaySpecifiers "
@@ -110,6 +116,9 @@ PLUGIN = {
                         WHEN p.target ~ '^https?://' THEN 'url'
                         ELSE 'local' END AS location
             FROM program p
+            -- Windows default (Remote Storage), present in every forest
+            WHERE NOT (lower(COALESCE(p.schema_cn, '')) = 'remotestorageservicepoint-display'
+                       AND COALESCE(p.target, '') = 'rsadmin.msc')
         )
         SELECT
             CASE WHEN bool_or(c.location IN ('unc', 'url')) THEN 'fail' ELSE 'warn' END AS status,
@@ -119,8 +128,8 @@ PLUGIN = {
             NULL AS tool_severity,
             NULL AS tool_reference,
             CASE WHEN bool_or(c.location IN ('unc', 'url')) THEN 'high'
-                 WHEN bool_or(c.location = 'local') THEN 'medium'
-                 ELSE 'low' END AS fd_severity,
+                 WHEN bool_or(c.location = 'local') THEN 'low'
+                 ELSE 'info' END AS fd_severity,
             'Display specifier ' || COALESCE(c.schema_cn, c.dn_current)
                 || ' adds admin context-menu program(s) run by administrators: '
                 || string_agg('"' || c.label || '" -> ' || c.command

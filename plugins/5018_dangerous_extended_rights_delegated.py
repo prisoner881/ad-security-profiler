@@ -11,7 +11,10 @@ Tier 0:
       an account it controls -- MITRE ATT&CK T1134.005).
   Unexpire-Password     ccc2dc7d-a6ad-4a7a-8846-c04e3cc53501
       lets the holder restore an expired password, defeating password
-      expiry for accounts it controls.
+      expiry for accounts it controls. It also needs write access to the
+      target's pwdLastSet, so it is rated low. Windows grants it to
+      Authenticated Users on the domain root by default; that ACE is not
+      reported.
   Reanimate-Tombstones  45ec5156-db7e-47bb-b53f-dbeb2d03c40f
       lets the holder restore deleted objects -- including deleted
       privileged accounts with their group memberships. Checked on OUs
@@ -30,15 +33,16 @@ is reported as an orphaned or unresolved SID.
 
 Severity: high when Migrate-SID-History is granted (critical when to a broad
 principal: Everyone, Authenticated Users, Domain Users, Domain Computers,
-Users); medium for the other rights (high when to a broad principal).
+Users); Reanimate-Tombstones medium (high when to a broad principal);
+Unexpire-Password low (medium when to a broad principal).
 """
 
 PLUGIN = {
     "plugin_id": 5018,
     "category": "ACLs",
     "name": "Dangerous Extended Rights Delegated on the Domain or an OU",
-    "version": "1.0",
-    "revision_date": "2026-10-20",
+    "version": "1.1",
+    "revision_date": "2026-10-21",
     "control_id": "ACL-5018",
     "framework_tags": [
         "NIST-800-53-AC-3",
@@ -68,8 +72,10 @@ PLUGIN = {
         "A non-Tier 0 principal holds the Migrate-SID-History, "
         "Unexpire-Password or Reanimate-Tombstones extended right on the "
         "domain root or an OU. Migrate-SID-History allows SID-history "
-        "injection (high; critical for a broad group); the others are medium "
-        "(high for a broad group)."
+        "injection (high; critical for a broad group); Reanimate-Tombstones "
+        "is medium (high for a broad group); Unexpire-Password is low "
+        "(medium for a broad group; the Windows default grant to "
+        "Authenticated Users on the domain root is not reported)."
     ),
     "remediation": (
         "Remove the extended right from the trustee (dsacls <DN> /R "
@@ -97,7 +103,7 @@ PLUGIN = {
         ),
         rights (guid, right_name, rank) AS (
             VALUES ('ba33815a-4f93-4c76-87f3-57574bff8109', 'Migrate-SID-History', 3),
-                   ('ccc2dc7d-a6ad-4a7a-8846-c04e3cc53501', 'Unexpire-Password', 2),
+                   ('ccc2dc7d-a6ad-4a7a-8846-c04e3cc53501', 'Unexpire-Password', 1),
                    ('45ec5156-db7e-47bb-b53f-dbeb2d03c40f', 'Reanimate-Tombstones', 2)
         ),
         ace AS (
@@ -111,6 +117,9 @@ PLUGIN = {
               AND (a.access_mask & 256) <> 0
               AND (t.kind = 'domain' OR a.inherited IS NOT TRUE)
               AND NOT (t.kind = 'domain' AND r.right_name = 'Reanimate-Tombstones')
+              -- Windows default on the domain root
+              AND NOT (t.kind = 'domain' AND r.right_name = 'Unexpire-Password'
+                       AND a.trustee_sid::text = 'S-1-5-11')
         ),
         labelled AS (
             SELECT x.*,
@@ -132,7 +141,7 @@ PLUGIN = {
         graded AS (
             SELECT l.*,
                    CASE WHEN l.rank = 3 AND l.broad THEN 4 WHEN l.rank = 3 THEN 3
-                        WHEN l.broad THEN 3 ELSE 2 END AS sev
+                        WHEN l.broad THEN l.rank + 1 ELSE l.rank END AS sev
             FROM labelled l
         )
         SELECT
@@ -142,7 +151,8 @@ PLUGIN = {
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
-            CASE max(g.sev) WHEN 4 THEN 'critical' WHEN 3 THEN 'high' ELSE 'medium' END AS fd_severity,
+            CASE max(g.sev) WHEN 4 THEN 'critical' WHEN 3 THEN 'high' WHEN 2 THEN 'medium'
+                            ELSE 'low' END AS fd_severity,
             CASE WHEN g.kind = 'domain' THEN 'The domain root' ELSE 'OU ' || g.dn_current END
                 || ' delegates dangerous extended rights to non-Tier 0 principals: '
                 || string_agg(g.trustee || ' (' || g.right_name || ')', ', '

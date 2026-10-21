@@ -4,7 +4,7 @@
  adprofiler.py -- Active Directory Security & Compliance Profiler (Collector)
 ================================================================================
 
-VERSION: 0.7.7
+VERSION: 0.7.8
 
 PURPOSE:
     Connects to an on-premise Active Directory Domain Controller via LDAP,
@@ -185,7 +185,7 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
-VERSION = "0.7.7"
+VERSION = "0.7.8"
 
 # [v0.7.7] The oldest collector version whose stored derived fields
 # (parsed / typed columns computed from raw attributes) are current. A
@@ -195,8 +195,9 @@ VERSION = "0.7.7"
 # rescans every object once, as --full-rescan does. Raise it to the new
 # VERSION whenever a release changes a derived field. 0.7.7 covers
 # 0.7.6's key credential timestamp fix (runs made by 0.7.6 itself did
-# not rewrite unchanged objects either).
-DERIVED_FIELDS_VERSION = "0.7.7"
+# not rewrite unchanged objects either). 0.7.8: OU name and description
+# stored as text instead of array literals.
+DERIVED_FIELDS_VERSION = "0.7.8"
 
 
 def _version_tuple(text):
@@ -3157,6 +3158,13 @@ def gpoptions_block_inheritance(full):
     return bool((_as_int(full.get("gPOptions")) or 0) & 0x1)
 
 
+def _first_value(value):
+    """[v0.7.8] First value of a possibly multi-valued attribute (None when empty)."""
+    if isinstance(value, (list, tuple)):
+        return value[0] if value else None
+    return value
+
+
 def ou_typed_columns(full):
     """[v0.5.0] Deliberately thin: name, description, block_inheritance,
     when_created. GPO links are NOT here -- see OU_ATTRS's own comment
@@ -3166,9 +3174,12 @@ def ou_typed_columns(full):
     domain root/AdminSDHolder already use, not a typed column on the OU
     object itself, matching how every other object's ACL exposure in
     this project works."""
+    # [v0.7.8] ou and description are multi-valued in the schema, so
+    # ldap3 returns lists; stored as-is they became array literals
+    # ('{"Domain Controllers"}') in the text columns.
     return {
-        "ou_name": full.get("ou"),
-        "description": full.get("description"),
+        "ou_name": _first_value(full.get("ou")),
+        "description": _first_value(full.get("description")),
         "block_inheritance": gpoptions_block_inheritance(full),
         "when_created": full.get("whenCreated"),
     }
