@@ -10,14 +10,17 @@ active privilege by itself, but it's unmanaged configuration surface
 that can be forgotten about, misread during an incident response
 trust inventory, or accidentally re-enabled without anyone noticing
 it was ever there.
+
+[v1.1] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 7004,
     "category": "Trusts",
     "name": "Disabled Trust Relationship Object Still Present",
-    "version": "1.0",
-    "revision_date": "2026-07-18",
+    "version": "1.1",
+    "revision_date": "2026-10-21",
     "remediation": (
         "If this trust relationship is genuinely no longer needed, "
         "remove the Trusted Domain Object entirely rather than leaving "
@@ -41,7 +44,14 @@ PLUGIN = {
         "SOC2-CC6.6",
         "MITRE-ATTCK-T1484.002",
     ],
-    "references": [],
+    "references": [
+        {"title": "Microsoft: How Domain and Forest Trusts Work",
+         "url": "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-server-2003/cc773178(v=ws.10)"},
+        {"title": "Microsoft: Trust-Direction attribute",
+         "url": "https://learn.microsoft.com/en-us/windows/win32/adschema/a-trustdirection"},
+        {"title": "MITRE ATT&CK T1482: Domain Trust Discovery",
+         "url": "https://attack.mitre.org/techniques/T1482/"},
+    ],
     "description": (
         "trustDirection=0 means this Trusted Domain Object (TDO) is "
         "administratively disabled but still exists in the directory. "

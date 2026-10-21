@@ -18,14 +18,17 @@ of the English sAMAccountName 'Print Operators', which never matched on localize
 (non-English) or renamed domains. detail.effective_member_accounts lists
 the enabled users/computers holding the membership directly, through
 nested groups or through primaryGroupID; direct members fall back to SID.
+
+[v1.3] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 3018,
     "category": "Groups",
     "name": "Print Operators Group Has Members",
-    "version": "1.2",
-    "revision_date": "2026-10-04",
+    "version": "1.3",
+    "revision_date": "2026-10-21",
     "remediation": (
         "Review every member listed in this finding's evidence and "
         "confirm each one genuinely needs domain-wide print "
@@ -52,7 +55,14 @@ PLUGIN = {
         "MITRE-ATTCK-T1078.002",
         "CISA-AA26-237A",
     ],
-    "references": [],
+    "references": [
+        {"title": "PingCastle health check rules (P-OperatorsEmpty)",
+         "url": "https://www.pingcastle.com/PingCastleFiles/ad_hc_rules_list.html"},
+        {"title": "Microsoft: Appendix B - Privileged Accounts and Groups in Active Directory",
+         "url": "https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/plan/security-best-practices/appendix-b--privileged-accounts-and-groups-in-active-directory"},
+        {"title": "Microsoft: Active Directory security groups",
+         "url": "https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/understand-security-groups"},
+    ],
     "description": (
         "Print Operators is a built-in group that, historically, could "
         "load printer drivers (kernel-mode code) on domain controllers "

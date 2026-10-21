@@ -25,20 +25,30 @@ One row per GPO (object_guid = GPO). Deleted GPOs are excluded. Zero rows
 unless SYSVOL has been collected (at least one GPO folder read
 successfully; adprofiler.py --sysvol). ad_gpo_sysvol reflects the latest
 SYSVOL collection, which may be older than the latest LDAP run.
+
+[v1.1] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 9021,
     "category": "Organizational Units",
     "name": "GPO Folder Could Not Be Read or Is Missing from SYSVOL",
-    "version": "1.0",
-    "revision_date": "2026-10-04",
+    "version": "1.1",
+    "revision_date": "2026-10-21",
     "control_id": "GPO-9021",
     "framework_tags": [
         "NIST-800-53-CM-6", "NIST-800-53-CM-2", "NIST-CSF-2.0-PR.PS-01",
         "PCI-DSS-4.0-2.2.1", "CIS-CSC-8-4.1", "ISO-27001-2022-A.8.9", "SOC2-CC7.1",
     ],
-    "references": [],
+    "references": [
+        {"title": "Microsoft [MS-GPOL]: Group Policy: Core Protocol (Group Policy containers and templates)",
+         "url": "https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-gpol/62d12924-6252-4052-996f-161d2b9019f4"},
+        {"title": "Microsoft: Group Policy Overview",
+         "url": "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-server-2012-r2-and-2012/hh831791(v=ws.11)"},
+        {"title": "Microsoft: Migrate SYSVOL replication from FRS to DFS Replication",
+         "url": "https://learn.microsoft.com/en-us/windows-server/storage/dfs-replication/migrate-sysvol-to-dfsr"},
+    ],
     "description": (
         "Reports GPOs whose SYSVOL folder could not be evaluated at the last SYSVOL "
         "collection. A missing folder (GPO object in AD with no SYSVOL folder, an orphaned "

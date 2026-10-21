@@ -13,14 +13,17 @@ independent of what else the group looks like.
 
 [v1.3] NULL-safe summary: a group with no objectSid (which the WHERE
 clause deliberately still matches) previously produced a NULL summary.
+
+[v1.4] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 3011,
     "category": "Groups",
     "name": "Group Has BUILTIN_LOCAL_GROUP Flag Set But Is Not a Genuine Built-in Group",
-    "version": "1.3",
-    "revision_date": "2026-10-04",
+    "version": "1.4",
+    "revision_date": "2026-10-21",
     "remediation": (
         "Investigate immediately -- this flag is documented as reserved "
         "for system-created Builtin objects and is not something normal "
@@ -45,7 +48,12 @@ PLUGIN = {
         "SOC2-CC7.1",
         "HIPAA-164.312(c)(1)",
     ],
-    "references": [],
+    "references": [
+        {"title": "Microsoft [MS-ADTS]: Group Type Flags",
+         "url": "https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-adts/11972272-09ec-4a42-bf5e-3e99b321cf55"},
+        {"title": "Microsoft: Group-Type attribute",
+         "url": "https://learn.microsoft.com/en-us/windows/win32/adschema/a-grouptype"},
+    ],
     "description": (
         "GROUP_TYPE_BUILTIN_LOCAL_GROUP (groupType bit 0x1) is "
         "documented in Microsoft's own protocol specification as "

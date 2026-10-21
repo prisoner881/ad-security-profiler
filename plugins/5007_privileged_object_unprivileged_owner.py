@@ -32,14 +32,17 @@ warn / medium instead of fail / high. The summary now says "group" when
 the owner is a group, "principal" when it doesn't resolve, and never
 goes NULL for an object without a sAMAccountName. Deleted objects are
 ignored.
+
+[v1.4] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 5007,
     "category": "ACLs",
     "name": "Privileged Object Owned by an Unprivileged Account",
-    "version": "1.3",
-    "revision_date": "2026-10-04",
+    "version": "1.4",
+    "revision_date": "2026-10-21",
     "remediation": (
         "Reassign ownership of the affected object to Domain Admins "
         "(via the Advanced Security Settings dialog in Active "
@@ -73,7 +76,14 @@ PLUGIN = {
         "MITRE-ATTCK-T1098",
         "CISA-AA26-237A",
     ],
-    "references": [],
+    "references": [
+        {"title": "PingCastle health check rules (P-DCOwner, the domain-controller case)",
+         "url": "https://www.pingcastle.com/PingCastleFiles/ad_hc_rules_list.html"},
+        {"title": "Microsoft: Access control overview (ownership of objects)",
+         "url": "https://learn.microsoft.com/en-us/windows/security/identity-protection/access-control/access-control"},
+        {"title": "Microsoft: Appendix C - Protected Accounts and Groups in Active Directory (AdminSDHolder, SDProp)",
+         "url": "https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/plan/security-best-practices/appendix-c--protected-accounts-and-groups-in-active-directory"},
+    ],
     "description": (
         "Broader than plugin 5006 (domain root/AdminSDHolder ownership "
         "specifically): checks the owner of every AdminSDHolder-"

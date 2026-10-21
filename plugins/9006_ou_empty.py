@@ -22,14 +22,17 @@ contents -- users (objectCategory=person), computers (including
 gMSA/sMSA), groups, OUs, GPOs and foreign security principals; an OU
 holding only contacts, printQueue objects, plain containers, shared
 folders and the like is reported as empty.
+
+[v1.2] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 9006,
     "category": "Organizational Units",
     "name": "Organizational Unit Contains No Objects",
-    "version": "1.1",
-    "revision_date": "2026-10-04",
+    "version": "1.2",
+    "revision_date": "2026-10-21",
     "remediation": (
         "If this OU is genuinely no longer needed, delete it (Active "
         "Directory Users and Computers -> right-click -> Delete; "
@@ -52,7 +55,10 @@ PLUGIN = {
         "SOC2-CC7.1",
         "HIPAA-164.312(c)(1)",
     ],
-    "references": [],
+    "references": [
+        {"title": "Microsoft: Delegating Administration by Using OU Objects",
+         "url": "https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/plan/delegating-administration-by-using-ou-objects"},
+    ],
     "description": (
         "Same reasoning as plugin 3007 (empty security groups), "
         "applied to OUs: a container with no users, computers, groups, "

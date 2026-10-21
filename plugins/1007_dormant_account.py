@@ -19,14 +19,17 @@ an admin-set initial password) was never reported: pwdLastSet 0 is stored
 as NULL, so the never-logged-on branch failed. That branch now falls back
 to whenCreated: COALESCE(pwd_last_set, when_created) older than 90 days.
 Summary wording unchanged.
+
+[v1.5] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 1007,
     "category": "User Accounts",
     "name": "Dormant Enabled User Account",
-    "version": "1.4",
-    "revision_date": "2026-10-04",
+    "version": "1.5",
+    "revision_date": "2026-10-21",
     "remediation": (
     "Disable or remove accounts inactive beyond the organization's defined "
     'threshold. If an account has a legitimate ongoing but infrequent purpose, '
@@ -46,7 +49,16 @@ PLUGIN = {
         "HIPAA-164.308(a)(3)(ii)(C)",
         "MITRE-ATTCK-T1078.002",
     ],
-    "references": [],
+    "references": [
+        {"title": "PingCastle health check rules (S-Inactive)",
+         "url": "https://www.pingcastle.com/PingCastleFiles/ad_hc_rules_list.html"},
+        {"title": "Microsoft: Last-Logon-Timestamp attribute",
+         "url": "https://learn.microsoft.com/en-us/windows/win32/adschema/a-lastlogontimestamp"},
+        {"title": "Microsoft: Search-ADAccount (-AccountInactive)",
+         "url": "https://learn.microsoft.com/en-us/powershell/module/activedirectory/search-adaccount"},
+        {"title": "MITRE ATT&CK T1078.002: Valid Accounts: Domain Accounts",
+         "url": "https://attack.mitre.org/techniques/T1078/002/"},
+    ],
     "description": (
         "An enabled account with no recent authentication activity is "
         "unnecessary attack surface with nobody watching for anomalous "

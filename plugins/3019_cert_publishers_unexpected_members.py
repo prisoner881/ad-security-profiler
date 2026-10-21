@@ -21,14 +21,17 @@ and computers that are not the host of a current Enterprise CA
 (ad_enrollment_service.dns_hostname) -- low when computers are the only
 unexpected members, since a standalone or recently decommissioned CA is
 the usual explanation. Summary wording changed to "unexpected member(s)".
+
+[v1.3] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 3019,
     "category": "Groups",
     "name": "Cert Publishers Group Has Unexpected Members",
-    "version": "1.2",
-    "revision_date": "2026-10-04",
+    "version": "1.3",
+    "revision_date": "2026-10-21",
     "remediation": (
         "Review every member listed in this finding's evidence. If a "
         "member is a computer account that IS actually running an "
@@ -58,7 +61,12 @@ PLUGIN = {
         "MITRE-ATTCK-T1078.002",
         "CISA-AA26-237A",
     ],
-    "references": [],
+    "references": [
+        {"title": "Microsoft: Active Directory security groups",
+         "url": "https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/understand-security-groups"},
+        {"title": "MITRE ATT&CK T1649: Steal or Forge Authentication Certificates",
+         "url": "https://attack.mitre.org/techniques/T1649/"},
+    ],
     "description": (
         "The built-in Cert Publishers group exists so CA computer "
         "accounts can publish issued certificates and revocation lists "

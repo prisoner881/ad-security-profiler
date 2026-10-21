@@ -16,14 +16,17 @@ exclusion list now mirrors plugin 2015 exactly, so 516 on a non-DC (DCSync
 persistence) and 521/498 on a non-DC go to 2015 at critical/high instead
 of being reported here at low. Dropped the claim that this rule fires for
 a DC outside the Domain Controllers OU: the query never looked at the DN.
+
+[v1.4] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 2017,
     "category": "Computer Accounts",
     "name": "Computer Primary Group ID Set to a Non-Default, Non-Privileged Value",
-    "version": "1.3",
-    "revision_date": "2026-10-04",
+    "version": "1.4",
+    "revision_date": "2026-10-21",
     "remediation": (
         "Unless strongly justified, change the primary group back to "
         "its default: Domain Computers (RID 515) for an ordinary "
@@ -49,7 +52,12 @@ PLUGIN = {
         "HIPAA-164.312(a)(1)",
         "MITRE-ATTCK-T1098",
     ],
-    "references": [],
+    "references": [
+        {"title": "PingCastle health check rules (S-C-PrimaryGroup)",
+         "url": "https://www.pingcastle.com/PingCastleFiles/ad_hc_rules_list.html"},
+        {"title": "Microsoft: Primary-Group-ID attribute",
+         "url": "https://learn.microsoft.com/en-us/windows/win32/adschema/a-primarygroupid"},
+    ],
     "description": (
         "Same reasoning as plugin 1023, applied to computer accounts. "
         "Flags any deviation from the correct default for the account's "

@@ -21,14 +21,17 @@ day) rather than a day count computed from now(). The count differed on
 every run, so an unchanged finding was recorded as 'changed' on every
 audit; the date only moves when the underlying attribute does. Severity
 and inclusion thresholds are unchanged.
+
+[v1.2] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 1033,
     "category": "User Accounts",
     "name": "Built-in Administrator Account Used Recently",
-    "version": "1.1",
-    "revision_date": "2026-10-03",
+    "version": "1.2",
+    "revision_date": "2026-10-21",
     "remediation": (
         "Identify who used this account and why, and move that work to "
         "an individually attributable administrative account instead. "
@@ -65,7 +68,14 @@ PLUGIN = {
         "HIPAA-164.308(a)(4)(ii)(B)",
         "MITRE-ATTCK-T1078.001",
     ],
-    "references": [],
+    "references": [
+        {"title": "PingCastle health check rules (P-AdminLogin)",
+         "url": "https://www.pingcastle.com/PingCastleFiles/ad_hc_rules_list.html"},
+        {"title": "Microsoft: Appendix D - Securing Built-In Administrator Accounts in Active Directory",
+         "url": "https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/plan/security-best-practices/appendix-d--securing-built-in-administrator-accounts-in-active-directory"},
+        {"title": "MITRE ATT&CK T1078.001: Valid Accounts: Default Accounts",
+         "url": "https://attack.mitre.org/techniques/T1078/001/"},
+    ],
     "description": (
         "Distinct from plugin 1004 (which flags this account simply "
         "being enabled): checks whether the built-in Administrator "

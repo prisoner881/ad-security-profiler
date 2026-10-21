@@ -28,14 +28,17 @@ links are reported too. Each container in the summary is labelled by
 kind -- Site "<name>", Domain "<dns name>", OU "<DN>" -- instead of a
 bare quoted DN (summary text changed once); detail.links entries gain
 container_type (site/domain/ou/other) and container_dn.
+
+[v1.3] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 9005,
     "category": "Organizational Units",
     "name": "Disabled Group Policy Link Still Present",
-    "version": "1.2",
-    "revision_date": "2026-10-04",
+    "version": "1.3",
+    "revision_date": "2026-10-21",
     "remediation": (
         "If this link is genuinely no longer needed at this location, "
         "remove it entirely (Group Policy Management Console -> select "
@@ -61,7 +64,14 @@ PLUGIN = {
         "HIPAA-164.312(c)(1)",
         "MITRE-ATTCK-T1484.001",
     ],
-    "references": [],
+    "references": [
+        {"title": "Microsoft: Group Policy Overview",
+         "url": "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-server-2012-r2-and-2012/hh831791(v=ws.11)"},
+        {"title": "Microsoft: Set-GPLink (GroupPolicy)",
+         "url": "https://learn.microsoft.com/en-us/powershell/module/grouppolicy/set-gplink"},
+        {"title": "MITRE ATT&CK T1484.001: Domain or Tenant Policy Modification: Group Policy Modification",
+         "url": "https://attack.mitre.org/techniques/T1484/001/"},
+    ],
     "description": (
         "gPLink's per-link options bit 0 (LINK_DISABLED). A disabled "
         "link means this specific GPO-to-container association exists "

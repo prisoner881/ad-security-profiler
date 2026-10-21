@@ -20,14 +20,17 @@ authoritative msDS-User-Account-Control-Computed UF_LOCKOUT bit is not
 collected.) The summary timestamp is now formatted explicitly in UTC
 (was session-TimeZone/DateStyle dependent, with microseconds), so
 existing summaries change once.
+
+[v1.4] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 1017,
     "category": "User Accounts",
     "name": "Account Currently in a Lockout State",
-    "version": "1.3",
-    "revision_date": "2026-10-04",
+    "version": "1.4",
+    "revision_date": "2026-10-21",
     "remediation": (
     'Investigate the cause before unlocking -- check Security Event ID 4740 on '
     'the PDC Emulator to identify the source workstation/IP of the failed '
@@ -50,7 +53,14 @@ PLUGIN = {
         "HIPAA-164.308(a)(1)(ii)(D)",
         "MITRE-ATTCK-T1110",
     ],
-    "references": [],
+    "references": [
+        {"title": "Microsoft: Account lockout threshold (security policy setting)",
+         "url": "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/account-lockout-threshold"},
+        {"title": "Microsoft: Lockout-Time attribute",
+         "url": "https://learn.microsoft.com/en-us/windows/win32/adschema/a-lockouttime"},
+        {"title": "MITRE ATT&CK T1110: Brute Force",
+         "url": "https://attack.mitre.org/techniques/T1110/"},
+    ],
     "description": (
         "Purely operational awareness, not a vulnerability by itself -- "
         "most lockouts are mundane (mistyped password, stale cached "

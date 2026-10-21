@@ -16,14 +16,17 @@ audit; the date only moves when the underlying attribute does. Severity
 and inclusion thresholds are unchanged. The day count is still reported
 in detail (days_since_logon), which is not part of the finding's
 identity because object_guid is always set for this plugin.
+
+[v1.4] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 2019,
     "category": "Computer Accounts",
     "name": "Domain Controller Computer Account Appears Inactive",
-    "version": "1.3",
-    "revision_date": "2026-10-03",
+    "version": "1.4",
+    "revision_date": "2026-10-21",
     "remediation": (
         "If this DC has genuinely been retired, demote it properly "
         "(`Uninstall-ADDSDomainController`, or metadata cleanup via "
@@ -52,7 +55,12 @@ PLUGIN = {
         "HIPAA-164.308(a)(3)(ii)(C)",
         "MITRE-ATTCK-T1078.002",
     ],
-    "references": [],
+    "references": [
+        {"title": "PingCastle health check rules (S-DC-Inactive)",
+         "url": "https://www.pingcastle.com/PingCastleFiles/ad_hc_rules_list.html"},
+        {"title": "Microsoft: Clean up AD DS server metadata",
+         "url": "https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/deploy/ad-ds-metadata-cleanup"},
+    ],
     "description": (
         "Directly cited from PingCastle's S-DC-Inactive rule: \"While "
         "an active Domain Controller changes its password every 30 "

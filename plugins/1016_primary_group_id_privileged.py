@@ -16,14 +16,17 @@ membership was reported by neither plugin). Their summary ends
 Domain Controllers) and 498 (Enterprise Read-only Domain Controllers). RID
 544 (BUILTIN Administrators) is kept although it cannot be a primary group
 (domain-local), to stay aligned with plugin 1023's exclusion list.
+
+[v1.6] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 1016,
     "category": "User Accounts",
     "name": "Primary Group ID Set to a Privileged Group",
-    "version": "1.5",
-    "revision_date": "2026-10-04",
+    "version": "1.6",
+    "revision_date": "2026-10-21",
     "remediation": (
     'Investigate immediately -- this is a known attacker persistence technique, '
     'not a benign misconfiguration in most cases. Determine who or what set '
@@ -51,7 +54,14 @@ PLUGIN = {
         "HIPAA-164.308(a)(4)(ii)(B)",
         "MITRE-ATTCK-T1098.007",
     ],
-    "references": [],
+    "references": [
+        {"title": "PingCastle health check rules (S-PrimaryGroup)",
+         "url": "https://www.pingcastle.com/PingCastleFiles/ad_hc_rules_list.html"},
+        {"title": "Microsoft: Primary-Group-ID attribute",
+         "url": "https://learn.microsoft.com/en-us/windows/win32/adschema/a-primarygroupid"},
+        {"title": "MITRE ATT&CK T1098: Account Manipulation",
+         "url": "https://attack.mitre.org/techniques/T1098/"},
+    ],
     "description": (
         "AD group membership can be granted two ways: the visible "
         "'member' attribute on the group, or the 'primaryGroupID' "

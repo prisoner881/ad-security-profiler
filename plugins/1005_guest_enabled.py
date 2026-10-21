@@ -6,14 +6,17 @@ essentially no legitimate reason for it to be active on a production
 domain. Detected by RID, not name, for the same reason as the
 Administrator-account check: STIG guidance recommends renaming this
 account too, and a rename doesn't change its RID.
+
+[v1.3] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 1005,
     "category": "User Accounts",
     "name": "Built-in Guest Account Is Enabled",
-    "version": "1.2",
-    "revision_date": "2026-07-15",
+    "version": "1.3",
+    "revision_date": "2026-10-21",
     "remediation": (
     'Disable the account (`Disable-ADAccount`). Confirm it holds no group '
     'memberships or delegated rights beyond the built-in Guests group defaults '
@@ -35,7 +38,14 @@ PLUGIN = {
         "DISA-STIG",
         "MITRE-ATTCK-T1078.001",
     ],
-    "references": [],
+    "references": [
+        {"title": "PingCastle health check rules (A-Guest)",
+         "url": "https://www.pingcastle.com/PingCastleFiles/ad_hc_rules_list.html"},
+        {"title": "Microsoft: Accounts: Guest account status (security policy setting)",
+         "url": "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/accounts-guest-account-status"},
+        {"title": "MITRE ATT&CK T1078.001: Valid Accounts: Default Accounts",
+         "url": "https://attack.mitre.org/techniques/T1078/001/"},
+    ],
     "description": (
         "The built-in Guest account (RID 501) should always be disabled; "
         "there is no legitimate reason for it to be active on a "

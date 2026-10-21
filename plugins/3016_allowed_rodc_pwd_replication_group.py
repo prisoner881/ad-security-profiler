@@ -23,14 +23,17 @@ latent. detail lists the effective enabled member accounts (nested and
 primaryGroupID membership included) and which of them are also in the
 Denied RODC Password Replication Group (RID 572), since Deny wins and
 those are not actually cached.
+
+[v1.2] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 3016,
     "category": "Groups",
     "name": "Allowed RODC Password Replication Group Is Not Empty",
-    "version": "1.1",
-    "revision_date": "2026-10-04",
+    "version": "1.2",
+    "revision_date": "2026-10-21",
     "remediation": (
         "Remove every member from the Allowed RODC Password Replication "
         "Group -- it is designed to remain empty. If specific accounts "
@@ -66,7 +69,16 @@ PLUGIN = {
         "HIPAA-164.308(a)(4)(ii)(B)",
         "MITRE-ATTCK-T1003.003",
     ],
-    "references": [],
+    "references": [
+        {"title": "PingCastle health check rules (P-RODCAllowedGroup)",
+         "url": "https://www.pingcastle.com/PingCastleFiles/ad_hc_rules_list.html"},
+        {"title": "Microsoft: Password Replication Policy (RODC)",
+         "url": "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-server-2008-R2-and-2008/cc730883(v=ws.10)"},
+        {"title": "Microsoft: Active Directory security groups",
+         "url": "https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/understand-security-groups"},
+        {"title": "MITRE ATT&CK T1003: OS Credential Dumping",
+         "url": "https://attack.mitre.org/techniques/T1003/"},
+    ],
     "description": (
         "The built-in Allowed RODC Password Replication Group is, by "
         "design, meant to remain empty. Any account added to it has "

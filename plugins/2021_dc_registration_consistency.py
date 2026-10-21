@@ -25,14 +25,17 @@ ordinary computer whose primaryGroupID was set to 516 (which silently
 makes it a member of Domain Controllers, i.e. grants it DCSync) and a
 writable DC carrying the RODC value. The summary now names the expected
 value for the account's role and any primaryGroupID mismatch.
+
+[v1.4] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 2021,
     "category": "Computer Accounts",
     "name": "Domain Controller userAccountControl Value Is Inconsistent With DC Registration",
-    "version": "1.3",
-    "revision_date": "2026-10-04",
+    "version": "1.4",
+    "revision_date": "2026-10-21",
     "remediation": (
         "Confirm this userAccountControl value directly against the "
         "expected constants for the DC's actual role (532480 for a "
@@ -73,7 +76,14 @@ PLUGIN = {
         "HIPAA-164.312(a)(1)",
         "MITRE-ATTCK-T1207",
     ],
-    "references": [],
+    "references": [
+        {"title": "PingCastle health check rules (S-DCRegistration)",
+         "url": "https://www.pingcastle.com/PingCastleFiles/ad_hc_rules_list.html"},
+        {"title": "Microsoft: UserAccountControl property flags",
+         "url": "https://learn.microsoft.com/en-us/troubleshoot/windows-server/active-directory/useraccountcontrol-manipulate-account-properties"},
+        {"title": "MITRE ATT&CK T1207: Rogue Domain Controller",
+         "url": "https://attack.mitre.org/techniques/T1207/"},
+    ],
     "description": (
         "Directly cited from PingCastle's S-DCRegistration rule, which "
         "specifies the exact expected userAccountControl values: "

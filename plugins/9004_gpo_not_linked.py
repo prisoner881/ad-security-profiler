@@ -39,14 +39,17 @@ predates 0.5.16 -- site links are unknown: the summary then keeps the
 old wording plus "(site links not collected)", and
 detail.site_links_collected records which case applies. Links made from
 another domain of the forest remain invisible.
+
+[v1.3] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 9004,
     "category": "Organizational Units",
     "name": "Group Policy Object Is Not Linked Anywhere",
-    "version": "1.2",
-    "revision_date": "2026-10-04",
+    "version": "1.3",
+    "revision_date": "2026-10-21",
     "remediation": (
         "If this GPO is genuinely no longer needed, delete it (Group "
         "Policy Management Console -> Group Policy Objects -> right-"
@@ -69,7 +72,14 @@ PLUGIN = {
         "HIPAA-164.312(c)(1)",
         "MITRE-ATTCK-T1484.001",
     ],
-    "references": [],
+    "references": [
+        {"title": "Microsoft: Group Policy Overview",
+         "url": "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-server-2012-r2-and-2012/hh831791(v=ws.11)"},
+        {"title": "Microsoft: Remove-GPO (GroupPolicy)",
+         "url": "https://learn.microsoft.com/en-us/powershell/module/grouppolicy/remove-gpo"},
+        {"title": "MITRE ATT&CK T1484.001: Domain or Tenant Policy Modification: Group Policy Modification",
+         "url": "https://attack.mitre.org/techniques/T1484/001/"},
+    ],
     "description": (
         "A GPO with zero links on any AD site, the domain or any OU "
         "exists but is never actually applied to anything. This "
