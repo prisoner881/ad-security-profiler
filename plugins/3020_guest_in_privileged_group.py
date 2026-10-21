@@ -18,14 +18,17 @@ primaryGroupID set to 512, a known stealth-persistence trick) is now
 caught: the collector records it as a group_member_edge (schema v36), so
 it flows through v_effective_group_membership; detail carries
 primary_group_id. Group names fall back to SID.
+
+[v1.4] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 3020,
     "category": "Groups",
     "name": "Guest Account Is a Member of a Privileged Group",
-    "version": "1.3",
-    "revision_date": "2026-10-04",
+    "version": "1.4",
+    "revision_date": "2026-10-21",
     "remediation": (
         "Remove the Guest account from the privileged group(s) listed "
         "in this finding's evidence immediately -- there is no "
@@ -61,7 +64,14 @@ PLUGIN = {
         "MITRE-ATTCK-T1078.002",
         "CISA-AA26-237A",
     ],
-    "references": [],
+    "references": [
+        {"title": "Microsoft: Accounts: Guest account status (security policy setting)",
+         "url": "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/accounts-guest-account-status"},
+        {"title": "Microsoft: Appendix B - Privileged Accounts and Groups in Active Directory",
+         "url": "https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/plan/security-best-practices/appendix-b--privileged-accounts-and-groups-in-active-directory"},
+        {"title": "MITRE ATT&CK T1078.001: Valid Accounts: Default Accounts",
+         "url": "https://attack.mitre.org/techniques/T1078/001/"},
+    ],
     "description": (
         "The built-in Guest account (RID 501) is designed to be the "
         "lowest-trust identity in the domain. Membership in any "

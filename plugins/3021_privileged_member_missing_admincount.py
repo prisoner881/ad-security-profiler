@@ -43,14 +43,17 @@ that is also in a protected group is still reported; the excluded groups
 are left out of the summary's group list and named in
 detail.sdprop_excluded_operator_groups (detail also carries
 admin_sd_ex_mask).
+
+[v1.5] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 3021,
     "category": "Groups",
     "name": "Privileged Group Member Missing the AdminSDHolder Protection Marker",
-    "version": "1.4",
-    "revision_date": "2026-10-04",
+    "version": "1.5",
+    "revision_date": "2026-10-21",
     "remediation": (
         "If this membership was added very recently (within the last "
         "hour or so), this may simply be normal SDProp propagation lag "
@@ -83,7 +86,12 @@ PLUGIN = {
         "HIPAA-164.308(a)(4)(ii)(B)",
         "HIPAA-164.312(a)(1)",
     ],
-    "references": [],
+    "references": [
+        {"title": "Microsoft: Appendix C - Protected Accounts and Groups in Active Directory (AdminSDHolder, SDProp)",
+         "url": "https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/plan/security-best-practices/appendix-c--protected-accounts-and-groups-in-active-directory"},
+        {"title": "Microsoft: Admin-Count attribute",
+         "url": "https://learn.microsoft.com/en-us/windows/win32/adschema/a-admincount"},
+    ],
     "description": (
         "The inverse of plugins 1025/3005 (which look for admin_count=1 "
         "on accounts no longer privileged): finds accounts that ARE "

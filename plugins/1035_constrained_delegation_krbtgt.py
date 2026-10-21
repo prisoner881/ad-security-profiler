@@ -18,14 +18,17 @@ read -- only the obscure kadmin/changepw entry (the one SPN krbtgt
 registers) could match. Resolved targets are matched by RID 502 (plus
 RODC krbtgt_<n> accounts) instead of the name 'krbtgt'. One row per
 delegating account; detail.krbtgt_targets lists the matching entries.
+
+[v1.3] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 1035,
     "category": "User Accounts",
     "name": "Constrained Delegation Configured to krbtgt",
-    "version": "1.2",
-    "revision_date": "2026-10-04",
+    "version": "1.3",
+    "revision_date": "2026-10-21",
     "remediation": (
         "Treat this as a likely active-compromise indicator, not a "
         "routine misconfiguration -- there is no legitimate reason for "
@@ -56,7 +59,14 @@ PLUGIN = {
         "MITRE-ATTCK-T1098",
         "CISA-AA26-237A",
     ],
-    "references": [],
+    "references": [
+        {"title": "Microsoft: ms-DS-Allowed-To-Delegate-To attribute",
+         "url": "https://learn.microsoft.com/en-us/windows/win32/adschema/a-msds-allowedtodelegateto"},
+        {"title": "Microsoft: Kerberos Constrained Delegation Overview",
+         "url": "https://learn.microsoft.com/en-us/windows-server/security/kerberos/kerberos-constrained-delegation-overview"},
+        {"title": "MITRE ATT&CK T1558: Steal or Forge Kerberos Tickets",
+         "url": "https://attack.mitre.org/techniques/T1558/"},
+    ],
     "description": (
         "msDS-AllowedToDelegateTo (constrained delegation) lets an "
         "account authenticate to specific services on behalf of "

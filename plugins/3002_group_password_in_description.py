@@ -26,14 +26,17 @@ by ":" or "=" and a non-empty value. This catches "pw:", "pwd=",
 "password = x" and "Kennwort: x" (previously missed) and stops matching
 words that merely start with "pass" ("passport:", "passive:",
 "passthrough:") or a label with nothing after it.
+
+[v1.5] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 3002,
     "category": "Groups",
     "name": "Group Description/Notes Field May Contain Password Material",
-    "version": "1.4",
-    "revision_date": "2026-10-04",
+    "version": "1.5",
+    "revision_date": "2026-10-21",
     "remediation": (
         "Remove the sensitive text from the field immediately, and treat "
         "the exposed credential as compromised -- rotate it, and check "
@@ -57,7 +60,14 @@ PLUGIN = {
         "MITRE-ATTCK-T1552.001",
         "CISA-AA26-237A",
     ],
-    "references": [],
+    "references": [
+        {"title": "MITRE ATT&CK T1552: Unsecured Credentials",
+         "url": "https://attack.mitre.org/techniques/T1552/"},
+        {"title": "MITRE ATT&CK T1087.002: Account Discovery: Domain Account",
+         "url": "https://attack.mitre.org/techniques/T1087/002/"},
+        {"title": "Microsoft: Description attribute",
+         "url": "https://learn.microsoft.com/en-us/windows/win32/adschema/a-description"},
+    ],
     "description": (
         "The description and info (\"Notes\" in ADUC) attributes are "
         "free text, readable by any authenticated domain user via a "

@@ -17,14 +17,17 @@ only (cycles can only pass through groups), which bounds the work on
 large directories, and the reported chain is chosen deterministically
 among equal-length cycles. Docstring corrected (it does not use the
 shared view).
+
+[v1.3] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 3006,
     "category": "Groups",
     "name": "Circular Group Nesting Detected",
-    "version": "1.2",
-    "revision_date": "2026-10-04",
+    "version": "1.3",
+    "revision_date": "2026-10-21",
     "remediation": (
         "Identify and remove at least one edge in the nesting cycle -- "
         "review the full chain of group memberships involved (available "
@@ -48,7 +51,12 @@ PLUGIN = {
         "SOC2-CC6.3",
         "HIPAA-164.312(a)(1)",
     ],
-    "references": [],
+    "references": [
+        {"title": "Microsoft: Active Directory security groups",
+         "url": "https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/understand-security-groups"},
+        {"title": "MITRE ATT&CK T1069.002: Permission Groups Discovery: Domain Groups",
+         "url": "https://attack.mitre.org/techniques/T1069/002/"},
+    ],
     "description": (
         "A group that is transitively a member of itself (Group A "
         "contains Group B contains Group A) has no legitimate purpose "

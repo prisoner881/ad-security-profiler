@@ -15,14 +15,17 @@ sAMAccountName (a NULL summary made the evidence write fail); the inner
 aggregate is renamed max_min_depth for clarity (detail key
 max_nesting_depth unchanged: the deepest shortest-path depth of any
 member).
+
+[v1.3] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 3010,
     "category": "Groups",
     "name": "Group Membership Nested Unusually Deep",
-    "version": "1.2",
-    "revision_date": "2026-10-04",
+    "version": "1.3",
+    "revision_date": "2026-10-21",
     "remediation": (
         "Review the full nesting chain (available in this finding's "
         "detail) and consider flattening it -- add the ultimately-"
@@ -49,7 +52,12 @@ PLUGIN = {
         "SOC2-CC6.3",
         "HIPAA-164.312(a)(1)",
     ],
-    "references": [],
+    "references": [
+        {"title": "Microsoft: Active Directory security groups",
+         "url": "https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/understand-security-groups"},
+        {"title": "MITRE ATT&CK T1069.002: Permission Groups Discovery: Domain Groups",
+         "url": "https://attack.mitre.org/techniques/T1069/002/"},
+    ],
     "description": (
         "Deep group nesting chains make permission auditing measurably "
         "harder -- widely discussed across AD security literature "

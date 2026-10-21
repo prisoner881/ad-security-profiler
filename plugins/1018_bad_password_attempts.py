@@ -16,14 +16,17 @@ wording changes once. "Recent" dropped: badPwdCount is NOT replicated --
 it is the value on the one DC the collector queried (plus PDC-forwarded
 attempts) and persists past the observation window until the next logon
 attempt, so it is neither complete nor necessarily recent.
+
+[v1.4] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 1018,
     "category": "User Accounts",
     "name": "Account Has Failed Logon Attempts Near the Lockout Threshold",
-    "version": "1.3",
-    "revision_date": "2026-10-04",
+    "version": "1.4",
+    "revision_date": "2026-10-21",
     "remediation": (
     'Usually benign and not independently actionable -- review Security Event '
     'ID 4625 on the relevant DC for source information if the count is '
@@ -46,7 +49,14 @@ PLUGIN = {
         "HIPAA-164.308(a)(1)(ii)(D)",
         "MITRE-ATTCK-T1110",
     ],
-    "references": [],
+    "references": [
+        {"title": "Microsoft: Account lockout threshold (security policy setting)",
+         "url": "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/account-lockout-threshold"},
+        {"title": "Microsoft: Bad-Pwd-Count attribute",
+         "url": "https://learn.microsoft.com/en-us/windows/win32/adschema/a-badpwdcount"},
+        {"title": "MITRE ATT&CK T1110.003: Brute Force: Password Spraying",
+         "url": "https://attack.mitre.org/techniques/T1110/003/"},
+    ],
     "description": (
         "Purely operational awareness, not a finding to act on by "
         "itself -- a nonzero bad_pwd_count is routine and usually "

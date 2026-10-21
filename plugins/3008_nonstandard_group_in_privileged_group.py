@@ -31,14 +31,17 @@ privileged root by RID (512/516/518/519/521/526/527/544/548-552) or is
 currently nested under one -- a group with a stale marker (plugin 3005's
 population) no longer makes its members "privileged". A group in a
 nesting cycle is no longer reported as nested inside itself.
+
+[v1.9] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 3008,
     "category": "Groups",
     "name": "Non-Standard Group Nested Inside a Privileged Group",
-    "version": "1.8",
-    "revision_date": "2026-10-04",
+    "version": "1.9",
+    "revision_date": "2026-10-21",
     "remediation": (
         "Confirm this nesting was a deliberate, documented administrative "
         "decision. Anyone added to the nested group inherits the outer "
@@ -65,7 +68,14 @@ PLUGIN = {
         "MITRE-ATTCK-T1078.002",
         "CISA-AA26-237A",
     ],
-    "references": [],
+    "references": [
+        {"title": "Microsoft: Appendix B - Privileged Accounts and Groups in Active Directory",
+         "url": "https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/plan/security-best-practices/appendix-b--privileged-accounts-and-groups-in-active-directory"},
+        {"title": "Microsoft: Appendix C - Protected Accounts and Groups in Active Directory (AdminSDHolder, SDProp)",
+         "url": "https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/plan/security-best-practices/appendix-c--protected-accounts-and-groups-in-active-directory"},
+        {"title": "MITRE ATT&CK T1098.007: Account Manipulation: Additional Local or Domain Groups",
+         "url": "https://attack.mitre.org/techniques/T1098/007/"},
+    ],
     "description": (
         "Windows' own default configuration nests certain well-known "
         "groups inside other well-known groups as a matter of course "

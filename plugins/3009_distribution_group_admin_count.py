@@ -18,14 +18,17 @@ token or an ACL. SDProp can also stamp a distribution group that is
 nested in a protected group, so detail.currently_nested_in_protected_root
 says whether that explains the marker. Plugin 3005 now skips distribution
 groups, so each such group is reported once (here).
+
+[v1.4] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 3009,
     "category": "Groups",
     "name": "Distribution Group Has admin_count Set",
-    "version": "1.3",
-    "revision_date": "2026-10-04",
+    "version": "1.4",
+    "revision_date": "2026-10-21",
     "remediation": (
         "Investigate how and when admin_count was set on this group -- "
         "check msDS-ReplAttributeMetaData for the attribute's "
@@ -51,7 +54,14 @@ PLUGIN = {
         "SOC2-CC7.1",
         "HIPAA-164.312(c)(1)",
     ],
-    "references": [],
+    "references": [
+        {"title": "PingCastle health check rules (A-AdminSDHolder)",
+         "url": "https://www.pingcastle.com/PingCastleFiles/ad_hc_rules_list.html"},
+        {"title": "Microsoft: Appendix C - Protected Accounts and Groups in Active Directory (AdminSDHolder, SDProp)",
+         "url": "https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/plan/security-best-practices/appendix-c--protected-accounts-and-groups-in-active-directory"},
+        {"title": "Microsoft: Admin-Count attribute",
+         "url": "https://learn.microsoft.com/en-us/windows/win32/adschema/a-admincount"},
+    ],
     "description": (
         "Distribution groups are not security-enabled and cannot be "
         "used as a security principal in an Access Control List -- "

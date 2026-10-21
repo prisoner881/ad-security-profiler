@@ -26,14 +26,17 @@ reported here at 'high' instead of 'low' (they can write
 msDS-KeyCredentialLink on every account -- shadow credentials). 544 stays
 excluded but cannot occur: a primary group must be a global or
 universal group, and BUILTIN\\Administrators is domain-local.
+
+[v1.5] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 1023,
     "category": "User Accounts",
     "name": "User Primary Group ID Set to a Non-Default, Non-Privileged Value",
-    "version": "1.4",
-    "revision_date": "2026-10-04",
+    "version": "1.5",
+    "revision_date": "2026-10-21",
     "remediation": (
         "Unless strongly justified, change the primary group back to "
         "its default (Domain Users, RID 513) via Active Directory Users "
@@ -60,7 +63,12 @@ PLUGIN = {
         "HIPAA-164.312(a)(1)",
         "MITRE-ATTCK-T1098.007",
     ],
-    "references": [],
+    "references": [
+        {"title": "PingCastle health check rules (S-PrimaryGroup)",
+         "url": "https://www.pingcastle.com/PingCastleFiles/ad_hc_rules_list.html"},
+        {"title": "Microsoft: Primary-Group-ID attribute",
+         "url": "https://learn.microsoft.com/en-us/windows/win32/adschema/a-primarygroupid"},
+    ],
     "description": (
         "PingCastle's own check for this condition (S-PrimaryGroup) is "
         "broader than plugin 1016: primaryGroupID is a hidden group-"

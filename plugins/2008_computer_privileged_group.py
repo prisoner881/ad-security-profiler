@@ -48,14 +48,17 @@ Schema Admins or Administrators (matched by SID, not name) -- SYSTEM on
 that machine is domain compromise. Primary-group membership
 (primaryGroupID) is visible here since schema v36 materialises it as a
 group_member_edge.
+
+[v1.6] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 2008,
     "category": "Computer Accounts",
     "name": "Computer Account Holds Unexpected Privileged Access",
-    "version": "1.5",
-    "revision_date": "2026-10-04",
+    "version": "1.6",
+    "revision_date": "2026-10-21",
     "remediation": (
         "Determine why this computer account holds this access -- it is "
         "almost never an intentional, necessary configuration for an "
@@ -89,7 +92,14 @@ PLUGIN = {
         "HIPAA-164.312(a)(1)",
         "MITRE-ATTCK-T1078.002",
     ],
-    "references": [],
+    "references": [
+        {"title": "Microsoft: Appendix B - Privileged Accounts and Groups in Active Directory",
+         "url": "https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/plan/security-best-practices/appendix-b--privileged-accounts-and-groups-in-active-directory"},
+        {"title": "Microsoft: Securing privileged access - Enterprise access model",
+         "url": "https://learn.microsoft.com/en-us/security/privileged-access-workstations/privileged-access-access-model"},
+        {"title": "MITRE ATT&CK T1098.007: Account Manipulation: Additional Local or Domain Groups",
+         "url": "https://attack.mitre.org/techniques/T1098/007/"},
+    ],
     "description": (
         "A workstation or member server's machine account is not "
         "normally expected to hold privileged access at all -- domain "

@@ -33,14 +33,17 @@ Broad principals add a summary suffix and detail.broad_principal_trustee
 (severity is already critical). Each detail.trustees entry gains
 trustee_sid, trustee_kind and is_broad_principal; deleted trustee objects
 are excluded. Still one row per krbtgt account.
+
+[v1.4] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 1034,
     "category": "User Accounts",
     "name": "krbtgt Account Has Resource-Based Constrained Delegation Configured",
-    "version": "1.3",
-    "revision_date": "2026-10-04",
+    "version": "1.4",
+    "revision_date": "2026-10-21",
     "remediation": (
         "Treat this as a likely active-compromise indicator, not a "
         "routine misconfiguration -- there is no legitimate reason for "
@@ -74,7 +77,14 @@ PLUGIN = {
         "MITRE-ATTCK-T1098",
         "CISA-AA26-237A",
     ],
-    "references": [],
+    "references": [
+        {"title": "Microsoft: ms-DS-Allowed-To-Act-On-Behalf-Of-Other-Identity attribute",
+         "url": "https://learn.microsoft.com/en-us/windows/win32/adschema/a-msds-allowedtoactonbehalfofotheridentity"},
+        {"title": "Microsoft: Kerberos Constrained Delegation Overview",
+         "url": "https://learn.microsoft.com/en-us/windows-server/security/kerberos/kerberos-constrained-delegation-overview"},
+        {"title": "MITRE ATT&CK T1558: Steal or Forge Kerberos Tickets",
+         "url": "https://attack.mitre.org/techniques/T1558/"},
+    ],
     "description": (
         "Resource-based constrained delegation lets a computer/service "
         "object explicitly designate which principals may impersonate "

@@ -14,14 +14,17 @@ Protected-group membership, control of or ownership of a Tier 0 object
 (domain root, AdminSDHolder, DCs, CAs, ...), DCSync, and membership in a
 group holding any of those still count. detail gains privilege_sources
 (the view's reasons, sorted); summary wording is unchanged.
+
+[v1.6] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 1001,
     "category": "User Accounts",
     "name": "User Account Password Set to Never Expire",
-    "version": "1.5",
-    "revision_date": "2026-10-03",
+    "version": "1.6",
+    "revision_date": "2026-10-21",
     "remediation": (
     'Remove the DONT_EXPIRE_PASSWORD flag (uncheck "Password never expires" in '
     'ADUC, or `Set-ADUser -PasswordNeverExpires $false`) and let the account '
@@ -51,7 +54,16 @@ PLUGIN = {
         "DISA-STIG-V-254289",
         "MITRE-ATTCK-T1078.002",
     ],
-    "references": [],
+    "references": [
+        {"title": "PingCastle health check rules (S-PwdNeverExpires)",
+         "url": "https://www.pingcastle.com/PingCastleFiles/ad_hc_rules_list.html"},
+        {"title": "Microsoft: UserAccountControl property flags",
+         "url": "https://learn.microsoft.com/en-us/troubleshoot/windows-server/active-directory/useraccountcontrol-manipulate-account-properties"},
+        {"title": "Microsoft: Maximum password age (security policy setting)",
+         "url": "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/maximum-password-age"},
+        {"title": "MITRE ATT&CK T1078.002: Valid Accounts: Domain Accounts",
+         "url": "https://attack.mitre.org/techniques/T1078/002/"},
+    ],
     "description": (
         "Enabled user accounts configured to never require a password "
         "change bypass the domain's maximum password age policy entirely, "

@@ -19,14 +19,17 @@ judged by whenCreated instead of never being reported. Disabled accounts
 are kept but rated one step lower (info for a member, low for a DC) and
 marked in the summary: a disabled account is already out of use, which is
 how PingCastle and most tools treat inactive computers.
+
+[v1.5] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 2006,
     "category": "Computer Accounts",
     "name": "Dormant Computer Account",
-    "version": "1.4",
-    "revision_date": "2026-10-04",
+    "version": "1.5",
+    "revision_date": "2026-10-21",
     "remediation": (
         "Confirm whether the machine still physically exists and is in "
         "active use. If decommissioned, disable and eventually remove the "
@@ -55,7 +58,14 @@ PLUGIN = {
         "HIPAA-164.308(a)(3)(ii)(C)",
         "MITRE-ATTCK-T1078.002",
     ],
-    "references": [],
+    "references": [
+        {"title": "PingCastle health check rules (S-C-Inactive)",
+         "url": "https://www.pingcastle.com/PingCastleFiles/ad_hc_rules_list.html"},
+        {"title": "Microsoft: Last-Logon-Timestamp attribute",
+         "url": "https://learn.microsoft.com/en-us/windows/win32/adschema/a-lastlogontimestamp"},
+        {"title": "Microsoft: Search-ADAccount (-AccountInactive)",
+         "url": "https://learn.microsoft.com/en-us/powershell/module/activedirectory/search-adaccount"},
+    ],
     "description": (
         "A computer account with no recent authentication activity "
         "likely represents a decommissioned or abandoned machine whose "

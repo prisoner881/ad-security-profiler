@@ -29,14 +29,17 @@ primaryGroupID of a protected global group (512/516/518/519/521) as
 current membership. Since schema v36 primary-group membership is also an
 edge in group_member_edge (so currently_nested sees it); the explicit
 test keeps that right even if the edge is missing.
+
+[v1.7] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 1025,
     "category": "User Accounts",
     "name": "User Account Has a Stale AdminSDHolder Protection Marker",
-    "version": "1.6",
-    "revision_date": "2026-10-04",
+    "version": "1.7",
+    "revision_date": "2026-10-21",
     "remediation": (
         "Investigate why this account is no longer a member of a "
         "privileged group despite carrying the AdminSDHolder protection "
@@ -65,7 +68,14 @@ PLUGIN = {
         "HIPAA-164.308(a)(4)(ii)(B)",
         "MITRE-ATTCK-T1078.002",
     ],
-    "references": [],
+    "references": [
+        {"title": "PingCastle health check rules (A-AdminSDHolder)",
+         "url": "https://www.pingcastle.com/PingCastleFiles/ad_hc_rules_list.html"},
+        {"title": "Microsoft: Appendix C - Protected Accounts and Groups in Active Directory (AdminSDHolder, SDProp)",
+         "url": "https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/plan/security-best-practices/appendix-c--protected-accounts-and-groups-in-active-directory"},
+        {"title": "Microsoft: Admin-Count attribute",
+         "url": "https://learn.microsoft.com/en-us/windows/win32/adschema/a-admincount"},
+    ],
     "description": (
         "Same reasoning as plugin 3005 (the group-side version of this "
         "check), applied to user accounts. admin_count=1 is set by the "

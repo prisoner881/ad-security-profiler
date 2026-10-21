@@ -29,14 +29,17 @@ no domain object was collected. RODCs, which also belong in this OU, are
 checked since schema v36. Severity lowered from high to medium, in line
 with comparable tools: the real impact depends on which GPOs apply at
 the DC's actual location. detail adds expected_ou_dn.
+
+[v1.2] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 2032,
     "category": "Computer Accounts",
     "name": "Domain Controller Computer Object Not in the Default Domain Controllers OU",
-    "version": "1.1",
-    "revision_date": "2026-10-04",
+    "version": "1.2",
+    "revision_date": "2026-10-21",
     "remediation": (
         "Move the computer object back into the default Domain "
         "Controllers OU (Active Directory Users and Computers -> "
@@ -61,7 +64,12 @@ PLUGIN = {
         "SOC2-CC7.1",
         "HIPAA-164.312(c)(1)",
     ],
-    "references": [],
+    "references": [
+        {"title": "Microsoft: Securing Domain Controllers Against Attack",
+         "url": "https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/plan/security-best-practices/securing-domain-controllers-against-attack"},
+        {"title": "Microsoft: Group Policy Overview",
+         "url": "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-server-2012-r2-and-2012/hh831791(v=ws.11)"},
+    ],
     "description": (
         "Every AD domain automatically creates a dedicated Domain "
         "Controllers OU during promotion, with every DC's computer "

@@ -19,14 +19,17 @@ well-known RID below 1000 are excluded: they are created by Windows,
 are empty by default and cannot (or should not) be deleted.
 detail.referenced_in_collected_acls says whether the group is a trustee
 on any collected ACE (the "ACL grants nobody" case).
+
+[v1.3] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 3007,
     "category": "Groups",
     "name": "Empty Security Group",
-    "version": "1.2",
-    "revision_date": "2026-10-04",
+    "version": "1.3",
+    "revision_date": "2026-10-21",
     "remediation": (
         "Confirm the group is genuinely unused -- check whether it's "
         "referenced in any ACL, GPO security filtering, or application "
@@ -47,7 +50,10 @@ PLUGIN = {
         "SOC2-CC6.2",
         "HIPAA-164.308(a)(3)(ii)(C)",
     ],
-    "references": [],
+    "references": [
+        {"title": "Microsoft: Active Directory security groups",
+         "url": "https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/understand-security-groups"},
+    ],
     "description": (
         "An empty security group is low-severity hygiene, not a "
         "vulnerability by itself -- but it's a common source of "

@@ -16,14 +16,17 @@ Removed 544: BUILTIN Administrators (S-1-5-32-544) is a domain-local group and c
 be a primary group (dead condition). Read-only DCs (whose default is 521)
 are told apart by ad_computer.is_read_only_dc (schema v36). Plugin 2017
 excludes exactly this set.
+
+[v1.4] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 2015,
     "category": "Computer Accounts",
     "name": "Computer Primary Group ID Set to a Privileged Group",
-    "version": "1.3",
-    "revision_date": "2026-10-04",
+    "version": "1.4",
+    "revision_date": "2026-10-21",
     "remediation": (
         "Investigate immediately -- this is a known attacker persistence "
         "technique, not a benign misconfiguration in most cases. "
@@ -48,7 +51,14 @@ PLUGIN = {
         "HIPAA-164.308(a)(4)(ii)(B)",
         "MITRE-ATTCK-T1098",
     ],
-    "references": [],
+    "references": [
+        {"title": "PingCastle health check rules (S-C-PrimaryGroup)",
+         "url": "https://www.pingcastle.com/PingCastleFiles/ad_hc_rules_list.html"},
+        {"title": "Microsoft: Primary-Group-ID attribute",
+         "url": "https://learn.microsoft.com/en-us/windows/win32/adschema/a-primarygroupid"},
+        {"title": "MITRE ATT&CK T1098: Account Manipulation",
+         "url": "https://attack.mitre.org/techniques/T1098/"},
+    ],
     "description": (
         "Same technique as user-account plugin 1016, applied to computer "
         "objects: group membership via primaryGroupID does not appear in "

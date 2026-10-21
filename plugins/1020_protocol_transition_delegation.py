@@ -22,14 +22,17 @@ RBCD (a different mechanism configured on the resource) and the
 description no longer overstates S4U2Self (any account with an SPN can
 do it; T2A4D makes the resulting ticket forwardable, i.e. usable for
 S4U2Proxy to the configured targets).
+
+[v1.6] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 1020,
     "category": "User Accounts",
     "name": "User Account Has Constrained Delegation With Protocol Transition",
-    "version": "1.5",
-    "revision_date": "2026-10-04",
+    "version": "1.6",
+    "revision_date": "2026-10-21",
     "remediation": (
     'Review whether this account genuinely needs protocol transition. If not, '
     'switch it to "Use Kerberos only" (clear TRUSTED_TO_AUTH_FOR_DELEGATION, '
@@ -58,7 +61,16 @@ PLUGIN = {
         "MITRE-ATTCK-T1550.003",
         "CISA-AA26-237A",
     ],
-    "references": [],
+    "references": [
+        {"title": "Microsoft: Kerberos Constrained Delegation Overview",
+         "url": "https://learn.microsoft.com/en-us/windows-server/security/kerberos/kerberos-constrained-delegation-overview"},
+        {"title": "Microsoft: UserAccountControl property flags",
+         "url": "https://learn.microsoft.com/en-us/troubleshoot/windows-server/active-directory/useraccountcontrol-manipulate-account-properties"},
+        {"title": "Microsoft: ms-DS-Allowed-To-Delegate-To attribute",
+         "url": "https://learn.microsoft.com/en-us/windows/win32/adschema/a-msds-allowedtodelegateto"},
+        {"title": "MITRE ATT&CK T1558: Steal or Forge Kerberos Tickets",
+         "url": "https://attack.mitre.org/techniques/T1558/"},
+    ],
     "description": (
         "TRUSTED_TO_AUTH_FOR_DELEGATION (UAC bit 0x1000000) enables "
         "protocol transition: the forwardable S4U2Self ticket the account "

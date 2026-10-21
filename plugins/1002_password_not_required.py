@@ -29,14 +29,17 @@ outcome), critical for Tier 0 -- the former "ELSE 3" in both branches made
 the privilege test dead code; written out explicitly now. Plugin name no
 longer says "Enabled" (disabled accounts are reported, at reduced
 severity, by design).
+
+[v1.7] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 1002,
     "category": "User Accounts",
     "name": "User Account Does Not Require a Password",
-    "version": "1.6",
-    "revision_date": "2026-10-04",
+    "version": "1.7",
+    "revision_date": "2026-10-21",
     "remediation": (
     'Remove the PASSWD_NOTREQD flag (`Set-ADAccountControl -PasswordNotRequired '
     '$false` or the equivalent ADUC checkbox), then immediately force a '
@@ -59,7 +62,14 @@ PLUGIN = {
         "HIPAA-164.308(a)(5)(ii)(D)",
         "MITRE-ATTCK-T1078.002",
     ],
-    "references": [],
+    "references": [
+        {"title": "PingCastle health check rules (S-PwdNotRequired)",
+         "url": "https://www.pingcastle.com/PingCastleFiles/ad_hc_rules_list.html"},
+        {"title": "Microsoft: UserAccountControl property flags",
+         "url": "https://learn.microsoft.com/en-us/troubleshoot/windows-server/active-directory/useraccountcontrol-manipulate-account-properties"},
+        {"title": "MITRE ATT&CK T1078.002: Valid Accounts: Domain Accounts",
+         "url": "https://attack.mitre.org/techniques/T1078/002/"},
+    ],
     "description": (
         "The PASSWD_NOTREQD flag (userAccountControl bit 0x0020) permits "
         "this account to be assigned a blank password, bypassing the "

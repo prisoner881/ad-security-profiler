@@ -30,14 +30,17 @@ a different control (gMSA, authentication policy), are recognisable.
 AAD_<hex> ADSync service account, or the installer's description) are no
 longer reported: a service account cannot use a smart card, and their exposure
 is reported by plugin 10009.
+
+[v1.8] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 1012,
     "category": "User Accounts",
     "name": "Privileged Account Without Smartcard Logon Required",
-    "version": "1.7",
-    "revision_date": "2026-10-07",
+    "version": "1.8",
+    "revision_date": "2026-10-21",
     "remediation": (
     'Enable smartcard-required authentication for the account, or if smartcards '
     "aren't practical in this environment, implement an equivalent "
@@ -55,7 +58,14 @@ PLUGIN = {
         "HIPAA-164.312(d)",
         "MITRE-ATTCK-T1078.002",
     ],
-    "references": [],
+    "references": [
+        {"title": "Microsoft: UserAccountControl property flags",
+         "url": "https://learn.microsoft.com/en-us/troubleshoot/windows-server/active-directory/useraccountcontrol-manipulate-account-properties"},
+        {"title": "Microsoft: Interactive logon: Require Windows Hello for Business or smart card",
+         "url": "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/interactive-logon-require-smart-card"},
+        {"title": "Microsoft: Securing privileged access - Enterprise access model",
+         "url": "https://learn.microsoft.com/en-us/security/privileged-access-workstations/privileged-access-access-model"},
+    ],
     "description": (
         "Smartcard-required authentication is one of the few MFA-adjacent "
         "controls directly visible in AD's own schema (smartcard_required "

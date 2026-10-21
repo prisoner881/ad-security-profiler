@@ -15,14 +15,17 @@ SPNs), and the finding is raised to critical when a target is a Tier 0
 object (a DC, CA host, ...) or krbtgt -- S4U2Self + S4U2Proxy to such a
 target is domain compromise. Remediation no longer suggests RBCD as the
 fix for protocol transition.
+
+[v1.5] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 2002,
     "category": "Computer Accounts",
     "name": "Computer Account Has Constrained Delegation With Protocol Transition",
-    "version": "1.4",
-    "revision_date": "2026-10-04",
+    "version": "1.5",
+    "revision_date": "2026-10-21",
     "remediation": (
         "Review whether this computer genuinely needs protocol transition "
         "(S4U2Self for users who did not authenticate with Kerberos). If "
@@ -54,7 +57,16 @@ PLUGIN = {
         "MITRE-ATTCK-T1550.003",
         "CISA-AA26-237A",
     ],
-    "references": [],
+    "references": [
+        {"title": "Microsoft: Kerberos Constrained Delegation Overview",
+         "url": "https://learn.microsoft.com/en-us/windows-server/security/kerberos/kerberos-constrained-delegation-overview"},
+        {"title": "Microsoft: UserAccountControl property flags",
+         "url": "https://learn.microsoft.com/en-us/troubleshoot/windows-server/active-directory/useraccountcontrol-manipulate-account-properties"},
+        {"title": "Microsoft: ms-DS-Allowed-To-Delegate-To attribute",
+         "url": "https://learn.microsoft.com/en-us/windows/win32/adschema/a-msds-allowedtodelegateto"},
+        {"title": "MITRE ATT&CK T1558: Steal or Forge Kerberos Tickets",
+         "url": "https://attack.mitre.org/techniques/T1558/"},
+    ],
     "description": (
         "TRUSTED_TO_AUTH_FOR_DELEGATION (UAC bit 0x1000000) enables "
         "protocol transition (S4U2Self): the computer can obtain a "

@@ -57,14 +57,17 @@ group holding any of those still count. detail gains privilege_sources
 - detail no longer copies the value verbatim: the text following an
   assignment is masked (********), so the evidence store does not spread
   the password further. Summary wording unchanged.
+
+[v1.9] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
+no query change.
 """
 
 PLUGIN = {
     "plugin_id": 1021,
     "category": "User Accounts",
     "name": "Account Description/Notes Field May Contain Password Material",
-    "version": "1.8",
-    "revision_date": "2026-10-04",
+    "version": "1.9",
+    "revision_date": "2026-10-21",
     "remediation": (
     'Remove the sensitive text from the field immediately, but do not treat '
     'that as sufficient remediation on its own -- the exposure already '
@@ -88,7 +91,14 @@ PLUGIN = {
         "MITRE-ATTCK-T1552.001",
         "CISA-AA26-237A",
     ],
-    "references": [],
+    "references": [
+        {"title": "MITRE ATT&CK T1552: Unsecured Credentials",
+         "url": "https://attack.mitre.org/techniques/T1552/"},
+        {"title": "MITRE ATT&CK T1087.002: Account Discovery: Domain Account",
+         "url": "https://attack.mitre.org/techniques/T1087/002/"},
+        {"title": "Microsoft: Description attribute",
+         "url": "https://learn.microsoft.com/en-us/windows/win32/adschema/a-description"},
+    ],
     "description": (
         "The description and info (\"Notes\" in ADUC) attributes are "
         "free text, readable by any authenticated domain user via a "
