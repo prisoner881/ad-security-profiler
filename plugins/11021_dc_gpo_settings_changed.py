@@ -24,8 +24,9 @@ the AD version (MITRE ATT&CK T1484.001).
 
 Severity: high when a change touches [Privilege Rights] or [Group
 Membership], LDAP signing / channel binding, SMB signing, LmCompatibilityLevel
-or WDigest (UseLogonCredential / Negotiate) registry values, a GPP Groups
-item, or adds a cpassword; medium otherwise. status warn. One row per GPO;
+or WDigest (UseLogonCredential / Negotiate) registry values, a startup,
+shutdown, logon or logoff script ([1.1]: startup scripts run as SYSTEM on the
+DCs), a GPP Groups item, or adds a cpassword; medium otherwise. status warn. One row per GPO;
 the summary lists up to ten changes (sorted) and detail lists them all.
 Values shown are as collected: credential-like registry values are
 '<redacted>', cpasswords are never collected.
@@ -35,7 +36,10 @@ when it already had a setting or preference edge opened in an earlier run,
 or when it was first seen in AD after the client's first SYSVOL collection
 (a new GPO's settings are new). A GPO whose folder could not be read keeps
 its previous settings (the collector carries them forward), so an
-unreadable folder does not look like removed settings. Changes made and
+unreadable folder does not look like removed settings. [1.1] Data the
+collector only started reading in adprofiler 0.8.0 (script commands, GPP
+Files and FolderOptions) is not a change on the first run made by 0.8.0 or
+later: those entries existed before, they were just not collected. Changes made and
 reverted between two runs are not observed.
 """
 
@@ -43,8 +47,8 @@ PLUGIN = {
     "plugin_id": 11021,
     "category": "Change Detection",
     "name": "Group Policy Settings Changed in GPOs That Apply to Domain Controllers",
-    "version": "1.0",
-    "revision_date": "2026-10-04",
+    "version": "1.1",
+    "revision_date": "2026-10-21",
     "control_id": "CHANGE-11021",
     "framework_tags": [
         "NIST-800-53-CM-3", "NIST-800-53-SI-4", "NIST-800-53-AU-6",
@@ -67,7 +71,7 @@ PLUGIN = {
         "settings, advanced audit policy and Group Policy Preferences items -- shown as "
         "old -> new, added or removed; plus any GPO that newly stores a Group Policy "
         "Preferences password (cpassword). High when user rights, group membership, "
-        "LDAP/SMB signing, LmCompatibilityLevel, WDigest or local groups change or a "
+        "LDAP/SMB signing, LmCompatibilityLevel, WDigest, scripts or local groups change or a "
         "cpassword is added; medium otherwise. A GPO's first SYSVOL collection is a "
         "baseline, not a change. One row per GPO."
     ),
@@ -96,6 +100,19 @@ PLUGIN = {
                   SELECT min(run_id_valid_from) FROM gpo_preference_item_edge
                    WHERE client_id = %(client_id)s) x
         ),
+        -- [1.1] The first run by collector 0.8.0+ is the baseline for the data
+        -- kinds it added (gpo_setting_edge source 'scripts'; GPP Files and
+        -- FolderOptions).
+        new_kinds AS (
+            SELECT NOT EXISTS (
+                SELECT 1 FROM sync_run r
+                WHERE r.client_id = %(client_id)s AND r.run_id < %(run_id)s
+                  AND r.status = 'succeeded'
+                  AND r.collector_version ~ '^[0-9]+(\.[0-9]+)*'
+                  AND string_to_array(substring(r.collector_version FROM '^[0-9]+(?:\.[0-9]+)*'), '.')::int[]
+                      >= ARRAY[0, 8, 0]
+            ) AS baseline_run
+        ),
         dc_gpo AS (
             SELECT DISTINCT a.gpo_guid
             FROM v_gpo_dc_application a
@@ -122,6 +139,7 @@ PLUGIN = {
             FROM gpo_setting_edge e
             WHERE e.client_id = %(client_id)s AND e.run_id_valid_from = %(run_id)s
               AND e.gpo_guid IN (SELECT gpo_guid FROM dc_gpo)
+              AND NOT (e.source = 'scripts' AND (SELECT baseline_run FROM new_kinds))
         ),
         s_closed AS (
             SELECT e.gpo_guid, e.scope, e.source, e.section, e.setting_key, e.value_type, e.setting_value
@@ -151,11 +169,14 @@ PLUGIN = {
                    CASE sc.source
                         WHEN 'security_template' THEN '[' || sc.section || '] ' || sc.setting_key
                         WHEN 'registry' THEN sc.section || '\' || sc.setting_key
+                        WHEN 'scripts' THEN sc.section || ' script ' || sc.setting_key
+                                            || CASE WHEN sc.value_type = 'powershell' THEN ' (PowerShell)' ELSE '' END
                         ELSE 'Advanced audit: ' || COALESCE(sc.value_type, sc.setting_key)
                    END
                    || CASE WHEN sc.scope = 'user' THEN ' (user)' ELSE '' END AS label,
                    sc.change_kind, sc.old_value, sc.new_value,
                    (lower(sc.section) IN ('privilege rights', 'group membership')
+                    OR sc.source = 'scripts'
                     OR (sc.source = 'registry' AND lower(sc.setting_key) IN (
                         'system\currentcontrolset\services\ntds\parameters\ldapserverintegrity',
                         'system\currentcontrolset\services\ntds\parameters\ldapenforcechannelbinding',
@@ -176,6 +197,7 @@ PLUGIN = {
         p_opened AS (
             SELECT e.* FROM gpo_preference_item_edge e
             WHERE e.client_id = %(client_id)s AND e.run_id_valid_from = %(run_id)s
+              AND NOT (e.preference_type IN ('Files', 'FolderOptions') AND (SELECT baseline_run FROM new_kinds))
         ),
         p_closed AS (
             SELECT e.* FROM gpo_preference_item_edge e
