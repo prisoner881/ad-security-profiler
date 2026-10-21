@@ -19,10 +19,13 @@ forged token (Golden SAML) more damaging or the trust fragile:
   detail.mfa_behavior_note.
 - token-signing certificate expired, or expiring within 30 days of the
   Entra collection -> high (sign-in outage, or a hurried rollover that is
-  easy to abuse).
+  easy to abuse). Low when a next signing certificate valid for more than
+  30 days is already trusted: the IdP has rolled over, sign-in keeps
+  working, and only the stale certificate needs removing.
 - token-signing certificate notBefore more than a year before the
   collection -> medium: the key has not been rolled over, so a key stolen
-  long ago still works.
+  long ago still works. Not reported when a valid next signing
+  certificate exists (the rollover has happened).
 - nextSigningCertificate present -> low: a second key Entra already
   trusts. Normal during an AD FS automatic rollover; confirm it is the
   expected one (AA21-008A actors added their own signing certificates).
@@ -48,8 +51,8 @@ PLUGIN = {
     "plugin_id": 10090,
     "category": "Hybrid Identity",
     "name": "Federated Domain Trust Is Risky",
-    "version": "1.0",
-    "revision_date": "2026-10-05",
+    "version": "1.1",
+    "revision_date": "2026-10-21",
     "control_id": "HYBRID-10090",
     "requires_sources": ["federation"],
     "framework_tags": [
@@ -87,8 +90,9 @@ PLUGIN = {
         "(federatedIdpMfaBehavior acceptIfMfaDoneByFederatedIdp, or "
         "unset/legacy) so a forged token also satisfies MFA (high; "
         "critical on the tenant's default domain); the token-signing "
-        "certificate is expired or expires within 30 days (high) or has "
-        "not been rolled over for more than a year (medium); a next "
+        "certificate is expired or expires within 30 days (high; low when a "
+        "valid next certificate is already trusted) or has not been rolled "
+        "over for more than a year (medium); a next "
         "signing certificate is already trusted (low, confirm it is "
         "expected). Issuer and sign-in URIs are listed for review. One "
         "finding per domain."
@@ -116,7 +120,10 @@ PLUGIN = {
                               AND s.source = 'federation' AND s.status = 'ok') AS ok
         ),
         fed AS (
-            SELECT f.*, d.is_default, d.is_verified, d.authentication_type
+            SELECT f.*, d.is_default, d.is_verified, d.authentication_type,
+                   COALESCE(f.next_signing_certificate_thumbprint IS NOT NULL
+                            AND f.next_signing_certificate_not_after >= f.collected_at + interval '30 days',
+                            false) AS next_ok
               FROM entra_domain_federation f
               CROSS JOIN src
               LEFT JOIN entra_domain d
@@ -134,16 +141,24 @@ PLUGIN = {
                    'federatedIdpMfaBehavior is not set (legacy SupportsMfa behaviour may accept MFA from the IdP)'
               FROM fed f WHERE f.federated_idp_mfa_behavior IS NULL
             UNION ALL
-            SELECT f.domain_name, 4, 'token-signing certificate has expired'
+            SELECT f.domain_name, CASE WHEN f.next_ok THEN 2 ELSE 4 END,
+                   'token-signing certificate has expired'
+                   || CASE WHEN f.next_ok THEN ' (the next certificate, valid until '
+                                || to_char(f.next_signing_certificate_not_after AT TIME ZONE 'UTC', 'YYYY-MM-DD')
+                                || ', is already trusted, so sign-in is not affected; remove the expired one)'
+                           ELSE '' END
               FROM fed f WHERE f.signing_certificate_not_after < f.collected_at
             UNION ALL
-            SELECT f.domain_name, 4, 'token-signing certificate expires within 30 days'
+            SELECT f.domain_name, CASE WHEN f.next_ok THEN 2 ELSE 4 END,
+                   'token-signing certificate expires within 30 days'
+                   || CASE WHEN f.next_ok THEN ' (a valid next certificate is already trusted)' ELSE '' END
               FROM fed f
              WHERE f.signing_certificate_not_after >= f.collected_at
                AND f.signing_certificate_not_after < f.collected_at + interval '30 days'
             UNION ALL
             SELECT f.domain_name, 3, 'token-signing certificate not rolled over for more than a year'
               FROM fed f WHERE f.signing_certificate_not_before < f.collected_at - interval '1 year'
+               AND NOT f.next_ok
             UNION ALL
             SELECT f.domain_name, 2, 'a next token-signing certificate is already trusted (confirm it is expected)'
               FROM fed f WHERE f.next_signing_certificate_thumbprint IS NOT NULL

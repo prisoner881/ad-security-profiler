@@ -24,7 +24,10 @@ lack it.
 
 # ---------------------------------------------------------------------------
 # Shared definition (copied verbatim into plugins 9024-9038): the effective
-# machine Group Policy of every enabled computer. gpo_comp = the computers;
+# machine Group Policy of every enabled Windows computer (operatingSystem
+# "Windows ..." or a domain controller; Linux and NAS joins have no Group
+# Policy client, and other computers with no operatingSystem are left out).
+# gpo_comp = the computers;
 # gpo_applies = the GPOs linked above each one with their precedence, as in
 # v_gpo_dc_application (enforced links first, higher container wins; then the
 # deeper OU wins; then GPMC link order; block inheritance honoured; disabled
@@ -58,6 +61,9 @@ COMPUTER_GPO_SQL = r"""        gpo_som AS (
               ON d.object_guid = c.object_guid AND d.client_id = c.client_id AND NOT d.is_deleted
             WHERE c.client_id = %(client_id)s AND c.valid_to IS NULL AND c.is_enabled IS NOT FALSE
               AND NOT COALESCE(c.is_gmsa, false) AND NOT COALESCE(c.is_dmsa, false)
+              -- Group Policy applies to Windows only (Linux/NAS joins and
+              -- non-DC accounts with no operatingSystem are left out)
+              AND (COALESCE(c.is_domain_controller, false) OR c.operating_system ILIKE 'windows%%')
         ),
         gpo_chain AS (
             SELECT p.computer_guid, s.container_guid, s.is_domain, s.block_inheritance,
@@ -113,8 +119,8 @@ COMPUTER_GPO_SQL = r"""        gpo_som AS (
 PLUGIN = {   'plugin_id': 9035,
     'category': 'Organizational Units',
     'name': 'Kerberos Armoring (FAST) Not Enabled by Group Policy',
-    'version': '1.0',
-    'revision_date': '2026-10-20',
+    'version': '1.1',
+    'revision_date': '2026-10-21',
     'control_id': 'GPO-9035',
     'framework_tags': [   'NIST-800-53-IA-2(8)',
                           'NIST-800-53-CM-6',
@@ -201,8 +207,9 @@ PLUGIN = {   'plugin_id': 9035,
                 'sample_computers_not_covered',
                     (SELECT jsonb_agg(x.computer_name ORDER BY x.computer_name)
                        FROM (SELECT computer_name FROM st WHERE NOT ok ORDER BY computer_name LIMIT 25) x),
-                'note', 'Evaluated from GPO links and precedence; security filtering, WMI filters, '
-                        || 'site-linked GPOs and local settings are not visible.'
+                'note', 'Evaluated from GPO links and precedence for enabled Windows computers; '
+                        || 'security filtering, WMI filters, site-linked GPOs and local settings are '
+                        || 'not visible, and non-Windows computers are not counted.'
             ) AS detail
         FROM st s
         CROSS JOIN dom d
