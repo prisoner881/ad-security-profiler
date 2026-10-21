@@ -4,7 +4,7 @@
  adprofiler.py -- Active Directory Security & Compliance Profiler (Collector)
 ================================================================================
 
-VERSION: 0.7.8
+VERSION: 0.8.0
 
 PURPOSE:
     Connects to an on-premise Active Directory Domain Controller via LDAP,
@@ -154,6 +154,7 @@ try:
         LDAPException, LDAPCommunicationError, LDAPResponseTimeoutError,
     )
     from ldap3.protocol.microsoft import security_descriptor_control
+    from ldap3.utils.conv import escape_filter_chars
 except ImportError:
     print("\033[91mERROR: the 'ldap3' package is not installed.\033[0m")
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
@@ -185,7 +186,7 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
-VERSION = "0.7.8"
+VERSION = "0.8.0"
 
 # [v0.7.7] The oldest collector version whose stored derived fields
 # (parsed / typed columns computed from raw attributes) are current. A
@@ -196,8 +197,10 @@ VERSION = "0.7.8"
 # VERSION whenever a release changes a derived field. 0.7.7 covers
 # 0.7.6's key credential timestamp fix (runs made by 0.7.6 itself did
 # not rewrite unchanged objects either). 0.7.8: OU name and description
-# stored as text instead of array literals.
-DERIVED_FIELDS_VERSION = "0.7.8"
+# stored as text instead of array literals. 0.8.0: the new schema v44
+# columns (users' script_path; the domain's dSHeuristics string,
+# msDS-Other-Settings and NetBIOS name) on every existing object.
+DERIVED_FIELDS_VERSION = "0.8.0"
 
 
 def _version_tuple(text):
@@ -244,6 +247,9 @@ USER_ATTRS = [
     # user, so the first 0.6.0 run writes one new version per user --
     # run once with --full-rescan after upgrading (see changelog).
     "altSecurityIdentities", "accountExpires",
+    # [v0.8.0] Logon script (plugin 1052: scripts run from outside the
+    # domain). Usually a name relative to NETLOGON; set on few accounts.
+    "scriptPath",
 ]
 
 # [v0.6.0] Attributes that hold a password in a recoverable form when
@@ -1591,13 +1597,16 @@ def get_domain_sid_and_tombstone_lifetime(conn, base_dn, config_nc):
     # [v0.5.16] dwAdminSDExMask (dSHeuristics character 16) and the forest's
     # sPNMappings, from the same Directory Service object. None = unknown.
     ds_extra = {"admin_sd_ex_mask": None, "spn_mappings": None,
-                "tombstone_lifetime_source": "unreadable"}
+                "tombstone_lifetime_source": "unreadable",
+                # [v0.8.0] The raw dSHeuristics string ('' = not set) and
+                # msDS-Other-Settings as {name: value}; None = unreadable.
+                "dsheuristics": None, "ds_other_settings": None}
     if config_nc:
         ds_dn = f"CN=Directory Service,CN=Windows NT,CN=Services,{config_nc}"
         try:
             entries = ldap_search(conn, ds_dn, "(objectClass=*)", ldap3.BASE,
                                   ["msDS-DeletedObjectLifetime", "tombstoneLifetime",
-                                   "dSHeuristics", "sPNMappings"],
+                                   "dSHeuristics", "sPNMappings", "msDS-Other-Settings"],
                                   what="the Directory Service object")
             if entries:
                 attrs = entries[0]["attributes"]
@@ -1629,6 +1638,13 @@ def get_domain_sid_and_tombstone_lifetime(conn, base_dn, config_nc):
                 dsheuristics_uniqueness = 0
                 ds_extra["admin_sd_ex_mask"] = 0
                 ds_extra["spn_mappings"] = parse_spn_mappings(attrs.get("sPNMappings"))
+                # [v0.8.0] Kept whole for plugin 4038 (characters 3, 8, 28
+                # and 29), and msDS-Other-Settings for plugin 4039
+                # (DenyUnauthenticatedBind).
+                ds_extra["dsheuristics"] = (
+                    (dsh_val[0] if isinstance(dsh_val, list) else dsh_val) if dsh_val else "")
+                ds_extra["ds_other_settings"] = parse_ds_other_settings(
+                    attrs.get("msDS-Other-Settings"))
                 if dsh_val:
                     dsh_str = dsh_val[0] if isinstance(dsh_val, list) else dsh_val
                     if len(dsh_str) >= 7 and dsh_str[6] == "2":
@@ -1677,6 +1693,22 @@ def get_domain_sid_and_tombstone_lifetime(conn, base_dn, config_nc):
 
     return (domain_sid, tombstone_lifetime, tombstone_lifetime_is_default,
             dsheuristics_anonymous_access, dsheuristics_uniqueness, ds_extra)
+
+
+def parse_ds_other_settings(values):
+    """[v0.8.0] msDS-Other-Settings ("Name=Value" lines) -> {name: value},
+    sorted by name so an unchanged attribute never versions the domain.
+    A value without "=" is kept with an empty value."""
+    if not values:
+        return {}
+    if isinstance(values, str):
+        values = [values]
+    settings = {}
+    for raw in values:
+        name, _, value = str(_decode(raw)).partition("=")
+        if name.strip():
+            settings[name.strip()] = value.strip()
+    return dict(sorted(settings.items(), key=lambda kv: kv[0].lower()))
 
 
 def parse_spn_mappings(values):
@@ -1843,7 +1875,9 @@ REQUIRED_SCHEMA_COLUMNS = {
                 "mail", "proxy_addresses", "when_created",
                 # [v0.6.0, schema v38]
                 "alt_security_identities", "cleartext_password_attributes",
-                "account_expires", "assigned_authn_policy_silo", "assigned_authn_policy"},
+                "account_expires", "assigned_authn_policy_silo", "assigned_authn_policy",
+                # [v0.8.0, schema v44]
+                "script_path"},
     "ad_group": {"object_guid", "client_id", "version_id", "valid_from", "valid_to",
                  "sam_account_name", "group_type", "admin_count",
                  "is_protected_group", "member_count_direct",
@@ -1877,7 +1911,9 @@ REQUIRED_SCHEMA_COLUMNS = {
                   "recycle_bin_enabled", "schema_object_version", "forest_updates_revision",
                   "domain_updates_revision", "smartcard_hash_rolling_enabled",
                   "kds_root_key_count", "laps_attribute_guids", "authn_silos",
-                  "authn_policy_count", "forest_root_dn"},
+                  "authn_policy_count", "forest_root_dn",
+                  # [v0.8.0, schema v44]
+                  "dsheuristics", "ds_other_settings", "netbios_name"},
     "ad_ou": {"object_guid", "client_id", "version_id", "valid_from", "valid_to",
               "ou_name", "description", "block_inheritance", "when_created"},
     "ad_ntauth_store": {"object_guid", "client_id", "version_id", "valid_from",
@@ -2009,7 +2045,7 @@ REQUIRED_IDENTITY_COLUMNS = {
 # the structural check remains the backstop for a schema altered
 # outside the approved migration files, where the version number could
 # claim to be current while the actual structure doesn't match it.
-EXPECTED_SCHEMA_VERSION = 43  # [v0.7.4] v43: adaudit push tables only
+EXPECTED_SCHEMA_VERSION = 44  # [v0.8.0] v44: dSHeuristics / msDS-Other-Settings / NetBIOS name, scriptPath, SYSVOL script commands
 
 
 def check_schema_version(pg_conn):
@@ -3055,6 +3091,7 @@ def user_typed_columns(full):
         "account_expires": account_expires_to_datetime(full.get("accountExpires")),
         "assigned_authn_policy_silo": full.get("msDS-AssignedAuthNPolicySilo"),
         "assigned_authn_policy": full.get("msDS-AssignedAuthNPolicy"),
+        "script_path": _first_value(full.get("scriptPath")),  # [v0.8.0, schema v44]
     }
 
 
@@ -3230,6 +3267,10 @@ def domain_typed_columns(full, functional_level, tombstone_lifetime_days, tombst
         "dsheuristics_admin_sd_ex_mask": (ds_extra or {}).get("admin_sd_ex_mask"),
         "spn_mappings": (json.dumps((ds_extra or {}).get("spn_mappings"))
                          if (ds_extra or {}).get("spn_mappings") else None),
+        # [v0.8.0, schema v44]
+        "dsheuristics": (ds_extra or {}).get("dsheuristics"),
+        "ds_other_settings": (json.dumps((ds_extra or {}).get("ds_other_settings"))
+                              if (ds_extra or {}).get("ds_other_settings") is not None else None),
         "lockout_threshold": _as_int(full.get("lockoutThreshold")),
         "min_pwd_age_seconds": ad_interval_to_seconds(full.get("minPwdAge"), zero_means_none=False),
         "max_pwd_age_seconds": ad_interval_to_seconds(full.get("maxPwdAge")),
@@ -3249,6 +3290,7 @@ def domain_typed_columns(full, functional_level, tombstone_lifetime_days, tombst
         "forest_updates_revision": ex.get("forest_updates_revision"),
         "domain_updates_revision": ex.get("domain_updates_revision"),
         "kds_root_key_count": ex.get("kds_root_key_count"),
+        "netbios_name": ex.get("netbios_name"),  # [v0.8.0, schema v44]
         "laps_attribute_guids": (json.dumps(ex["laps_attribute_guids"])
                                  if ex.get("laps_attribute_guids") is not None else None),
         "authn_silos": (json.dumps(ex["authn_silos"])
@@ -4730,7 +4772,27 @@ def collect_domain_extra_settings(conn, base_dn, config_nc, forest_root_dn):
         "the domain updates revision")
     settings["laps_attribute_guids"] = read_laps_attribute_guids(conn, config_nc)
     settings["authn_silos"], settings["authn_policy_count"] = read_authn_silos(conn, config_nc)
+    settings["netbios_name"] = read_netbios_name(conn, base_dn, config_nc)
     return settings
+
+
+def read_netbios_name(conn, base_dn, config_nc):
+    """[v0.8.0] The domain's NetBIOS name (its crossRef's nETBIOSName), so
+    plugins can tell the domain's own NETLOGON share (\\\\CORP\\NETLOGON)
+    from a share outside the domain. None when unreadable (logged)."""
+    try:
+        entries = ldap_search(
+            conn, f"CN=Partitions,{config_nc}",
+            f"(&(objectClass=crossRef)(nCName={escape_filter_chars(base_dn)}))",
+            ldap3.LEVEL, ["nETBIOSName"], what="the domain's crossRef (NetBIOS name)")
+    except OPTIONAL_READ_ERRORS as exc:
+        log_warn(f"Could not read the domain's NetBIOS name (non-fatal): {describe_read_error(exc)}")
+        return None
+    for entry in entries:
+        values = _raw_values(entry.get("raw_attributes"), "nETBIOSName")
+        if values:
+            return str(_decode(values[0])).strip() or None
+    return None
 
 
 def _repl_meta_time(value):
@@ -5402,6 +5464,8 @@ def main():
                 "dsheuristics_uniqueness": dsheuristics_uniqueness,
                 "dsheuristics_admin_sd_ex_mask": ds_extra["admin_sd_ex_mask"],
                 "spn_mappings": ds_extra["spn_mappings"],
+                "dsheuristics": ds_extra["dsheuristics"],  # [v0.8.0]
+                "ds_other_settings": ds_extra["ds_other_settings"],  # [v0.8.0]
                 "laps_schema_present": bool(laps_legacy_present or laps_modern_present),
                 "dfsr_migration_flags": dfsr_migration_flags,
                 # [v0.6.0] Expect one "modified" domain version on the first
