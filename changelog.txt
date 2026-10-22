@@ -9,6 +9,15 @@ the script's own docstring now keeps a one-line summary per entry, this
 file keeps the complete detail (root causes, what was verified, why a
 decision was made a particular way) for anyone who wants it.
 
+    0.9.1 - Schema v46. No collection change: schema v46 (entra_graph_collector
+            0.9.0) only adds Entra tables and columns, the
+            is_entra_kerberos_server() function and a change to the
+            v_gpo_dc_application view, none of which this script writes.
+            0.9.0 required exactly schema v45, so it refused to run against a
+            database migrated to v46 ("Database schema is newer than this
+            script expects"). EXPECTED_SCHEMA_VERSION is now 46; a v45
+            database must apply schema_migration_v46.sql first.
+
     0.9.0 - Schema v45. Data for three more PingCastle-equivalent checks:
             - mS-DS-CreatorSID is collected on computers
               (ad_computer.creator_sid): the account that joined the computer

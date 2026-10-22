@@ -4,7 +4,7 @@
  adprofiler.py -- Active Directory Security & Compliance Profiler (Collector)
 ================================================================================
 
-VERSION: 0.9.0
+VERSION: 0.9.1
 
 PURPOSE:
     Connects to an on-premise Active Directory Domain Controller via LDAP,
@@ -186,7 +186,7 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
-VERSION = "0.9.0"
+VERSION = "0.9.1"
 
 # [v0.7.7] The oldest collector version whose stored derived fields
 # (parsed / typed columns computed from raw attributes) are current. A
@@ -2108,7 +2108,7 @@ REQUIRED_IDENTITY_COLUMNS = {
 # the structural check remains the backstop for a schema altered
 # outside the approved migration files, where the version number could
 # claim to be current while the actual structure doesn't match it.
-EXPECTED_SCHEMA_VERSION = 45  # [v0.9.0] v45: computer creator SID, DC SYSVOL subscriptions, users' Java attributes
+EXPECTED_SCHEMA_VERSION = 46  # [v0.9.1] v46: Entra additions and is_entra_kerberos_server(); nothing this script writes changed
 
 
 def check_schema_version(pg_conn):
