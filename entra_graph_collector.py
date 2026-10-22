@@ -2,9 +2,12 @@
 """
 entra_graph_collector.py -- Microsoft Entra ID / Graph API Email Collector
 
-VERSION: 0.9.1
+VERSION: 1.0.0
 
 CHANGELOG:
+    1.0.0 - Release 1.0 (adprofiler.py 1.0.0, adaudit.py 1.0.0, schema
+            v46; see RELEASE_NOTES.md). No change in behavior from 0.9.1.
+
     0.9.1 - federated_token_validation_policy: Graph's 404 for a tenant
             that never configured the policy is recorded as read ('ok',
             content {"configured": false}) instead of a failed source, so
@@ -266,7 +269,7 @@ PG_DBNAME = "adprofiler"
 PG_USER = None
 PG_PASSWORD = None
 
-VERSION = "0.9.1"
+VERSION = "1.0.0"
 
 # [v0.5.0] Retry policy shared by every Graph/token request (see
 # _send_with_retry()). 429 and transient 5xx responses, plus network

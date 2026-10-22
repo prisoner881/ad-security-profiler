@@ -4,6 +4,10 @@ These steps take a brand-new Ubuntu 26 LTS machine to a working state
 where the three scripts can be run interactively, in sequence, against
 your live Active Directory and Entra ID environment.
 
+This guide covers release 1.0 (`adprofiler.py` 1.0.0,
+`entra_graph_collector.py` 1.0.0, `adaudit.py` 1.0.0, schema v46). See
+`RELEASE_NOTES.md` for what the release contains and how to upgrade to it.
+
 ## 1. Install Python and the venv module
 
 Ubuntu 26 LTS ships Python 3 by default, but the `venv` module is a
@@ -31,6 +35,7 @@ USB drive, secure file transfer, etc.):
 - `adaudit_push.py` (used by `adaudit.py --push`)
 - `requirements.txt`
 - `schema_init.sql`
+- `RELEASE_NOTES.md`
 - Every `schema_migration_vNN.sql` file (only needed to upgrade an
   existing database -- see Troubleshooting)
 - A `plugins/` subdirectory containing every plugin `.py` file

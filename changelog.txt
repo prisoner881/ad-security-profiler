@@ -9,6 +9,16 @@ the script's own docstring now keeps a one-line summary per entry, this
 file keeps the complete detail (root causes, what was verified, why a
 decision was made a particular way) for anyone who wants it.
 
+    1.0.0 - Release 1.0, together with entra_graph_collector.py 1.0.0,
+            adaudit.py 1.0.0 and sysvol_collector.py 1.1 on schema v46 (see
+            RELEASE_NOTES.md). No collection change from 0.9.1 and no
+            schema change, so no migration or --full-rescan is needed. The
+            module docstring no longer describes the script as a
+            proof-of-concept: the stale scope notes (ACLs, RBCD and
+            enrollment rights "not collected"), the apt-based setup and the
+            v0.0.5 testing status are replaced by the current scope, the
+            full option list and a pointer to SETUP.md.
+
     0.9.1 - Schema v46. No collection change: schema v46 (entra_graph_collector
             0.9.0) only adds Entra tables and columns, the
             is_entra_kerberos_server() function and a change to the
