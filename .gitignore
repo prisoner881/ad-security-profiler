@@ -1,0 +1,28 @@
+# ad-security-profiler -- files that must never be committed
+# (MAINTAINERS.md, "Contribution and review process", step 4).
+
+# Compiled Python, written whenever the scripts or plugins run.
+__pycache__/
+*.py[cod]
+
+# Python virtual environment (SETUP.md creates it as venv/).
+venv/
+.venv/
+
+# Collected output, which holds client data:
+# adprofiler-results_*.log, entra-graph-collector-results_*.log,
+# adaudit-findings_*.xlsx.
+*.log
+*.xlsx
+
+# Credentials and local environment settings.
+.env
+.pgpass
+
+# Editor and operating-system clutter.
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db

@@ -32,7 +32,7 @@ Each area lists the files it covers. Any change to an area needs approval from o
 Maintainers:
 
 - review and merge pull requests in their areas;
-- keep the default branch (`client-test`) in a releasable state;
+- keep the default branch (`release`) in a releasable state;
 - triage issues and security reports, and respond within a reasonable time;
 - keep the collectors, `adaudit.py` and the schema version in step, as described under "Project conventions" below;
 - keep `SETUP.md` accurate for the permissions, setup steps and outputs a client sees;
@@ -40,7 +40,7 @@ Maintainers:
 
 ## Contribution and review process
 
-1. Work on a feature branch and open a pull request against `client-test`.
+1. Work on a feature branch and open a pull request against `release`.
 2. A maintainer for every affected area must approve the pull request before it is merged.
 3. A pull request that changes the schema, or how collected data is interpreted, must include:
    - the matching migration file;
@@ -49,6 +49,8 @@ Maintainers:
 4. A pull request must not contain:
    - client data, credentials, or collected output (`*.log`, `*.xlsx`);
    - compiled files (`__pycache__/`).
+
+   `.gitignore` keeps these out of `git add`; it does not remove a file that is already committed (use `git rm --cached`).
 
 ## Project conventions
 

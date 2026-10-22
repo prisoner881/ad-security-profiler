@@ -2,9 +2,9 @@
 
 ## Release 1.0 (2026-10-22)
 
-The first release of ad-security-profiler, made from `api-push` at the point
-where Entra ID coverage waves 1 and 2 were merged and verified against a
-live tenant.
+The first release of ad-security-profiler, made from the `api-push` branch
+(since merged into `release`, the default branch) at the point where Entra ID
+coverage waves 1 and 2 were merged and verified against a live tenant.
 
 ### Components
 
