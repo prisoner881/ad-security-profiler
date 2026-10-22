@@ -2,7 +2,7 @@
 """
 adaudit.py -- AD Security & Compliance Plugin Runner
 ======================================================
-VERSION: 0.10.5
+VERSION: 0.10.6
 
 Companion to adprofiler.py. Where adprofiler.py collects AD data,
 adaudit.py analyzes it: discovers every plugin file in plugins/, runs each
@@ -25,6 +25,20 @@ DESIGN:
       as: (status, object_guid, stig_severity, stig_reference,
       tool_severity, tool_reference, fd_severity, summary, detail).
       Zero rows returned = clean pass, nothing to report.
+    - [v0.10.6] Requires schema v46 (entra_graph_collector.py 0.9.0; no
+      adprofiler change). Entra ID coverage waves 1 and 2: new plugins
+      10029, 10036-10039, 10048, 10049, 10058, 10075-10079, 10086, 10087,
+      10089, 10097, 10114, 11030 and 11031; updated 10015, 10016, 10020,
+      10031, 10090, 10094 and 11026. Agent ID Administrator is a highly
+      privileged role in every Entra plugin's role list. The Microsoft Entra
+      Kerberos server object (CN=AzureADKerberos, flagged by AD as a
+      read-only DC) is left out of the DC posture plugins (2006, 2007,
+      2019-2021, 2039, 2042, 2046, 4026, 4033, 9010-9038) and of
+      v_gpo_dc_application; plugin 1006 names its krbtgt-AzureAD key and
+      11011 reports a new one as such. New ENTRA_DATA_SOURCES:
+      ca_policies_beta, app_management_policy,
+      federated_token_validation_policy, federated_identity_credentials,
+      administrative_units, devices.
     - [v0.10.5] Requires schema v45 (adprofiler.py 0.9.0): plugins 2044-2046
       and the 4021 / 11001 updates read the computer creator SID, the DCs'
       SYSVOL subscription columns and the users' Java attributes.
@@ -244,7 +258,7 @@ import psycopg2.extras
 
 import adaudit_push
 
-VERSION = "0.10.5"
+VERSION = "0.10.6"
 
 # [test-candidate-branch] Always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
@@ -597,7 +611,7 @@ def connect_postgres():
 # SYSVOL script commands (plugins 1052, 4038, 4039, 9040-9042), v45 the
 # computer creator SID, DC SYSVOL subscriptions and users' Java attributes
 # (plugins 2044-2046, 4021, 11001).
-REQUIRED_SCHEMA_VERSION = 45
+REQUIRED_SCHEMA_VERSION = 46
 
 # [v0.9.0] Data sources a client may not have collected: (table/view names a
 # plugin query mentions, probe returning TRUE when the client has the data).
@@ -626,6 +640,9 @@ ENTRA_DATA_SOURCES = frozenset({
     "device_registration_policy", "onprem_sync", "pta_agents", "partner_contracts",
     "registration_details", "sign_in_activity", "sp_sign_in_activity", "risky_users",
     "risk_detections",
+    # [v0.10.6] entra_graph_collector.py 0.9.0, schema v46
+    "ca_policies_beta", "app_management_policy", "federated_token_validation_policy",
+    "federated_identity_credentials", "administrative_units", "devices",
 })
 
 

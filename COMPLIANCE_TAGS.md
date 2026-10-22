@@ -72,7 +72,7 @@ Use SC-17, IA-5(2) and PCI 4.2.1.1 only for PKI/certificate checks, and SC-12 on
 ### T10. Secure configuration and hardening: domain/forest settings, dSHeuristics, MachineAccountQuota, schema, GPO baseline, DNS settings, optional features
 `NIST-800-53-CM-6`, `NIST-800-53-CM-7`, `NIST-800-53-CM-2`, `NIST-CSF-2.0-PR.PS-01`, `PCI-DSS-4.0-2.2.1`, `PCI-DSS-4.0-2.2.4`, `PCI-DSS-4.0-2.2.6`, `CIS-CSC-8-4.1`, `CIS-CSC-8-4.8`, `ISO-27001-2022-A.8.9`, `SOC2-CC7.1`, `HIPAA-164.312(c)(1)`
 
-Use 2.2.4 / CIS 4.8 only for unnecessary services or protocols.
+Use 2.2.4 / CIS 4.8 only for unnecessary services or protocols. Use `NIST-800-53-SI-7` (software, firmware and information integrity) only where the integrity of replicated policy or logon content is at stake, such as a writable SYSVOL replica.
 
 ### T11. Vulnerabilities, patching and unsupported software: CVE-specific exposures, unsupported OS, outdated schema/adprep
 `NIST-800-53-SI-2`, `NIST-800-53-RA-5`, `NIST-800-53-SA-22`, `NIST-CSF-2.0-ID.RA-01`, `NIST-CSF-2.0-PR.PS-02`, `PCI-DSS-4.0-6.3.3`, `PCI-DSS-4.0-12.3.4`, `CIS-CSC-8-2.2`, `CIS-CSC-8-7.3`, `ISO-27001-2022-A.8.8`, `SOC2-CC7.1`
@@ -147,3 +147,4 @@ Titles: SI-3 Malicious Code Protection; SC-7 Boundary Protection; AC-11 Device L
 | `CISA-SCUBA-MS.AAD.7.9` | User activation of other highly privileged roles SHOULD trigger an alert |
 | `CISA-SCUBA-MS.AAD.8.1` | Guest users SHOULD have limited or restricted access to Entra ID directory objects |
 | `CISA-SCUBA-MS.AAD.8.2` | Only users with the Guest Inviter role SHOULD be able to invite guest users |
+| `CISA-SCUBA-MS.AAD.9.1` | Risky AI agents SHALL be blocked |

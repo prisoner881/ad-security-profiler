@@ -17,6 +17,13 @@ PingCastle P-LogonDenied).
 One row per domain (object_guid = the domain) listing the OUs and computers
 not covered. Severity ('warn'): medium when 200 or more non-DC computers are
 in scope (PingCastle applies the rule above that size), low otherwise.
+
+[v1.2] Leaves out the Microsoft Entra Kerberos server object
+(CN=AzureADKerberos in the Domain Controllers OU, linked to the krbtgt-
+AzureAD account), which Microsoft documents as functioning like a read-only
+domain controller but which is not a server: it has no host, logons, Group
+Policy or SYSVOL. Plugin 1006 reports the age of its key. Requires schema
+v46.
 """
 
 # ---------------------------------------------------------------------------
@@ -58,6 +65,7 @@ COMPUTER_GPO_SQL = r"""        gpo_som AS (
               ON d.object_guid = c.object_guid AND d.client_id = c.client_id AND NOT d.is_deleted
             WHERE c.client_id = %(client_id)s AND c.valid_to IS NULL AND c.is_enabled IS NOT FALSE
               AND NOT COALESCE(c.is_gmsa, false) AND NOT COALESCE(c.is_dmsa, false)
+              AND NOT is_entra_kerberos_server(c.sam_account_name, c.krbtgt_link)
               -- Group Policy applies to Windows only (Linux/NAS joins and
               -- non-DC accounts with no operatingSystem are left out)
               AND (COALESCE(c.is_domain_controller, false) OR c.operating_system ILIKE 'windows%%')
@@ -116,8 +124,8 @@ COMPUTER_GPO_SQL = r"""        gpo_som AS (
 PLUGIN = {   'plugin_id': 9025,
     'category': 'Organizational Units',
     'name': 'No Group Policy Denies Tier 0 Logon to Lower-Tier Computers',
-    'version': '1.1',
-    'revision_date': '2026-10-21',
+    'version': '1.2',
+    'revision_date': '2026-10-22',
     'control_id': 'GPO-9025',
     'framework_tags': [   'NIST-800-53-AC-6(5)',
                           'NIST-800-53-AC-2(7)',

@@ -18,8 +18,7 @@ says which of those controls the policy would provide once enforced
 
 Severity: low 'warn' -- the risk itself is reported by the plugin for the
 missing control; this keeps the unenforced policy visible as the likely
-fix. Microsoft-managed policies (created by Microsoft in report-only first)
-and policies deliberately kept disabled as a rollback copy are reported
+fix. Policies deliberately kept disabled as a rollback copy are reported
 too; close them as accepted where that is intended.
 
 Identity: one finding per policy, object_guid = md5('10015:' || client_id
@@ -28,14 +27,19 @@ report-only and disabled does not open a new finding. Works with rows from
 older collectors (only id, display_name, state and grant_controls are
 needed; the legacy-auth hint needs "conditions" and is null without it). No
 rows when no Entra posture was collected.
+
+[v1.1] Microsoft-managed policies (display name starting 'Microsoft-
+managed:') are left out; plugin 10029 reports them, at medium when one is
+turned off. Their open findings here close as remediated on the first run of
+this version and reappear under 10029.
 """
 
 PLUGIN = {
     "plugin_id": 10015,
     "category": "Hybrid Identity",
     "name": "Conditional Access Policy Not Enforced",
-    "version": "1.0",
-    "revision_date": "2026-10-04",
+    "version": "1.1",
+    "revision_date": "2026-10-22",
     "control_id": "HYBRID-10015",
     "framework_tags": [
         "NIST-800-53-CM-6",
@@ -87,6 +91,8 @@ PLUGIN = {
                   CASE WHEN jsonb_typeof(sp.ca_policies) = 'array' THEN sp.ca_policies ELSE '[]'::jsonb END) p
              WHERE sp.client_id = %(client_id)s
                AND p->>'state' IN ('enabledForReportingButNotEnforced', 'disabled')
+               -- [v1.1] Microsoft-managed policies are reported by plugin 10029
+               AND COALESCE(p->>'display_name', '') NOT ILIKE 'Microsoft-managed:%%'
         )
         SELECT
             'warn' AS status,

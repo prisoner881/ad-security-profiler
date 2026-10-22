@@ -27,14 +27,22 @@ A key Graph did not return (null) is skipped, not guessed.
 
 Tenant-level finding: object_guid md5('10094:' || client_id), every issue
 listed. Requires source onprem_sync.
+
+[v1.1] Also reports
+features.allowOnPremUpdateOfOnPremisesObjectIdentifierEnabled = true (high):
+from July 2026 Entra ID refuses a hard match onto a cloud account that
+already has an onPremisesObjectIdentifier or holds or is eligible for a
+privileged role, and this tenant-wide flag is Microsoft's temporary bypass
+for a migration; left on, it re-opens that takeover path for every account
+(Maester MT.1183).
 """
 
 PLUGIN = {
     "plugin_id": 10094,
     "category": "Hybrid Identity",
     "name": "Cloud Object Takeover Through Hard or Soft Match Not Blocked",
-    "version": "1.0",
-    "revision_date": "2026-10-05",
+    "version": "1.1",
+    "revision_date": "2026-10-22",
     "control_id": "HYBRID-10094",
     "requires_sources": ["onprem_sync"],
     "framework_tags": [
@@ -53,6 +61,10 @@ PLUGIN = {
          "url": "https://learn.microsoft.com/en-us/entra/identity/hybrid/connect/how-to-connect-install-existing-tenant"},
         {"title": "Microsoft Graph: onPremisesDirectorySynchronizationFeature resource type",
          "url": "https://learn.microsoft.com/en-us/graph/api/resources/onpremisesdirectorysynchronizationfeature"},
+        {"title": "Microsoft: Temporarily allow onPremisesObjectIdentifier updates (hard match protections, July 2026)",
+         "url": "https://learn.microsoft.com/en-us/entra/identity/hybrid/connect/how-to-connect-install-existing-tenant#temporarily-allow-onpremisesobjectidentifier-updates"},
+        {"title": "Maester MT.1183: Temporary bypass for onPremisesObjectIdentifier updates should be disabled",
+         "url": "https://maester.dev/docs/tests/MT.1183"},
         {"title": "MITRE ATT&CK T1556.007 Modify Authentication Process: Hybrid Identity",
          "url": "https://attack.mitre.org/techniques/T1556/007/"},
     ],
@@ -62,16 +74,20 @@ PLUGIN = {
         "UPN or SMTP address is enabled (medium). Someone able to create "
         "or edit users in a synced OU can then attach an on-premises "
         "object to a valuable cloud-only account and control its password "
-        "(SyncJacking, MITRE T1556.007). Low when the tenant does not "
-        "currently synchronize."
+        "(SyncJacking, MITRE T1556.007). Also high: the temporary bypass of "
+        "Microsoft's July 2026 hard-match protections "
+        "(allowOnPremUpdateOfOnPremisesObjectIdentifierEnabled) left on. Low when "
+        "the tenant does not currently synchronize."
     ),
     "remediation": (
         "Microsoft Graph PowerShell (beta): $s = Get-MgBetaDirectoryOnPremiseSynchronization; "
         "Update-MgBetaDirectoryOnPremiseSynchronization "
         "-OnPremisesDirectorySynchronizationId $s.Id -Features "
         "@{BlockCloudObjectTakeoverThroughHardMatchEnabled=$true; "
-        "BlockSoftMatchEnabled=$true}. Turn soft match back on only for "
-        "a planned migration window. Also restrict who can write "
+        "BlockSoftMatchEnabled=$true; "
+        "AllowOnPremUpdateOfOnPremisesObjectIdentifierEnabled=$false}. Turn soft match, "
+        "or the onPremisesObjectIdentifier bypass, back on only for a planned migration "
+        "window. Also restrict who can write "
         "ms-DS-ConsistencyGuid, userPrincipalName and proxyAddresses on "
         "synced users on-premises."
     ),
@@ -104,11 +120,18 @@ PLUGIN = {
             UNION ALL
             SELECT st.client_id, 2, 'soft match (UPN / SMTP address) is not blocked'
               FROM st WHERE st.f ->> 'blockSoftMatchEnabled' = 'false'
+            UNION ALL
+            -- [v1.1] temporary bypass of the July 2026 hard-match protections
+            SELECT st.client_id, 3,
+                   'the temporary bypass allowOnPremUpdateOfOnPremisesObjectIdentifierEnabled is on '
+                   || '(hard match onto accounts that already have an on-premises object identifier or hold '
+                   || 'a privileged role is allowed again)'
+              FROM st WHERE st.f ->> 'allowOnPremUpdateOfOnPremisesObjectIdentifierEnabled' = 'true'
         ),
         agg AS (
             SELECT i.client_id, max(i.rank) AS rank,
-                   string_agg(i.issue, '; ' ORDER BY i.rank DESC) AS summary_text,
-                   jsonb_agg(i.issue ORDER BY i.rank DESC) AS issues
+                   string_agg(i.issue, '; ' ORDER BY i.rank DESC, i.issue) AS summary_text,
+                   jsonb_agg(i.issue ORDER BY i.rank DESC, i.issue) AS issues
               FROM issue i
              GROUP BY i.client_id
         ),

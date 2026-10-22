@@ -31,17 +31,28 @@ Severity high when a weak method was enabled or consent / access opened:
     permissionGrantPoliciesAssigned (user consent opened), allowedToCreateApps
     turned on, allowInvitesFrom changed to 'everyone', or guestUserRoleId
     changed to the member-equivalent role
-    (a0b1b346-4d3e-4e8b-98f8-753987be4970);
+    (a0b1b346-4d3e-4e8b-98f8-753987be4970), allowedToUseSSPR turned on
+    (administrators may reset their own password), or
+    allowUserConsentForRiskyApps turned on;
 otherwise medium (including a policy no longer present). One row per policy
 (object_guid = md5('11026:' || client_id || ':' || key)).
+
+[v1.1] A field or authentication method the previous version did not contain
+at all is no longer reported as a change: entra_graph_collector 0.9.0 adds
+allowedToUseSSPR and allowUserConsentForRiskyApps to the authorization
+policy and reads the authentication methods policy from beta, which can list
+methods v1.0 does not, and without this every tenant would get a medium
+'changed' finding on the first run after the upgrade. A policy whose only
+differences are such new keys gives no row. New high-severity loosenings:
+allowedToUseSSPR or allowUserConsentForRiskyApps changed from false to true.
 """
 
 PLUGIN = {
     "plugin_id": 11026,
     "category": "Change Detection",
     "name": "Tenant Authorization, Authentication-Methods or Cross-Tenant Policy Changed",
-    "version": "1.0",
-    "revision_date": "2026-10-05",
+    "version": "1.1",
+    "revision_date": "2026-10-22",
     "control_id": "CHANGE-11026",
     "requires_sources": ["auth_methods_policy", "cross_tenant_policy", "admin_consent_request_policy"],
     "framework_tags": [
@@ -120,7 +131,10 @@ PLUGIN = {
                                    UNION
                                    SELECT key FROM jsonb_each(CASE WHEN jsonb_typeof(c.old_c) = 'object'
                                                                    THEN c.old_c ELSE '{}'::jsonb END)) x
-                             WHERE (c.new_c -> x.key) IS DISTINCT FROM (c.old_c -> x.key)),
+                             WHERE (c.new_c -> x.key) IS DISTINCT FROM (c.old_c -> x.key)
+                               -- [v1.1] a key the previous version did not have at all is a
+                               -- newly collected field or method, not a change
+                               AND (jsonb_typeof(c.old_c) <> 'object' OR c.old_c ? x.key)),
                             '{}'::text[]) AS changed_keys,
                    array_remove(ARRAY[
                        -- Authentication methods
@@ -164,10 +178,23 @@ PLUGIN = {
                                  AND lower(c.new_c->>'guestUserRoleId') = 'a0b1b346-4d3e-4e8b-98f8-753987be4970'
                                  AND lower(COALESCE(c.old_c->>'guestUserRoleId', ''))
                                      <> 'a0b1b346-4d3e-4e8b-98f8-753987be4970'
-                            THEN 'guests given member-level directory access' END
+                            THEN 'guests given member-level directory access' END,
+                       -- [v1.1] authorization policy fields collected from entra_graph_collector 0.9.0
+                       CASE WHEN c.entity_key = 'authorization_policy'
+                                 AND c.new_c->>'allowedToUseSSPR' = 'true'
+                                 AND c.old_c->>'allowedToUseSSPR' = 'false'
+                            THEN 'administrators allowed to use self-service password reset' END,
+                       CASE WHEN c.entity_key = 'authorization_policy'
+                                 AND c.new_c->>'allowUserConsentForRiskyApps' = 'true'
+                                 AND c.old_c->>'allowUserConsentForRiskyApps' = 'false'
+                            THEN 'user consent allowed to applications flagged as risky' END
                    ], NULL) AS loosened
             FROM chg c
             WHERE c.kind <> 'new'
+        ),
+        reportable AS (
+            SELECT e.* FROM eval e
+            WHERE e.kind = 'removed' OR cardinality(e.loosened) > 0 OR cardinality(e.changed_keys) > 0
         )
         SELECT
             CASE WHEN cardinality(e.loosened) > 0 THEN 'fail' ELSE 'warn' END AS status,
@@ -196,6 +223,6 @@ PLUGIN = {
                 'current', e.new_c,
                 'detected_at', (SELECT last_run_at FROM b)
             ) AS detail
-        FROM eval e
+        FROM reportable e
     """,
 }

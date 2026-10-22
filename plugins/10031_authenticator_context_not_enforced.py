@@ -25,14 +25,23 @@ reported as partial coverage, as SCuBA's own check requires all users.
 
 Severity: medium (warn), one tenant-level row (identity md5 of plugin and
 client) listing every gap.
+
+[v1.1] Two more gaps, from the beta authentication methods policy
+(entra_graph_collector 0.9.0): isSoftwareOathEnabled true (the Authenticator
+app's one-time passcodes are accepted, a phishable method that bypasses push
+context; EIDSCA AM02, SCuBA MS.AAD.3.3v2's guidance) and
+companionAppAllowedState 'enabled' or 'default' (Authenticator Lite: sign-in
+approvals inside Outlook mobile, without the Authenticator app's own
+protections). Both are absent when the policy was read from v1.0, and then
+not reported.
 """
 
 PLUGIN = {
     "plugin_id": 10031,
     "category": "Hybrid Identity",
     "name": "Microsoft Authenticator Push Not Hardened (Login Context / Number Matching)",
-    "version": "1.0",
-    "revision_date": "2026-10-05",
+    "version": "1.1",
+    "revision_date": "2026-10-22",
     "control_id": "HYBRID-10031",
     "requires_sources": ["auth_methods_policy"],
     "framework_tags": [
@@ -54,6 +63,10 @@ PLUGIN = {
          "url": "https://learn.microsoft.com/en-us/entra/identity/authentication/how-to-mfa-additional-context"},
         {"title": "Microsoft: How number matching works in MFA push notifications",
          "url": "https://learn.microsoft.com/en-us/entra/identity/authentication/how-to-mfa-number-match"},
+        {"title": "Microsoft: Microsoft Authenticator authentication method (OTP and Authenticator Lite)",
+         "url": "https://learn.microsoft.com/en-us/entra/identity/authentication/concept-authentication-authenticator-app"},
+        {"title": "Maester EIDSCA.AM02: Microsoft Authenticator OTP allowed",
+         "url": "https://maester.dev/docs/tests/EIDSCA.AM02"},
         {"title": "MITRE ATT&CK T1621: Multi-Factor Authentication Request Generation",
          "url": "https://attack.mitre.org/techniques/T1621/"},
     ],
@@ -64,7 +77,8 @@ PLUGIN = {
         "prompts (MFA fatigue). CISA SCuBA MS.AAD.3.3 requires login context to be shown "
         "when Authenticator is enabled. One tenant-level finding listing each gap; "
         "number matching set to Microsoft-managed ('default') is accepted because "
-        "Microsoft enforces it."
+        "Microsoft enforces it. Also reports Authenticator one-time passcodes and "
+        "Authenticator Lite (approvals in Outlook) being allowed."
     ),
     "remediation": (
         "Entra admin center > Protection > Authentication methods > Microsoft "
@@ -72,7 +86,8 @@ PLUGIN = {
         "notifications' and 'Show geographic location in push and passwordless "
         "notifications' to Status = Enabled, Target = All users, and leave number "
         "matching enabled. Also set 'Allow use of Microsoft Authenticator OTP' to No "
-        "(SCuBA MS.AAD.3.3 instructions). With Graph: "
+        "(SCuBA MS.AAD.3.3 instructions), and set 'Microsoft Authenticator on companion "
+        "applications' (Authenticator Lite) to Disabled. With Graph: "
         "Update-MgPolicyAuthenticationMethodPolicyAuthenticationMethodConfiguration "
         "-AuthenticationMethodConfigurationId MicrosoftAuthenticator with featureSettings "
         "displayAppInformationRequiredState / displayLocationInformationRequiredState "
@@ -90,7 +105,8 @@ PLUGIN = {
         authn AS (
             SELECT pol.client_id,
                    CASE WHEN jsonb_typeof(m->'featureSettings') = 'object'
-                        THEN m->'featureSettings' ELSE '{}'::jsonb END AS fs
+                        THEN m->'featureSettings' ELSE '{}'::jsonb END AS fs,
+                   m->'isSoftwareOathEnabled' AS software_oath
               FROM pol
              CROSS JOIN LATERAL jsonb_array_elements(
                    CASE WHEN jsonb_typeof(pol.content->'authenticationMethodConfigurations') = 'array'
@@ -104,7 +120,9 @@ PLUGIN = {
                    a.fs->'displayAppInformationRequiredState'->'includeTarget'->>'id' AS app_target,
                    lower(a.fs->'displayLocationInformationRequiredState'->>'state') AS loc_state,
                    a.fs->'displayLocationInformationRequiredState'->'includeTarget'->>'id' AS loc_target,
-                   lower(a.fs->'numberMatchingRequiredState'->>'state') AS nm_state
+                   lower(a.fs->'numberMatchingRequiredState'->>'state') AS nm_state,
+                   -- [v1.1] beta-only properties (auth_methods_policy read from beta)
+                   a.software_oath, lower(a.fs->'companionAppAllowedState'->>'state') AS companion_state
               FROM authn a
         ),
         gaps AS (
@@ -119,7 +137,12 @@ PLUGIN = {
                             WHEN f.loc_target IS DISTINCT FROM 'all_users'
                             THEN 'geographic location shown to selected users only' END,
                        CASE WHEN f.nm_state = 'disabled'
-                            THEN 'number matching disabled' END
+                            THEN 'number matching disabled' END,
+                       CASE WHEN f.software_oath = 'true'::jsonb
+                            THEN 'one-time passcodes from the Authenticator app allowed (isSoftwareOathEnabled)' END,
+                       CASE WHEN f.companion_state IN ('enabled', 'default')
+                            THEN 'Authenticator Lite (sign-in approval in Outlook, companionAppAllowedState '
+                                 || f.companion_state || ') allowed' END
                    ], NULL) AS issues
               FROM feat f
         )
@@ -138,6 +161,8 @@ PLUGIN = {
                 'display_app_information', g.fs->'displayAppInformationRequiredState',
                 'display_location_information', g.fs->'displayLocationInformationRequiredState',
                 'number_matching', g.fs->'numberMatchingRequiredState',
+                'software_oath_enabled', g.software_oath,
+                'companion_app_allowed', g.fs->'companionAppAllowedState',
                 'scuba_policy', 'MS.AAD.3.3'
             ) AS detail
         FROM gaps g

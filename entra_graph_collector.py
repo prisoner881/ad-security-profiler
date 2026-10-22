@@ -2,9 +2,29 @@
 """
 entra_graph_collector.py -- Microsoft Entra ID / Graph API Email Collector
 
-VERSION: 0.8.1
+VERSION: 0.9.0
 
 CHANGELOG:
+    0.9.0 - Requires schema v46. More of the tenant, with the permissions
+            already granted (no new permission): six new optional sources
+            -- ca_policies_beta (Conditional Access from beta: continuous
+            access evaluation, token protection, agent identity
+            conditions), app_management_policy (default app management
+            policy), federated_token_validation_policy (beta),
+            federated_identity_credentials (on every application
+            registration), administrative_units (with members) and devices.
+            The authentication methods policy is read from beta (v1.0 as
+            fallback) for report-suspicious-activity, Authenticator OTP /
+            companion-app and certificate-affinity settings. Applications
+            gain requiredResourceAccess and authenticationBehaviors, groups
+            visibility, the authorization policy allowedToUseSSPR and
+            allowUserConsentForRiskyApps. Change history adds
+            federated_identity_credential and pim_policy. Agent ID
+            Administrator joins PRIVILEGED_ROLE_TEMPLATE_IDS. Source
+            custom_role_assignments also stores Application Administrator
+            and Cloud Application Administrator assignments scoped to a
+            single application (directoryScopeId other than '/').
+
     0.8.1 - Run Summary: a source name too long for the label column
             (admin_consent_request_policy, custom_role_assignments,
             device_registration_policy) ran into its status with no space
@@ -241,7 +261,7 @@ PG_DBNAME = "adprofiler"
 PG_USER = None
 PG_PASSWORD = None
 
-VERSION = "0.8.1"
+VERSION = "0.9.0"
 
 # [v0.5.0] Retry policy shared by every Graph/token request (see
 # _send_with_retry()). 429 and transient 5xx responses, plus network
@@ -321,6 +341,10 @@ GRAPH_AUTHORIZATION_POLICY_URL = "https://graph.microsoft.com/v1.0/policies/auth
 AUTHORIZATION_POLICY_FIELDS = (
     "allowInvitesFrom", "guestUserRoleId", "allowedToSignUpEmailBasedSubscriptions",
     "allowEmailVerifiedUsersToJoinOrganization", "blockMsolPowerShell",
+    # [v0.9.0] schema v46 column comment: administrators may use self-service
+    # password reset (plugin 10077); users may consent to apps Microsoft
+    # flags as risky (plugin 10016).
+    "allowedToUseSSPR", "allowUserConsentForRiskyApps",
 )
 AUTHORIZATION_POLICY_DEFAULT_USER_FIELDS = (
     "allowedToCreateApps", "allowedToCreateSecurityGroups", "allowedToCreateTenants",
@@ -403,7 +427,12 @@ GRAPH_PIM_POLICY_ASSIGNMENTS_URL = (
 GRAPH_SP_SIGN_IN_ACTIVITY_URL = GRAPH_BETA + "/reports/servicePrincipalSignInActivities"
 GRAPH_OAUTH2_GRANTS_URL = GRAPH_V1 + "/oauth2PermissionGrants"
 GRAPH_NAMED_LOCATIONS_URL = GRAPH_V1 + "/identity/conditionalAccess/namedLocations"
-GRAPH_AUTH_METHODS_POLICY_URL = GRAPH_V1 + "/policies/authenticationMethodsPolicy"
+# [v0.9.0] Read from beta first: reportSuspiciousActivitySettings, the
+# Authenticator's isSoftwareOathEnabled / companion-app setting and the
+# certificate-based authentication affinity settings are beta-only. v1.0 is
+# the fallback (collect_auth_methods_policy).
+GRAPH_AUTH_METHODS_POLICY_PATH = "/policies/authenticationMethodsPolicy"
+GRAPH_AUTH_METHODS_POLICY_URL = GRAPH_V1 + GRAPH_AUTH_METHODS_POLICY_PATH
 GRAPH_CROSS_TENANT_DEFAULT_URL = GRAPH_V1 + "/policies/crossTenantAccessPolicy/default"
 GRAPH_CROSS_TENANT_PARTNERS_URL = GRAPH_V1 + "/policies/crossTenantAccessPolicy/partners"
 GRAPH_ADMIN_CONSENT_POLICY_URL = GRAPH_V1 + "/policies/adminConsentRequestPolicy"
@@ -427,6 +456,24 @@ RISK_STATES_KEPT = {"atRisk", "confirmedCompromised"}
 # OnPremisesPublishingProfiles.ReadWrite.All -- there is no read-only
 # permission -- so it is only read with --include-pta-agents.
 GRAPH_PTA_AGENTS_URL = GRAPH_BETA + "/onPremisesPublishingProfiles/authentication/agents"
+# [v0.9.0] schema v46 sources. All read with permissions the collector
+# already holds (Policy.Read.All, Application.Read.All, Directory.Read.All).
+# Conditional Access policies again from beta, for the session controls and
+# conditions v1.0 does not return (continuous access evaluation, token
+# protection, agent identity risk and targets); stored apart from the v1.0
+# policies so the v1.0 change history is unaffected.
+GRAPH_CA_POLICIES_BETA_URL = GRAPH_BETA + "/identity/conditionalAccess/policies"
+GRAPH_APP_MANAGEMENT_POLICY_URL = GRAPH_V1 + "/policies/defaultAppManagementPolicy"
+GRAPH_FEDERATED_TOKEN_VALIDATION_URL = GRAPH_BETA + "/policies/federatedTokenValidationPolicy"
+GRAPH_ADMINISTRATIVE_UNITS_URL = (
+    GRAPH_V1 + "/directory/administrativeUnits?$select=id,displayName,visibility,"
+    "isMemberManagementRestricted,membershipType,membershipRule,membershipRuleProcessingState"
+)
+GRAPH_DEVICES_URL = (
+    GRAPH_V1 + "/devices?$select=id,deviceId,displayName,accountEnabled,"
+    "approximateLastSignInDateTime,registrationDateTime,trustType,isManaged,isCompliant,"
+    "operatingSystem,operatingSystemVersion&$expand=registeredOwners($select=id)&$top=100"
+)
 PTA_SKIPPED_STATUS = ("skipped: requires OnPremisesPublishingProfiles.ReadWrite.All; "
                       "enable with --include-pta-agents")
 
@@ -479,7 +526,20 @@ PRIVILEGED_ROLE_TEMPLATE_IDS = {
     "8329153b-31d0-4727-b945-745eb3bc5f31",  # Domain Name Administrator
     "be2f45a1-457d-42af-a067-6ec1fa63bc45",  # External Identity Provider Administrator
     "d29b2b05-8046-44ba-8758-1e26182fcf32",  # Directory Synchronization Accounts
+    # [v0.9.0] Manages agent identities and their blueprints, including
+    # their credentials; until April 2026 it could also take over ordinary
+    # service principals (Silverfort). Microsoft labels it privileged.
+    "db506228-d27e-4b7d-95e5-295956d6615f",  # Agent ID Administrator
 }
+
+# [v0.9.0] Built-in roles that can be assigned with the scope of a single
+# application registration or service principal, and whose holders can then
+# add credentials to it (plugin 10058). Their scoped active assignments are
+# stored in entra_custom_role_assignment.
+APP_SCOPED_BUILTIN_ROLE_IDS = (
+    "9b895d92-2cd3-44c7-9d02-a6ac2d5ea5c3",  # Application Administrator
+    "158c047a-c907-4556-b7ef-446551a6b5f7",  # Cloud Application Administrator
+)
 
 # [v0.8.0] Authentication method configurations fetched one by one when
 # Graph does not return them inline with authenticationMethodsPolicy.
@@ -506,6 +566,9 @@ OPTIONAL_SOURCES = (
     "admin_consent_request_policy", "directory_settings", "device_registration_policy",
     "onprem_sync", "pta_agents", "partner_contracts", "registration_details",
     "risky_users", "risk_detections",
+    # [v0.9.0] schema v46
+    "ca_policies_beta", "app_management_policy", "federated_token_validation_policy",
+    "federated_identity_credentials", "administrative_units", "devices",
 )
 
 
@@ -1285,7 +1348,10 @@ def fetch_applications(graph):
     # [v0.8.0] More fields, same permission (Application.Read.All).
     select = ("id,appId,displayName,passwordCredentials,keyCredentials,signInAudience,"
               "publisherDomain,verifiedPublisher,web,spa,publicClient,isFallbackPublicClient,"
-              "servicePrincipalLockConfiguration,createdDateTime")
+              "servicePrincipalLockConfiguration,createdDateTime,"
+              # [v0.9.0] schema v46: Azure AD Graph use and nOAuth (plugin 10087).
+              # authenticationBehaviors is only returned when selected.
+              "requiredResourceAccess,authenticationBehaviors")
     url = f"{GRAPH_APPLICATIONS_URL}?$select={select}&$top=999"
     page = 0
     while url:
@@ -1746,6 +1812,20 @@ def _sp_password_credential(c):
     }
 
 
+def _required_resource_access(items):
+    """[v0.9.0] requiredResourceAccess as stored: [{resourceAppId,
+    resourceAccess: [{id, type}]}] (type 'Scope' = delegated, 'Role' =
+    application permission)."""
+    out = []
+    for r in items or []:
+        if not isinstance(r, dict) or not r.get("resourceAppId"):
+            continue
+        out.append({"resourceAppId": _lower(r["resourceAppId"]),
+                    "resourceAccess": [{"id": _lower(a.get("id")), "type": a.get("type")}
+                                       for a in (r.get("resourceAccess") or []) if isinstance(a, dict)]})
+    return out
+
+
 def sync_applications(pg_conn, client_id, applications):
     """Same whole-snapshot-replace pattern as sync_entra_users. Password
     credentials kept as a JSONB array per application (endDateTime is
@@ -1784,6 +1864,10 @@ def sync_applications(pg_conn, client_id, applications):
             app.get("isFallbackPublicClient"),
             lock.get("isEnabled") if isinstance(lock, dict) else None,
             app.get("createdDateTime"),
+            # [v0.9.0] schema v46 columns.
+            json.dumps(_required_resource_access(app.get("requiredResourceAccess"))),
+            (json.dumps(_strip_odata_annotations(app["authenticationBehaviors"]))
+             if isinstance(app.get("authenticationBehaviors"), dict) else None),
         ))
 
     with pg_conn.cursor() as cur:
@@ -1800,7 +1884,8 @@ def sync_applications(pg_conn, client_id, applications):
                      verified_publisher_name, web_redirect_uris, spa_redirect_uris,
                      public_client_redirect_uris, implicit_access_token_issuance,
                      implicit_id_token_issuance, is_fallback_public_client,
-                     service_principal_lock_enabled, created_at)
+                     service_principal_lock_enabled, created_at,
+                     required_resource_access, authentication_behaviors)
                 VALUES %s
                 """,
                 rows,
@@ -1894,6 +1979,15 @@ SOURCE_CLEAR_SQL = {
     "registration_details": ["DELETE FROM entra_user_registration WHERE client_id = %s;"],
     "risky_users": ["DELETE FROM entra_risky_user WHERE client_id = %s;"],
     "risk_detections": ["DELETE FROM entra_risk_detection WHERE client_id = %s;"],
+    # [v0.9.0] schema v46
+    "ca_policies_beta": _setting_clear("ca_policies_beta"),
+    "app_management_policy": _setting_clear("app_management_policy"),
+    "federated_token_validation_policy": _setting_clear("federated_token_validation_policy"),
+    "federated_identity_credentials": [
+        "DELETE FROM entra_federated_identity_credential WHERE client_id = %s;"],
+    "administrative_units": ["DELETE FROM entra_administrative_unit_member WHERE client_id = %s;",
+                             "DELETE FROM entra_administrative_unit WHERE client_id = %s;"],
+    "devices": ["DELETE FROM entra_device WHERE client_id = %s;"],
 }
 
 
@@ -2327,7 +2421,9 @@ def write_app_owners(cur, client_id, now, data):
 
 GRAPH_GROUP_SELECT = (
     "id,displayName,isAssignableToRole,securityEnabled,mailEnabled,groupTypes,membershipRule,"
-    "membershipRuleProcessingState,onPremisesSyncEnabled,onPremisesSecurityIdentifier"
+    "membershipRuleProcessingState,onPremisesSyncEnabled,onPremisesSecurityIdentifier,"
+    # [v0.9.0] schema v46: Public / Private / HiddenMembership (plugin 10086)
+    "visibility"
 )
 SENSITIVE_REASON_ORDER = ("role_assignable", "holds_role", "ca_include", "ca_exclude", "app_role")
 
@@ -2402,6 +2498,7 @@ def collect_groups(graph, ctx):
             "membership_rule_processing_state": g.get("membershipRuleProcessingState"),
             "on_premises_sync_enabled": g.get("onPremisesSyncEnabled"),
             "on_premises_security_identifier": g.get("onPremisesSecurityIdentifier"),
+            "visibility": g.get("visibility"),
             "is_sensitive": bool(why), "sensitive_reasons": why,
         })
     rows = _dedupe(rows, ["entra_object_id"])
@@ -2512,6 +2609,29 @@ def collect_custom_role_assignments(graph, ctx):
                     "principal_upn": principal.get("userPrincipalName"),
                     "directory_scope_id": a.get("directoryScopeId") or "/", "assignment_type": "active",
                 })
+    # [v0.9.0] Active assignments of the built-in application roles scoped to
+    # one application or service principal (directoryScopeId '/<object id>').
+    # /directoryRoles lists tenant-wide holders only, so these are otherwise
+    # unseen (plugin 10058). Tenant-wide ones are skipped (already collected).
+    for template_id in APP_SCOPED_BUILTIN_ROLE_IDS:
+        items, status = graph_get_all_optional(
+            graph, f"{GRAPH_ROLE_ASSIGNMENTS_URL}?$filter=roleDefinitionId eq '{template_id}'"
+                   f"&$expand=principal",
+            f"assignments of built-in role {template_id}")
+        if items is None:
+            return None, status
+        for a in items:
+            principal = a.get("principal") or {}
+            pid = a.get("principalId") or principal.get("id")
+            scope = a.get("directoryScopeId") or "/"
+            if pid and scope != "/":
+                rows.append({
+                    "role_definition_id": template_id, "principal_id": pid,
+                    "principal_type": principal.get("@odata.type"),
+                    "principal_display_name": principal.get("displayName"),
+                    "principal_upn": principal.get("userPrincipalName"),
+                    "directory_scope_id": scope, "assignment_type": "active",
+                })
     for rm in ctx["role_members"]:
         if rm.get("assignment_type") != "eligible" or rm.get("via_group"):
             continue
@@ -2610,8 +2730,14 @@ def collect_auth_methods_policy(graph, ctx):
     its authenticationMethodConfigurations; when Graph does not return them
     inline, each of AUTH_METHOD_CONFIG_IDS is read on its own (404 = that
     method not present)."""
-    policy, status = graph_get_single_optional(graph, GRAPH_AUTH_METHODS_POLICY_URL,
-                                               "authentication methods policy")
+    # [v0.9.0] beta first (see GRAPH_AUTH_METHODS_POLICY_PATH); v1.0 when
+    # beta answers 400/404. The stored "graph_version" says which one.
+    base, version = GRAPH_BETA + GRAPH_AUTH_METHODS_POLICY_PATH, "beta"
+    policy, status = graph_get_single_optional(graph, base, "authentication methods policy (beta)")
+    if policy is None and (status.startswith("HTTP 400") or status.startswith("HTTP 404")):
+        log_info(f"  authentication methods policy: beta unavailable ({status[:80]}); trying v1.0")
+        base, version = GRAPH_AUTH_METHODS_POLICY_URL, "v1.0"
+        policy, status = graph_get_single_optional(graph, base, "authentication methods policy")
     if policy is None:
         return None, status
     configs = policy.get("authenticationMethodConfigurations")
@@ -2619,7 +2745,7 @@ def collect_auth_methods_policy(graph, ctx):
         configs = []
         for method_id in AUTH_METHOD_CONFIG_IDS:
             body, st = graph_get_single_optional(
-                graph, f"{GRAPH_AUTH_METHODS_POLICY_URL}/authenticationMethodConfigurations/{method_id}",
+                graph, f"{base}/authenticationMethodConfigurations/{method_id}",
                 f"authentication method configuration {method_id}")
             if body is None:
                 if st.startswith("HTTP 404"):
@@ -2627,6 +2753,7 @@ def collect_auth_methods_policy(graph, ctx):
                 return None, st
             configs.append(body)
     content = _strip_odata_keep_type(dict(policy, authenticationMethodConfigurations=configs))
+    content["graph_version"] = version
     return content, "ok"
 
 
@@ -2735,6 +2862,151 @@ def write_onprem_sync(cur, client_id, now, data):
         return 0
     _put_setting(cur, client_id, now, "onprem_sync", data)
     return 1
+
+
+# ---- [v0.9.0] schema v46 sources ------------------------------------------
+
+def collect_ca_policies_beta(graph, ctx):
+    """[v0.9.0] Conditional Access policies from beta (Policy.Read.All), in
+    the same slim shape as entra_security_posture.ca_policies. Beta returns
+    sessionControls.continuousAccessEvaluation and secureSignInSession
+    (token protection), and conditions.agentIdRiskLevels and the agent
+    identity targets in clientApplications, which v1.0 does not."""
+    items, status = graph_get_all_optional(graph, GRAPH_CA_POLICIES_BETA_URL,
+                                           "Conditional Access policies (beta)")
+    if items is None:
+        return None, status
+    return [_slim_ca_policy(p) for p in items if p.get("id")], "ok"
+
+
+def write_ca_policies_beta(cur, client_id, now, data):
+    _put_setting(cur, client_id, now, "ca_policies_beta", data)
+    return 1
+
+
+def collect_app_management_policy(graph, ctx):
+    """[v0.9.0] The tenant-wide default app management policy
+    (Policy.Read.All): restrictions on application and service principal
+    passwords and certificates."""
+    policy, status = graph_get_single_optional(graph, GRAPH_APP_MANAGEMENT_POLICY_URL,
+                                               "default app management policy")
+    return (_strip_odata_keep_type(policy), "ok") if policy is not None else (None, status)
+
+
+def write_app_management_policy(cur, client_id, now, data):
+    _put_setting(cur, client_id, now, "app_management_policy", data)
+    return 1
+
+
+def collect_federated_token_validation_policy(graph, ctx):
+    """[v0.9.0] federatedTokenValidationPolicy (beta, Policy.Read.All):
+    which verified domains a federated identity provider may not issue
+    tokens for. Storm-0501 added a rogue federated domain and signed in as
+    users of other domains; validatingDomains rootDomains 'all' stops that."""
+    policy, status = graph_get_single_optional(graph, GRAPH_FEDERATED_TOKEN_VALIDATION_URL,
+                                               "federated token validation policy (beta)")
+    return (_strip_odata_keep_type(policy), "ok") if policy is not None else (None, status)
+
+
+def write_federated_token_validation_policy(cur, client_id, now, data):
+    _put_setting(cur, client_id, now, "federated_token_validation_policy", data)
+    return 1
+
+
+def collect_federated_identity_credentials(graph, ctx):
+    """[v0.9.0] federatedIdentityCredentials of every application
+    registration (Application.Read.All): trust that lets an outside identity
+    provider's token (GitHub Actions, Kubernetes, another tenant...) be
+    exchanged for the app's own token, with no secret or certificate. One
+    request per application, batched. A single application's 404 (deleted
+    since it was listed) is skipped; any other refusal fails the source."""
+    apps = [a for a in ctx["applications"] if a.get("id")]
+    results = graph_batch_get_all(
+        graph, [(a["id"], f"/applications/{a['id']}/federatedIdentityCredentials") for a in apps],
+        "application federated identity credentials")
+    rows = []
+    for a in apps:
+        items, status = results[a["id"]]
+        if items is None:
+            if status.startswith("HTTP 404"):
+                continue
+            return None, status
+        for f in items:
+            if not f.get("id"):
+                continue
+            rows.append({
+                "app_object_id": a["id"], "app_id": a.get("appId"), "app_display_name": a.get("displayName"),
+                "credential_id": f["id"], "name": f.get("name"), "issuer": f.get("issuer"),
+                "subject": f.get("subject"), "audiences": f.get("audiences") or [],
+                "description": f.get("description"),
+            })
+    log_info(f"  {len(rows)} federated identity credential(s) on {len(apps)} application(s)")
+    return _dedupe(rows, ["app_object_id", "credential_id"]), "ok"
+
+
+def write_federated_identity_credentials(cur, client_id, now, data):
+    return _insert_dicts(cur, "entra_federated_identity_credential", client_id, now, data)
+
+
+def collect_administrative_units(graph, ctx):
+    """[v0.9.0] Administrative units (Directory.Read.All) with their members
+    (users, groups, devices)."""
+    units, status = graph_get_all_optional(graph, GRAPH_ADMINISTRATIVE_UNITS_URL, "administrative units")
+    if units is None:
+        return None, status
+    rows = [{
+        "unit_id": u["id"], "display_name": u.get("displayName"), "visibility": u.get("visibility"),
+        "is_member_management_restricted": u.get("isMemberManagementRestricted"),
+        "membership_type": u.get("membershipType"), "membership_rule": u.get("membershipRule"),
+        "membership_rule_processing_state": u.get("membershipRuleProcessingState"),
+    } for u in units if u.get("id")]
+    results = graph_batch_get_all(
+        graph, [(r["unit_id"], f"/directory/administrativeUnits/{r['unit_id']}/members?$select=id")
+                for r in rows], "administrative unit members")
+    members = []
+    for r in rows:
+        items, st = results[r["unit_id"]]
+        if items is None:
+            if st.startswith("HTTP 404"):
+                continue
+            return None, st
+        for m in items:
+            if m.get("id"):
+                members.append({"unit_id": r["unit_id"], "member_id": m["id"],
+                                "member_type": m.get("@odata.type")})
+    log_info(f"  {len(rows)} administrative unit(s), {len(members)} member row(s)")
+    return {"units": _dedupe(rows, ["unit_id"]),
+            "members": _dedupe(members, ["unit_id", "member_id"])}, "ok"
+
+
+def write_administrative_units(cur, client_id, now, data):
+    n = _insert_dicts(cur, "entra_administrative_unit", client_id, now, data["units"])
+    _insert_dicts(cur, "entra_administrative_unit_member", client_id, now, data["members"])
+    return n
+
+
+def collect_devices(graph, ctx):
+    """[v0.9.0] Devices (Directory.Read.All) with the number of registered
+    owners. Owners come through $expand, which Graph caps at 20 per device;
+    only "none" versus "some" is used."""
+    items, status = graph_get_all_optional(graph, GRAPH_DEVICES_URL, "devices")
+    if items is None:
+        return None, status
+    rows = [{
+        "entra_object_id": d["id"], "device_id": d.get("deviceId"), "display_name": d.get("displayName"),
+        "account_enabled": d.get("accountEnabled"),
+        "approximate_last_sign_in_at": d.get("approximateLastSignInDateTime"),
+        "registered_at": d.get("registrationDateTime"), "trust_type": d.get("trustType"),
+        "is_managed": d.get("isManaged"), "is_compliant": d.get("isCompliant"),
+        "operating_system": d.get("operatingSystem"),
+        "operating_system_version": d.get("operatingSystemVersion"),
+        "registered_owner_count": len(d.get("registeredOwners") or []),
+    } for d in items if d.get("id")]
+    return _dedupe(rows, ["entra_object_id"]), "ok"
+
+
+def write_devices(cur, client_id, now, data):
+    return _insert_dicts(cur, "entra_device", client_id, now, data)
 
 
 def collect_pta_agents(graph, ctx):
@@ -3106,6 +3378,31 @@ def _history_group_member(ctx):
     return entities, protected
 
 
+def _history_federated_identity_credential(ctx):
+    """[v0.9.0] One entity per (application, credential)."""
+    entities = {}
+    for f in ctx["data"]["federated_identity_credentials"]:
+        key = f"{_lower(f['app_object_id'])}:{_lower(f['credential_id'])}"
+        entities[key] = (f"{f['app_display_name']}: {f['name'] or f['credential_id']}", {
+            "app_object_id": _lower(f["app_object_id"]), "app_id": _lower(f["app_id"]),
+            "app_display_name": f["app_display_name"], "name": f["name"], "issuer": f["issuer"],
+            "subject": f["subject"], "audiences": f["audiences"]})
+    return entities
+
+
+def _history_pim_policy(ctx):
+    """[v0.9.0] One entity per directory role: its PIM rules, ordered by
+    rule id so an unchanged policy stores identically run to run."""
+    entities = {}
+    for p in ctx["data"]["pim_policies"]:
+        rules = sorted(p["rules"], key=lambda r: str(r.get("id")))
+        entities[_lower(p["role_template_id"])] = (
+            p["role_display_name"] or p["role_template_id"],
+            {"role_template_id": _lower(p["role_template_id"]),
+             "role_display_name": p["role_display_name"], "rules": rules})
+    return entities
+
+
 # entity_type -> the optional sources it is built from (core steps always
 # succeeded by the time history runs). tenant_policy is handled per key.
 CHANGE_HISTORY_INPUTS = (
@@ -3117,6 +3414,9 @@ CHANGE_HISTORY_INPUTS = (
     ("owner", ("app_owners", "groups")),
     ("partner", ("partner_contracts", "cross_tenant_policy")),
     ("group_member", ("groups",)),
+    # [v0.9.0] plugins 11030 and 11031
+    ("federated_identity_credential", ("federated_identity_credentials",)),
+    ("pim_policy", ("pim_policies",)),
 )
 
 
@@ -3405,7 +3705,7 @@ def main():
 
         # [v0.8.0] Optional sources: a refused read (400/403/404) is recorded
         # in entra_collection_status and the run carries on.
-        log_header("Collecting Optional Entra Data Sources (schema v42)")
+        log_header("Collecting Optional Entra Data Sources")
         ctx = {
             "users": users, "role_members": role_members, "ca_policies": ca_policies,
             "dangerous_grants": dangerous_grants, "applications": applications,

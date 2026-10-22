@@ -15,13 +15,20 @@ computer passwords.
 
 Severity ('fail'): medium. Read from v_dc_effective_gpo_setting (GPO links,
 precedence and security filtering above the DC).
+
+[v1.1] Leaves out the Microsoft Entra Kerberos server object
+(CN=AzureADKerberos in the Domain Controllers OU, linked to the krbtgt-
+AzureAD account), which Microsoft documents as functioning like a read-only
+domain controller but which is not a server: it has no host, logons, Group
+Policy or SYSVOL. Plugin 1006 reports the age of its key. Requires schema
+v46.
 """
 
 PLUGIN = {   'plugin_id': 9032,
     'category': 'Organizational Units',
     'name': 'Domain Controllers Refuse Machine Account Password Changes',
-    'version': '1.0',
-    'revision_date': '2026-10-20',
+    'version': '1.1',
+    'revision_date': '2026-10-22',
     'control_id': 'GPO-9032',
     'framework_tags': [   'NIST-800-53-CM-6',
                           'NIST-800-53-CM-7',
@@ -56,6 +63,7 @@ PLUGIN = {   'plugin_id': 9032,
             JOIN directory_object o
               ON o.object_guid = c.object_guid AND o.client_id = c.client_id AND NOT o.is_deleted
             WHERE c.client_id = %(client_id)s AND c.valid_to IS NULL AND c.is_domain_controller
+              AND NOT is_entra_kerberos_server(c.sam_account_name, c.krbtgt_link)
               AND EXISTS (SELECT 1 FROM ad_gpo_sysvol s
                           WHERE s.client_id = %(client_id)s AND s.read_status = 'ok')
         ),
