@@ -56,13 +56,24 @@ medium when partial): Entra then accepts a token from this domain's identity
 provider for a user of another domain, which is how Storm-0501 used a
 federated domain it added to sign in as other users. When that source was
 not read the issue is not evaluated.
+
+[v1.3] Two corrections from a real tenant (a GoDaddy-managed federated
+domain). The long-validity issue is now low and only looks at a signing
+certificate still in use: third-party identity providers such as GoDaddy and
+Okta routinely issue certificates valid for 5 to 10 years, and an expired
+certificate that the next one has replaced is not a trust risk (the expired-
+certificate issue already covers it); the number of years is rounded, not
+truncated. A tenant with no federated token validation policy (Graph answers
+404, stored by entra_graph_collector 0.9.1 as {"configured": false}) is now
+reported at medium as not configured; 0.9.0 recorded it as an unread source
+and the issue was skipped.
 """
 
 PLUGIN = {
     "plugin_id": 10090,
     "category": "Hybrid Identity",
     "name": "Federated Domain Trust Is Risky",
-    "version": "1.2",
+    "version": "1.3",
     "revision_date": "2026-10-22",
     "control_id": "HYBRID-10090",
     "requires_sources": ["federation"],
@@ -109,10 +120,11 @@ PLUGIN = {
         "valid next certificate is already trusted) or has not been rolled "
         "over for more than a year (medium); a next "
         "signing certificate is already trusted (low, confirm it is "
-        "expected); the signing certificate is valid for more than 3 years "
-        "(medium); the tenant's federated token validation policy does not "
-        "cover every domain, so the federated IdP can sign in users of other "
-        "domains (high when off, medium when partial). Issuer and sign-in "
+        "expected); the signing certificate in use is valid for more than 3 "
+        "years (low, confirm it is your identity provider's); the tenant's "
+        "federated token validation policy does not cover every domain, so the "
+        "federated IdP can sign in users of other domains (high when set to "
+        "none, medium when partial or not configured). Issuer and sign-in "
         "URIs are listed for review. One finding per domain."
     ),
     "remediation": (
@@ -154,12 +166,15 @@ PLUGIN = {
         ),
         -- [v1.2] tenant-wide federatedTokenValidationPolicy (beta), when it was read
         ftv AS (
-            SELECT ts.content->'validatingDomains'->>'rootDomains' AS root_domains,
+            -- [v1.3] {"configured": false}: the tenant has no policy (Graph 404)
+            SELECT CASE WHEN ts.content->>'configured' = 'false' THEN 'not configured'
+                        ELSE ts.content->'validatingDomains'->>'rootDomains' END AS root_domains,
                    ts.content->'validatingDomains'->'domainNames' AS domain_names
               FROM entra_tenant_setting ts
              WHERE ts.client_id = %(client_id)s
                AND ts.setting_name = 'federated_token_validation_policy'
-               AND jsonb_typeof(ts.content->'validatingDomains') = 'object'
+               AND (jsonb_typeof(ts.content->'validatingDomains') = 'object'
+                    OR ts.content->>'configured' = 'false')
                AND EXISTS (SELECT 1 FROM entra_collection_status s
                             WHERE s.client_id = ts.client_id
                               AND s.source = 'federated_token_validation_policy' AND s.status = 'ok')
@@ -196,20 +211,26 @@ PLUGIN = {
             SELECT f.domain_name, 2, 'a next token-signing certificate is already trusted (confirm it is expected)'
               FROM fed f WHERE f.next_signing_certificate_thumbprint IS NOT NULL
             UNION ALL
-            -- [v1.2] AD FS issues 1-year token-signing certificates; a much longer one is unusual
-            SELECT f.domain_name, 3,
+            -- [v1.2, v1.3] AD FS issues 1-year token-signing certificates; a much longer one is
+            -- worth confirming (third-party identity providers often use multi-year ones)
+            SELECT f.domain_name, 2,
                    'token-signing certificate is valid for '
-                   || floor(extract(epoch FROM f.signing_certificate_not_after - f.signing_certificate_not_before)
+                   || round(extract(epoch FROM f.signing_certificate_not_after - f.signing_certificate_not_before)
                             / 31557600)::int
-                   || ' years (unusually long; confirm it was issued by your own federation service)'
+                   || ' years (longer than AD FS issues; confirm it belongs to your identity provider)'
               FROM fed f
              WHERE f.signing_certificate_not_after - f.signing_certificate_not_before > interval '3 years 1 day'
+               AND f.signing_certificate_not_after >= f.collected_at
             UNION ALL
             SELECT f.domain_name,
                    CASE WHEN COALESCE(t.root_domains, 'none') = 'none' THEN 4 ELSE 3 END,
-                   'federated token validation does not cover every domain (rootDomains '
-                   || COALESCE(t.root_domains, 'not set')
-                   || '): this domain''s identity provider can sign users of other domains in'
+                   CASE WHEN t.root_domains = 'not configured'
+                        THEN 'no federated token validation policy is configured: this domain''s identity '
+                             || 'provider is not stopped from signing in users of other domains'
+                        ELSE 'federated token validation does not cover every domain (rootDomains '
+                             || COALESCE(t.root_domains, 'not set')
+                             || '): this domain''s identity provider can sign users of other domains in'
+                   END
               FROM fed f CROSS JOIN ftv t
              WHERE t.root_domains IS DISTINCT FROM 'all'
         ),

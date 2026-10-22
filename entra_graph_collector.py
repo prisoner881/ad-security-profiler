@@ -2,9 +2,14 @@
 """
 entra_graph_collector.py -- Microsoft Entra ID / Graph API Email Collector
 
-VERSION: 0.9.0
+VERSION: 0.9.1
 
 CHANGELOG:
+    0.9.1 - federated_token_validation_policy: Graph's 404 for a tenant
+            that never configured the policy is recorded as read ('ok',
+            content {"configured": false}) instead of a failed source, so
+            plugin 10090 can report the missing protection.
+
     0.9.0 - Requires schema v46. More of the tenant, with the permissions
             already granted (no new permission): six new optional sources
             -- ca_policies_beta (Conditional Access from beta: continuous
@@ -261,7 +266,7 @@ PG_DBNAME = "adprofiler"
 PG_USER = None
 PG_PASSWORD = None
 
-VERSION = "0.9.0"
+VERSION = "0.9.1"
 
 # [v0.5.0] Retry policy shared by every Graph/token request (see
 # _send_with_retry()). 429 and transient 5xx responses, plus network
@@ -2905,6 +2910,12 @@ def collect_federated_token_validation_policy(graph, ctx):
     users of other domains; validatingDomains rootDomains 'all' stops that."""
     policy, status = graph_get_single_optional(graph, GRAPH_FEDERATED_TOKEN_VALIDATION_URL,
                                                "federated token validation policy (beta)")
+    # [v0.9.1] A tenant that never set the policy answers 404
+    # Request_ResourceNotFound ("Resource '' does not exist"): the read
+    # worked and there is no policy, stored as {"configured": false}. A 403
+    # (or 400) is still a failed read.
+    if policy is None and status.startswith("HTTP 404"):
+        return {"configured": False}, "ok"
     return (_strip_odata_keep_type(policy), "ok") if policy is not None else (None, status)
 
 
