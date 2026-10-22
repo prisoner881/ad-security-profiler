@@ -2,7 +2,7 @@
 """
 adaudit.py -- AD Security & Compliance Plugin Runner
 ======================================================
-VERSION: 0.10.6
+VERSION: 1.0.0
 
 Companion to adprofiler.py. Where adprofiler.py collects AD data,
 adaudit.py analyzes it: discovers every plugin file in plugins/, runs each
@@ -25,6 +25,9 @@ DESIGN:
       as: (status, object_guid, stig_severity, stig_reference,
       tool_severity, tool_reference, fd_severity, summary, detail).
       Zero rows returned = clean pass, nothing to report.
+    - [v1.0.0] Release 1.0 (adprofiler.py 1.0.0, entra_graph_collector.py
+      1.0.0, sysvol_collector.py 1.1, schema v46; see RELEASE_NOTES.md).
+      No change in behavior from 0.10.6: same plugins, same findings.
     - [v0.10.6] Requires schema v46 (entra_graph_collector.py 0.9.0; no
       adprofiler change). Entra ID coverage waves 1 and 2: new plugins
       10029, 10036-10039, 10048, 10049, 10058, 10075-10079, 10086, 10087,
@@ -258,7 +261,7 @@ import psycopg2.extras
 
 import adaudit_push
 
-VERSION = "0.10.6"
+VERSION = "1.0.0"
 
 # [test-candidate-branch] Always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before

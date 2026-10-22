@@ -4,27 +4,33 @@
  adprofiler.py -- Active Directory Security & Compliance Profiler (Collector)
 ================================================================================
 
-VERSION: 0.9.1
+VERSION: 1.0.0
 
 PURPOSE:
     Connects to an on-premise Active Directory Domain Controller via LDAP,
-    extracts security-relevant directory data (users, groups, computers, the
-    domain object, group membership, SPNs, and delegation configuration),
-    and loads it into the "ad_intel" PostgreSQL 17 schema using SCD2
-    (slowly-changing-dimension) diff-only versioning.
+    reads the security-relevant directory data (users, groups, computers,
+    the domain and forest configuration, group membership, SPNs,
+    delegation, targeted security descriptors, Group Policy objects and
+    links, trusts, fine-grained password policies, AD CS objects, DNS
+    zones, deleted objects, RODC password replication policy) and loads it
+    into the "ad_intel" PostgreSQL 17 schema using SCD2
+    (slowly-changing-dimension) diff-only versioning. Optionally (--sysvol)
+    also reads Group Policy settings from SYSVOL and NETLOGON over SMB.
 
-    This is a proof-of-concept collector. It implements the "Collector MVP"
-    phase of the larger project: capability probing, baseline/delta
-    collection, and hard-fail behavior on insufficient permissions. ACL
-    edges, RBCD delegation, GPOs, and trusts are NOT YET IMPLEMENTED -- see
-    the "SCOPE / KNOWN LIMITATIONS" section below.
+    adaudit.py analyzes what this script and entra_graph_collector.py
+    collect. Release 1.0: adprofiler.py 1.0.0, entra_graph_collector.py
+    1.0.0, adaudit.py 1.0.0, sysvol_collector.py 1.1, schema v46 (see
+    RELEASE_NOTES.md).
 
 INPUT FORMAT (command line):
-    python3 adprofiler.py --dc-host <fqdn-or-ip> --username <bind-user> [options]
+    python3 adprofiler.py --dc-host <fqdn-or-ip> --username <bind-user> \\
+        --pg-host <host> --pg-user <user> [options]
 
     Required:
         --dc-host       FQDN or IP address of the target Domain Controller.
         --username      Bind account, e.g. user@domain.com or DOMAIN\\user.
+        --pg-host       PostgreSQL server hostname or IP.
+        --pg-user       PostgreSQL username.
 
     Optional:
         --password      Bind password. If omitted, you will be prompted
@@ -35,6 +41,8 @@ INPUT FORMAT (command line):
         --base-dn        Override the search base. Default: auto-discovered
                          from the DC's RootDSE (defaultNamingContext).
         --page-size      LDAP paged-search page size. Default: 1000.
+        --full-rescan    Rewrite every object this run, even unchanged ones
+                         (backfills new derived columns after an upgrade).
         --sysvol         [v0.7.0] Also read Group Policy settings, Group
                          Policy Preferences and scripts from the SYSVOL and
                          NETLOGON shares over SMB (TCP 445), read-only, with
@@ -42,63 +50,46 @@ INPUT FORMAT (command line):
         --sysvol-kerberos  Authenticate the SMB session with Kerberos
                          (needs --dc-host / --smb-host as the DC's FQDN).
         --smb-host       Host for the SMB session. Default: --dc-host.
+        --sysvol-max-script-files  Script files scanned per folder tree.
+                         Default: 500.
+        --pg-port        PostgreSQL port. Default: 5432.
+        --pg-dbname      PostgreSQL database. Default: adprofiler.
+        --pg-password    PostgreSQL password. If omitted, you will be
+                         prompted securely.
         --version        Print version and exit.
 
     Example:
         python3 adprofiler.py --dc-host dc01.lab.local \\
-            --username collector@lab.local --ssl
+            --username collector@lab.local --ssl \\
+            --pg-host db01.lab.local --pg-user adprofiler
 
-SETUP (Ubuntu, no pip):
-    sudo apt update
-    sudo apt install -y python3-ldap3 python3-psycopg2
-    (Confirmed available as real apt packages: python3-ldap3 2.9.1-2 and
-    python3-psycopg2 2.9.9-1build1 on Ubuntu 24.04's default repos.)
+SETUP:
+    See SETUP.md: a Python virtual environment with the packages in
+    requirements.txt (ldap3, psycopg2-binary, impacket, cryptography, ...)
+    and a PostgreSQL 17 database initialised from schema_init.sql.
 
 SCOPE / KNOWN LIMITATIONS:
-    - ACL edges (acl_edge table) are NOT collected. Requires binary
-      nTSecurityDescriptor parsing (MS-DTYP), which needs either the
-      `impacket` library (pip-only) or a hand-rolled parser not yet built
-      and verified against real AD data. Deferred to a future version.
-      This also blocks full risk assessment of certificate templates
-      (who can actually enroll) -- template properties ARE collected
-      (see below), but enrollment rights are not.
-    - RBCD delegation (msDS-AllowedToActOnBehalfOfOtherIdentity) is NOT
-      collected for the same reason (binary security-descriptor format).
-      Unconstrained and constrained delegation ARE collected (plain UAC
-      bits and text/SPN attributes -- no binary parsing required).
-    - GPO settings content lives in SYSVOL, not LDAP; it is collected
-      only with --sysvol (v0.7.0, sysvol_collector.py).
+    - Security descriptors are read for targeted objects only (the domain
+      root, AdminSDHolder, OUs, well-known and PKI containers, certificate
+      templates, CAs and their hosts, NTAuth, KDS root keys, the AD FS DKM
+      container, DNS zones, domain controllers and AdminSDHolder-protected
+      objects), not for every object in the directory.
     - LAPS status is the password EXPIRATION TIMESTAMP only, for both
-      legacy (ms-Mcs-AdmPwd) and modern Windows LAPS (msLAPS-*). The
-      password value itself is never read, by design -- that's live
-      credential material and reading it would be a real departure from
-      this project's read-only posture.
-    - Certificate template collection covers template properties, plus
-      (as of v0.1.2) whether each template is actually published on an
-      Enterprise CA (is_enabled) -- but still not the template's
-      enrollment ACL (who can actually request from it), which needs the
-      same binary parsing noted above. enrollee_supplies_subject +
-      client_authentication_capable + is_enabled together are the ESC1
-      data pattern per Certipy's own -enabled-gated detection; a full
-      risk determination still needs enrollment rights, which this
-      version cannot answer. Filter on is_enabled first -- built-in
-      CA-infrastructure templates (SubCA, CrossCA, CA, etc.) structurally
-      match the flag pattern by default in every ADCS install but are
-      commonly never published, which otherwise produces noisy
-      false-positive-looking results.
-    - Effective (nested) group membership is answered by a SQL view
-      (v_effective_group_membership, added in schema_migration_v2.sql)
-      computed over the same direct-membership edges already collected --
-      not a new collection, a derived query over existing data.
+      legacy (ms-Mcs-AdmPwd) and modern Windows LAPS (msLAPS-*). Password
+      values, gMSA passwords, KDS root key material and the AD FS DKM key
+      are never read, by design.
+    - GPO settings content lives in SYSVOL, not LDAP; it is collected
+      only with --sysvol.
     - Constrained-delegation targets are resolved to an object_guid via
       SPN matching against objects this run has collected. A target SPN
-      registered on an object outside this version's collection scope
-      (or otherwise unresolvable) is skipped and counted, not guessed at.
-    - Trust, GPO, FGPP, and certificate template collection are each
-      wrapped independently and treated as non-fatal if their container
-      doesn't exist or isn't reachable -- these are all optional AD
-      features many domains never configure, and their absence is a
-      normal, common finding, not a collection failure.
+      registered on an object outside the collection scope (or otherwise
+      unresolvable) is skipped and counted, not guessed at.
+    - Trust, GPO, FGPP, certificate template and other optional-feature
+      collection is each wrapped independently and treated as non-fatal if
+      the container doesn't exist or isn't reachable -- these are optional
+      AD features many domains never configure.
+    - adaudit.py needs at least one successful run of this script for the
+      client: an Entra-only tenant (no Active Directory) is not supported.
 
 DESIGN NOTES:
     - Every run is wrapped in a single PostgreSQL transaction. On any
@@ -119,13 +110,6 @@ DESIGN NOTES:
       back, the sync_run row is marked 'aborted', and the script exits
       cleanly.
 
-TESTING STATUS (as of v0.0.5):
-    Verified via py_compile, real ldap3/psycopg2 imports, and a mocked
-    end-to-end run against a real PostgreSQL instance (baseline + delta
-    collection, membership/SPN/delegation edges, Ctrl-C rollback). Also
-    now tested against a live Windows Server 2025 DC through capability
-    probe and into baseline collection; 0.0.4/0.0.5 fix real issues found
-    that way. Not yet run to full completion against a real DC.
 ================================================================================
 """
 
@@ -186,7 +170,7 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
-VERSION = "0.9.1"
+VERSION = "1.0.0"
 
 # [v0.7.7] The oldest collector version whose stored derived fields
 # (parsed / typed columns computed from raw attributes) are current. A
@@ -201,7 +185,8 @@ VERSION = "0.9.1"
 # columns (users' script_path; the domain's dSHeuristics string,
 # msDS-Other-Settings and NetBIOS name) on every existing object. 0.9.0
 # does not raise it: its new columns come from attributes and folded-in
-# keys that version exactly the objects that have them.
+# keys that version exactly the objects that have them. 0.9.1 and 1.0.0
+# change no derived field either.
 DERIVED_FIELDS_VERSION = "0.8.0"
 
 
