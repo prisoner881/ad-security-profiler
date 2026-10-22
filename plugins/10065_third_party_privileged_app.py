@@ -36,6 +36,12 @@ Data: entra_service_principal (source service_principals) and
 entra_app_role_grant (source app_role_grants), both required; TIER0 roles
 from entra_directory_role_member. Identity = the service principal's object
 id.
+
+[v1.1] Agent ID Administrator (db506228-d27e-4b7d-95e5-295956d6615f) is
+treated like Application Administrator: it manages agent identities and
+blueprints, including their credentials, and until April 2026 could also
+take over ordinary service principals (Silverfort); Microsoft labels it
+privileged.
 """
 
 # ---------------------------------------------------------------------------
@@ -57,6 +63,7 @@ TIER0_ROLES_SQL = """
                    ('194ae4cb-b126-40b2-bd5b-6091b380977d'::uuid, 'Security Administrator', false),
                    ('8ac3fc64-6eca-42ea-9e69-59f4c7b60eb2'::uuid, 'Hybrid Identity Administrator', false),
                    ('9b895d92-2cd3-44c7-9d02-a6ac2d5ea5c3'::uuid, 'Application Administrator', false),
+                   ('db506228-d27e-4b7d-95e5-295956d6615f'::uuid, 'Agent ID Administrator', false),
                    ('158c047a-c907-4556-b7ef-446551a6b5f7'::uuid, 'Cloud Application Administrator', false),
                    ('29232cdf-9323-42fd-ade2-1d097af3e4de'::uuid, 'Exchange Administrator', false),
                    ('f28a1f50-f6e7-4571-818b-6a12f2af6b6c'::uuid, 'SharePoint Administrator', false),
@@ -155,8 +162,8 @@ PLUGIN = {
     "plugin_id": 10065,
     "category": "Hybrid Identity",
     "name": "Third-Party Multi-Tenant Application Holds Privileged Permissions",
-    "version": "1.0",
-    "revision_date": "2026-10-05",
+    "version": "1.1",
+    "revision_date": "2026-10-22",
     "control_id": "HYBRID-10065",
     "requires_sources": ["service_principals", "app_role_grants"],
     "framework_tags": [

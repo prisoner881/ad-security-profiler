@@ -49,14 +49,20 @@ separate setting and not checked.
 
 Tenant-level finding: object_guid is md5('10016:' || client_id), as in
 plugin 10004.
+
+[v1.2] Also reports allowUserConsentForRiskyApps = true (medium): users may
+then grant consent to applications that Microsoft's risk detection has
+flagged, which is otherwise blocked and routed to admin consent (EIDSCA AP09
+/ CP03, Purple Knight). Collected from entra_graph_collector 0.9.0; absent
+before, and then not reported.
 """
 
 PLUGIN = {
     "plugin_id": 10016,
     "category": "Hybrid Identity",
     "name": "Users Can Register Applications or Consent to Apps",
-    "version": "1.1",
-    "revision_date": "2026-10-07",
+    "version": "1.2",
+    "revision_date": "2026-10-22",
     "control_id": "HYBRID-10016",
     "framework_tags": [
         "CISA-SCUBA-MS.AAD.5.1",
@@ -141,6 +147,12 @@ PLUGIN = {
                         THEN 'Microsoft built-in user consent policy assigned (' || substr(g.g, 31) || ')'
                         ELSE 'custom user consent policy assigned (' || substr(g.g, 31) || ')' END
               FROM grants g
+            UNION ALL
+            -- [v1.2] collected from entra_graph_collector 0.9.0
+            SELECT a.client_id, 2,
+                   'users can consent to applications Microsoft has flagged as risky (allowUserConsentForRiskyApps)'
+              FROM ap a
+             WHERE a.pol->'allowUserConsentForRiskyApps' = 'true'::jsonb
         ),
         agg AS (
             SELECT i.client_id, max(i.rank) AS rank,
@@ -162,7 +174,8 @@ PLUGIN = {
             jsonb_build_object(
                 'issues', g.issue_list,
                 'allowed_to_create_apps', a.durp->'allowedToCreateApps',
-                'permission_grant_policies_assigned', a.durp->'permissionGrantPoliciesAssigned'
+                'permission_grant_policies_assigned', a.durp->'permissionGrantPoliciesAssigned',
+                'allow_user_consent_for_risky_apps', a.pol->'allowUserConsentForRiskyApps'
             ) AS detail
         FROM agg g
         JOIN ap a ON a.client_id = g.client_id

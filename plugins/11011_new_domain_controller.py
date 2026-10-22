@@ -32,14 +32,22 @@ on every computer in that run are irrelevant here.
 
 One row per computer. Suppressed on a client's first collection run.
 Deleted objects are excluded.
+
+[v1.1] A new Microsoft Entra Kerberos server object (CN=AzureADKerberos,
+created by Set-AzureADKerberosServer, with RODC-like flags) is reported as
+such at medium rather than as a new read-only domain controller at high: it
+is an expected part of a Windows Hello cloud trust, FIDO2 or Azure Files
+rollout, but it still lets Entra ID issue tickets for the domain, so it
+should match a planned change. A computer converted into one stays critical.
+Requires schema v46.
 """
 
 PLUGIN = {
     "plugin_id": 11011,
     "category": "Change Detection",
     "name": "New Domain Controller Since Previous Run",
-    "version": "1.0",
-    "revision_date": "2026-10-04",
+    "version": "1.1",
+    "revision_date": "2026-10-22",
     "control_id": "CHANGE-11011",
     "framework_tags": [
         "NIST-800-53-CM-3", "NIST-800-53-SI-4", "NIST-800-53-AU-6", "NIST-800-53-CM-8",
@@ -101,6 +109,7 @@ PLUGIN = {
             SELECT c.object_guid, c.sam_account_name, c.dns_hostname, c.operating_system,
                    c.operating_system_version, c.user_account_control, c.is_read_only_dc,
                    c.is_enabled, c.when_created, c.managed_by, c.valid_from,
+                   is_entra_kerberos_server(c.sam_account_name, c.krbtgt_link) AS is_entra_kerberos,
                    do2.dn_current, do2.first_seen_run_id,
                    cv.run_id_valid_from AS change_run_id, pr.prev_run_id
             FROM ad_computer c
@@ -157,7 +166,8 @@ PLUGIN = {
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
-            CASE WHEN f.converted THEN 'critical' ELSE 'high' END AS fd_severity,
+            CASE WHEN f.converted THEN 'critical'
+                 WHEN f.is_entra_kerberos THEN 'medium' ELSE 'high' END AS fd_severity,
             CASE WHEN f.converted
                  THEN 'Existing computer account "' || COALESCE(f.sam_account_name, f.dn_current)
                       || '" became a '
@@ -167,6 +177,12 @@ PLUGIN = {
                       || to_hex(f.prev_uac) || ' -> 0x' || to_hex(f.user_account_control)
                       || ') -- possible rogue domain controller (DCShadow) or an account '
                          'converted to obtain replication rights'
+                 WHEN f.is_entra_kerberos
+                 THEN 'New Microsoft Entra Kerberos server object "'
+                      || COALESCE(f.sam_account_name, f.dn_current)
+                      || '" appeared since the previous collection run: Entra ID can now issue '
+                         'Kerberos tickets for this domain (Set-AzureADKerberosServer); confirm '
+                         'this was a planned Windows Hello cloud trust, FIDO2 or Azure Files rollout'
                  ELSE 'New '
                       || CASE WHEN f.is_read_only_dc THEN 'read-only domain controller'
                               ELSE 'domain controller' END
@@ -178,6 +194,7 @@ PLUGIN = {
                 'dns_hostname', f.dns_hostname,
                 'distinguished_name', f.dn_current,
                 'change_type', CASE WHEN f.converted THEN 'existing_computer_became_dc'
+                                    WHEN f.is_entra_kerberos THEN 'new_entra_kerberos_server'
                                     ELSE 'new_dc_account' END,
                 'is_read_only_dc', f.is_read_only_dc,
                 'user_account_control', f.user_account_control,

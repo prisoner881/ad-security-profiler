@@ -29,14 +29,21 @@ row) -> no finding. DCs are current, non-deleted ad_computer rows with
 is_domain_controller; a DC whose operating_system matches none of the
 versions above does not set a requirement. Only DCs of the collected domain
 are seen, though the schema is forest-wide.
+
+[v1.1] Leaves out the Microsoft Entra Kerberos server object
+(CN=AzureADKerberos in the Domain Controllers OU, linked to the krbtgt-
+AzureAD account), which Microsoft documents as functioning like a read-only
+domain controller but which is not a server: it has no host, logons, Group
+Policy or SYSVOL. Plugin 1006 reports the age of its key. Requires schema
+v46.
 """
 
 PLUGIN = {
     "plugin_id": 4033,
     "category": "Domain",
     "name": "Schema Version Behind the Newest Domain Controller OS",
-    "version": "1.0",
-    "revision_date": "2026-10-04",
+    "version": "1.1",
+    "revision_date": "2026-10-22",
     "control_id": "DOM-4033",
     "framework_tags": [
         "NIST-800-53-SI-2", "NIST-800-53-RA-5", "NIST-CSF-2.0-ID.RA-01",
@@ -87,6 +94,7 @@ PLUGIN = {
             WHERE c.client_id = %(client_id)s
               AND c.valid_to IS NULL
               AND c.is_domain_controller
+              AND NOT is_entra_kerberos_server(c.sam_account_name, c.krbtgt_link)
         ),
         req AS (
             SELECT max(required_version) AS required_version,

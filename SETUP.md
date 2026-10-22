@@ -155,9 +155,9 @@ PostgreSQL password unless it's already set via `PGPASSWORD` or a
   |---|---|---|---|---|
   | `User.Read.All` | Application | Required | Users (all Entra plugins) | – |
   | `RoleManagement.Read.Directory` | Application | Required | Directory roles, PIM eligibility/schedules, role definitions, custom-role assignments | P2 for PIM data |
-  | `Policy.Read.All` | Application | Required | Security Defaults, Conditional Access, authorization, authentication methods, cross-tenant, admin consent request policies, named locations | P1 for Conditional Access |
-  | `Application.Read.All` | Application | Required | App registrations, service principals, owners | – |
-  | `Directory.Read.All` | Application | Required | Permission grants, groups, domains, licences, directory settings, partner contracts | – |
+  | `Policy.Read.All` | Application | Required | Security Defaults, Conditional Access, authorization, authentication methods, cross-tenant, admin consent request, app management and federated token validation policies, named locations | P1 for Conditional Access |
+  | `Application.Read.All` | Application | Required | App registrations, service principals, owners, federated identity credentials | – |
+  | `Directory.Read.All` | Application | Required | Permission grants, groups, domains, licences, directory settings, partner contracts, administrative units, devices | – |
   | `AuditLog.Read.All` | Application | Optional | User sign-in activity, service-principal sign-in activity, MFA registration details: 10040–10044, 10055, 10066 | P1 |
   | `Domain.Read.All` | Application | Optional | Federation configuration of federated domains: 10090, 11022 | – |
   | `RoleManagementPolicy.Read.Directory` | Application | Optional | PIM role settings (activation MFA, approval, duration, notifications): 10050, 10051. The precise permission; `RoleManagement.Read.Directory` (required above) is also documented by Microsoft as sufficient | P2 |

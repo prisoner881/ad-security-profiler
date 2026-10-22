@@ -33,14 +33,29 @@ If an enabled blocking policy has no conditions object, coverage can't be
 evaluated and no row is returned. No row when no Entra posture was
 collected. Security Defaults does not block device code flow, so it is not
 considered.
+
+[v1.1] Agent ID Administrator (db506228-d27e-4b7d-95e5-295956d6615f) is
+treated like Application Administrator: it manages agent identities and
+blueprints, including their credentials, and until April 2026 could also
+take over ordinary service principals (Silverfort); Microsoft labels it
+privileged.
+
+[v1.2] Also reports authentication transfer
+(conditions.authenticationFlows.transferMethods 'authenticationTransfer':
+moving a signed-in session from a computer to a phone by QR code) not
+blocked for all users and all resources, as a second row (fail / medium,
+object_guid md5('10020:transfer:' || client_id)); CIS M365 5.2.2.17 and
+Microsoft Zero Trust assessment 21828 call for blocking it, and the
+2025-2026 device-code phishing campaigns moved on to it. The device code row
+is unchanged.
 """
 
 PLUGIN = {
     "plugin_id": 10020,
     "category": "Hybrid Identity",
     "name": "Device Code Flow Not Blocked by Conditional Access",
-    "version": "1.0",
-    "revision_date": "2026-10-05",
+    "version": "1.2",
+    "revision_date": "2026-10-22",
     "control_id": "HYBRID-10020",
     "framework_tags": [
         "CISA-SCUBA-MS.AAD.3.9",
@@ -71,7 +86,9 @@ PLUGIN = {
         "is blocked only for highly privileged roles (medium). Device-code "
         "phishing (Storm-2372) has the victim complete sign-in and MFA on "
         "Microsoft's genuine device-login page and hands the tokens to the "
-        "attacker, so MFA does not stop it (SCuBA MS.AAD.3.9)."
+        "attacker, so MFA does not stop it (SCuBA MS.AAD.3.9). A second row "
+        "(medium) reports authentication transfer not blocked for all users "
+        "(CIS 5.2.2.17)."
     ),
     "remediation": (
         "Create a Conditional Access policy: Users = All users (exclude only "
@@ -81,8 +98,8 @@ PLUGIN = {
         "Authentication flows -> Device code flow; Grant = Block access. "
         "Run it report-only first and review sign-in logs filtered on "
         "'Authentication protocol = Device code' to find legitimate use, "
-        "then switch it On. Also block 'Authentication transfer' unless it "
-        "is needed."
+        "then switch it On. Block 'Authentication transfer' the same way (it "
+        "can be the same policy, with both flows selected) unless it is needed."
     ),
     "base_severity": "high",
     "query": """
@@ -93,6 +110,7 @@ PLUGIN = {
                    ('194ae4cb-b126-40b2-bd5b-6091b380977d', 'Security Administrator'),
                    ('8ac3fc64-6eca-42ea-9e69-59f4c7b60eb2', 'Hybrid Identity Administrator'),
                    ('9b895d92-2cd3-44c7-9d02-a6ac2d5ea5c3', 'Application Administrator'),
+                   ('db506228-d27e-4b7d-95e5-295956d6615f', 'Agent ID Administrator'),
                    ('158c047a-c907-4556-b7ef-446551a6b5f7', 'Cloud Application Administrator'),
                    ('29232cdf-9323-42fd-ade2-1d097af3e4de', 'Exchange Administrator'),
                    ('f28a1f50-f6e7-4571-818b-6a12f2af6b6c', 'SharePoint Administrator'),
@@ -113,6 +131,8 @@ PLUGIN = {
                    COALESCE(jsonb_typeof(p->'conditions') = 'object', FALSE) AS evaluable,
                    position('devicecodeflow' IN lower(COALESCE(
                        p->'conditions'->'authenticationFlows'->>'transferMethods', ''))) > 0 AS device_code,
+                   position('authenticationtransfer' IN lower(COALESCE(
+                       p->'conditions'->'authenticationFlows'->>'transferMethods', ''))) > 0 AS auth_transfer,
                    CASE WHEN jsonb_typeof(p->'conditions'->'users'->'includeUsers') = 'array'
                         THEN p->'conditions'->'users'->'includeUsers' ELSE '[]'::jsonb END AS inc_users,
                    CASE WHEN jsonb_typeof(p->'conditions'->'users'->'includeRoles') = 'array'
@@ -149,6 +169,14 @@ PLUGIN = {
             SELECT po.client_id,
                    EXISTS (SELECT 1 FROM pol WHERE state = 'enabled' AND NOT evaluable) AS unevaluable,
                    EXISTS (SELECT 1 FROM all_users) AS all_blocked,
+                   EXISTS (SELECT 1 FROM pol
+                            WHERE state = 'enabled' AND evaluable AND auth_transfer AND all_apps
+                              AND inc_users ? 'All') AS transfer_blocked,
+                   (SELECT jsonb_agg(jsonb_build_object('policy', p.name, 'id', p.id) ORDER BY p.name, p.id)
+                      FROM pol p
+                     WHERE p.evaluable AND p.auth_transfer
+                       AND (p.state <> 'enabled' OR NOT p.all_apps OR NOT p.inc_users ? 'All'))
+                       AS transfer_partial_policies,
                    EXISTS (SELECT 1 FROM role_cov) AS admins_blocked,
                    (SELECT jsonb_agg(role_name ORDER BY role_name) FROM role_cov) AS roles_blocked,
                    (SELECT jsonb_agg(r.role_name ORDER BY r.role_name) FROM tier0 r
@@ -189,5 +217,23 @@ PLUGIN = {
         FROM state s
         WHERE NOT s.unevaluable
           AND NOT s.all_blocked
+        UNION ALL
+        -- [v1.2] authentication transfer: its own row, so the device code row is unchanged
+        SELECT
+            'fail',
+            md5('10020:transfer:' || s.client_id::text)::uuid,
+            NULL, NULL, NULL, NULL,
+            'medium',
+            'Authentication transfer is not blocked -- no enabled Conditional Access policy blocks the '
+                || 'authentication transfer flow for all users',
+            jsonb_build_object(
+                'flow', 'authenticationTransfer',
+                'report_only_partial_or_scoped_policies', s.transfer_partial_policies,
+                'note', 'A policy counts when it is enabled, targets authentication transfer, all users and '
+                        || 'all resources, and its grant control is Block.'
+            )
+        FROM state s
+        WHERE NOT s.unevaluable
+          AND NOT s.transfer_blocked
     """,
 }

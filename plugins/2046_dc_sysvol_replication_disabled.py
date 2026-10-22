@@ -19,14 +19,21 @@ SYSVOL subscription; while none has (SYSVOL still on FRS, or the
 subscriptions could not be read) nothing is reported. Disabled DC accounts
 are skipped. One row per DC (object_guid = the DC's computer object),
 'fail'. Requires adprofiler 0.9.0; with older data nothing is reported.
+
+[v1.1] Leaves out the Microsoft Entra Kerberos server object
+(CN=AzureADKerberos in the Domain Controllers OU, linked to the krbtgt-
+AzureAD account), which Microsoft documents as functioning like a read-only
+domain controller but which is not a server: it has no host, logons, Group
+Policy or SYSVOL. Plugin 1006 reports the age of its key. Requires schema
+v46.
 """
 
 PLUGIN = {
     "plugin_id": 2046,
     "category": "Computer Accounts",
     "name": "Domain Controller Does Not Replicate SYSVOL",
-    "version": "1.0",
-    "revision_date": "2026-10-21",
+    "version": "1.1",
+    "revision_date": "2026-10-22",
     "control_id": "COMPUTER-2046",
     "framework_tags": [
         "NIST-800-53-CM-6", "NIST-800-53-CM-2", "NIST-800-53-SI-7",
@@ -74,6 +81,7 @@ PLUGIN = {
               ON o.object_guid = c.object_guid AND o.client_id = c.client_id AND NOT o.is_deleted
             WHERE c.client_id = %(client_id)s AND c.valid_to IS NULL
               AND c.is_domain_controller AND c.is_enabled
+              AND NOT is_entra_kerberos_server(c.sam_account_name, c.krbtgt_link)
               AND c.sysvol_subscription_found IS NOT NULL
               AND (SELECT yes FROM dfsr_in_use)
         )

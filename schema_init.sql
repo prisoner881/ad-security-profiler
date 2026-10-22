@@ -4175,6 +4175,25 @@ COMMENT ON COLUMN ad_intel.gpo_link_edge.link_order IS
     'lowest to highest precedence, so the LAST entry is GPMC''s "link order 1" and wins; '
     'v_gpo_dc_application converts this. (comment added in schema v39)';
 
+-- [v46] see schema_migration_v46.sql.
+CREATE OR REPLACE FUNCTION ad_intel.is_entra_kerberos_server(sam_account_name text, krbtgt_link text)
+RETURNS boolean
+LANGUAGE sql IMMUTABLE PARALLEL SAFE
+AS $fn$
+    -- The computer object Set-AzureADKerberosServer creates
+    -- (CN=AzureADKerberos,OU=Domain Controllers): RODC-like, linked to the
+    -- krbtgt-AzureAD key account ('_' in LIKE also matches the '-' spelling).
+    SELECT COALESCE(lower(sam_account_name) = 'azureadkerberos$', false)
+        OR COALESCE(lower(krbtgt_link) LIKE 'cn=krbtgt_azuread,%', false);
+$fn$;
+COMMENT ON FUNCTION ad_intel.is_entra_kerberos_server(text, text) IS
+    'TRUE for the Microsoft Entra Kerberos server object (CN=AzureADKerberos in the Domain '
+    'Controllers OU, sAMAccountName AzureADKerberos$, msDS-KrbTgtLink to CN=krbtgt-AzureAD). '
+    'Microsoft documents it as functioning like a read-only domain controller, so AD flags it as '
+    'one, but it is not a server: DC posture plugins and v_gpo_dc_application leave it out. Pass '
+    'ad_computer.sam_account_name and ad_computer.krbtgt_link. (schema v46)';
+
+
 CREATE OR REPLACE VIEW ad_intel.v_gpo_dc_application AS
 WITH dc AS (
     SELECT c.client_id, c.object_guid AS dc_guid, lower(d.dn_current) AS dc_dn, d.object_sid AS dc_sid
@@ -4182,6 +4201,8 @@ WITH dc AS (
     JOIN ad_intel.directory_object d
       ON d.object_guid = c.object_guid AND d.client_id = c.client_id AND NOT d.is_deleted
     WHERE c.valid_to IS NULL AND c.is_domain_controller
+      -- [v46] not the Microsoft Entra Kerberos server object (no host, no Group Policy)
+      AND NOT ad_intel.is_entra_kerberos_server(c.sam_account_name, c.krbtgt_link)
 ),
 som AS (
     SELECT o.client_id, o.object_guid, lower(d.dn_current) AS dn,
@@ -5451,6 +5472,174 @@ COMMENT ON COLUMN ad_intel.directory_object.owner_sid IS
 
 
 -- ============================================================================
+-- v46 ADDITIONS -- see schema_migration_v46.sql. (is_entra_kerberos_server()
+-- and the v_gpo_dc_application change are applied in place in the v39
+-- section above.)
+-- ============================================================================
+-- ----------------------------------------------------------------------------
+-- Entra ID: entra_graph_collector.py 0.9.0
+-- ----------------------------------------------------------------------------
+ALTER TABLE ad_intel.entra_application
+    ADD COLUMN IF NOT EXISTS required_resource_access jsonb,
+    ADD COLUMN IF NOT EXISTS authentication_behaviors jsonb;
+COMMENT ON COLUMN ad_intel.entra_application.required_resource_access IS
+    'requiredResourceAccess: the permissions the registration requests, [{resourceAppId, '
+    'resourceAccess: [{id, type}]}] (ids lower-case; type ''Scope'' = delegated, ''Role'' = '
+    'application). Azure AD Graph is resourceAppId 00000002-0000-0000-c000-000000000000. NULL = '
+    'collected before entra_graph_collector 0.9.0. (schema v46)';
+COMMENT ON COLUMN ad_intel.entra_application.authentication_behaviors IS
+    'authenticationBehaviors: {blockAzureADGraphAccess, removeUnverifiedEmailClaim, '
+    'requireClientServicePrincipal, ...}; each is null until set. removeUnverifiedEmailClaim false '
+    'lets the app receive an email claim from an unverified domain (nOAuth). NULL = not returned or '
+    'collected before entra_graph_collector 0.9.0. (schema v46)';
+
+ALTER TABLE ad_intel.entra_group
+    ADD COLUMN IF NOT EXISTS visibility text;
+COMMENT ON COLUMN ad_intel.entra_group.visibility IS
+    'Graph visibility: ''Public'' (any user can join a Microsoft 365 group and read its content), '
+    '''Private'', ''HiddenMembership''; NULL = not set (security groups) or collected before '
+    'entra_graph_collector 0.9.0. (schema v46)';
+
+CREATE TABLE IF NOT EXISTS ad_intel.entra_federated_identity_credential (
+    client_id         UUID NOT NULL,
+    app_object_id     UUID NOT NULL,
+    credential_id     UUID NOT NULL,
+    app_id            UUID,
+    app_display_name  TEXT,
+    name              TEXT,
+    issuer            TEXT,
+    subject           TEXT,
+    audiences         TEXT[] NOT NULL DEFAULT '{}',
+    description       TEXT,
+    collected_at      TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (client_id, app_object_id, credential_id)
+);
+COMMENT ON TABLE ad_intel.entra_federated_identity_credential IS
+    'Federated identity credentials of application registrations '
+    '(/applications/{id}/federatedIdentityCredentials, Application.Read.All; source '
+    'federated_identity_credentials). Each lets a token from issuer whose subject matches be '
+    'exchanged for the application''s own token, without a secret or certificate (e.g. GitHub '
+    'Actions issuer https://token.actions.githubusercontent.com, subject repo:<org>/<repo>:...). '
+    'Credentials on user-assigned managed identities are Azure resources and are not read. '
+    '(schema v46)';
+
+CREATE TABLE IF NOT EXISTS ad_intel.entra_administrative_unit (
+    client_id                         UUID NOT NULL,
+    unit_id                           UUID NOT NULL,
+    display_name                      TEXT,
+    visibility                        TEXT,
+    is_member_management_restricted   BOOLEAN,
+    membership_type                   TEXT,
+    membership_rule                   TEXT,
+    membership_rule_processing_state  TEXT,
+    collected_at                      TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (client_id, unit_id)
+);
+COMMENT ON TABLE ad_intel.entra_administrative_unit IS
+    'Administrative units (/directory/administrativeUnits, Directory.Read.All; source '
+    'administrative_units). is_member_management_restricted TRUE = restricted management AU: only '
+    'roles scoped to the AU can change its members, tenant-wide administrators cannot. visibility '
+    '''HiddenMembership'' = only members and AU-scoped administrators see the membership. '
+    'membership_type ''Dynamic'' with membership_rule, or ''Assigned''/NULL. (schema v46)';
+
+CREATE TABLE IF NOT EXISTS ad_intel.entra_administrative_unit_member (
+    client_id     UUID NOT NULL,
+    unit_id       UUID NOT NULL,
+    member_id     UUID NOT NULL,
+    member_type   TEXT,
+    collected_at  TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (client_id, unit_id, member_id)
+);
+COMMENT ON TABLE ad_intel.entra_administrative_unit_member IS
+    'Direct members of each administrative unit; member_type is Graph''s @odata.type '
+    '(#microsoft.graph.user, .group, .device). (schema v46)';
+
+CREATE TABLE IF NOT EXISTS ad_intel.entra_device (
+    client_id                    UUID NOT NULL,
+    entra_object_id              UUID NOT NULL,
+    device_id                    TEXT,
+    display_name                 TEXT,
+    account_enabled              BOOLEAN,
+    approximate_last_sign_in_at  TIMESTAMPTZ,
+    registered_at                TIMESTAMPTZ,
+    trust_type                   TEXT,
+    is_managed                   BOOLEAN,
+    is_compliant                 BOOLEAN,
+    operating_system             TEXT,
+    operating_system_version     TEXT,
+    registered_owner_count       INTEGER,
+    collected_at                 TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (client_id, entra_object_id)
+);
+COMMENT ON TABLE ad_intel.entra_device IS
+    'Devices (/devices, Directory.Read.All; source devices). trust_type ''Workplace'' (registered), '
+    '''AzureAd'' (Entra joined), ''ServerAd'' (hybrid joined). registered_owner_count is capped at '
+    '20 by Graph ($expand); 0 = no registered owner. approximate_last_sign_in_at is updated by '
+    'Entra roughly every 14 days. (schema v46)';
+
+COMMENT ON TABLE ad_intel.entra_custom_role_assignment IS
+    'Assignments of CUSTOM role definitions (is_built_in = false), which /directoryRoles does not '
+    'list: assignment_type ''active'' (roleManagement/directory/roleAssignments) or ''eligible'' '
+    '(roleEligibilityScheduleInstances, P2). Since schema v46 (entra_graph_collector 0.9.0) also '
+    'the ACTIVE assignments of the built-in Application Administrator and Cloud Application '
+    'Administrator roles that are scoped to one application or service principal '
+    '(directory_scope_id ''/<object id>'', role_definition_id = the role template id); their '
+    'tenant-wide assignments are in entra_directory_role_member. (schema v42, v46)';
+
+-- Comments that list sources, settings and entity types: the v46 additions
+-- are appended once (the DO blocks are safe to run again).
+DO $do$
+DECLARE
+    additions CONSTANT text[][] := ARRAY[
+        ['ad_intel.entra_collection_status',
+         ' Since schema v46 (entra_graph_collector 0.9.0) also: ca_policies_beta, '
+         'app_management_policy, federated_token_validation_policy, federated_identity_credentials, '
+         'administrative_units, devices. (schema v46)'],
+        ['ad_intel.entra_tenant_setting',
+         ' Since schema v46: ''ca_policies_beta'' (beta identity/conditionalAccess/policies, a JSON '
+         'array in the ca_policies element shape; beta adds sessionControls.continuousAccessEvaluation '
+         '{mode}, sessionControls.secureSignInSession {isEnabled} (token protection), '
+         'conditions.agentIdRiskLevels and agent identity targets in conditions.clientApplications); '
+         '''app_management_policy'' (policies/defaultAppManagementPolicy: isEnabled, '
+         'applicationRestrictions and servicePrincipalRestrictions {passwordCredentials[], '
+         'keyCredentials[]} each {restrictionType, state, maxLifetime, restrictForAppsCreatedAfterDateTime}); '
+         '''federated_token_validation_policy'' (beta policies/federatedTokenValidationPolicy: '
+         'validatingDomains {@odata.type, rootDomains, domainNames}); auth_methods_policy is read from '
+         'beta when available (content.graph_version ''beta'' or ''v1.0''), which adds '
+         'reportSuspiciousActivitySettings, Authenticator isSoftwareOathEnabled and '
+         'featureSettings.companionAppAllowedState, and X509Certificate authenticationModeConfiguration '
+         'and certificateUserBindings[].trustAffinityLevel. (schema v46)'],
+        ['ad_intel.entra_change_history',
+         ' Since schema v46: ''federated_identity_credential'' / <application object id>:<credential '
+         'id> / {app_object_id, app_id, app_display_name, name, issuer, subject, audiences}; '
+         '''pim_policy'' / role template id / {role_template_id, role_display_name, rules (the stored '
+         'entra_role_management_policy rules, ordered by rule id)}. (schema v46)']
+    ];
+    i int;
+    current_comment text;
+BEGIN
+    FOR i IN 1 .. array_length(additions, 1) LOOP
+        current_comment := obj_description(additions[i][1]::regclass, 'pg_class');
+        IF current_comment IS NULL OR position('(schema v46)' IN current_comment) = 0 THEN
+            EXECUTE format('COMMENT ON TABLE %s IS %L', additions[i][1],
+                           COALESCE(current_comment, '') || additions[i][2]);
+        END IF;
+    END LOOP;
+END
+$do$;
+
+COMMENT ON COLUMN ad_intel.entra_security_posture.authorization_policy IS
+    'Graph /policies/authorizationPolicy: {allowInvitesFrom, guestUserRoleId, '
+    'allowedToSignUpEmailBasedSubscriptions, allowEmailVerifiedUsersToJoinOrganization, '
+    'blockMsolPowerShell, allowedToUseSSPR, allowUserConsentForRiskyApps, '
+    'defaultUserRolePermissions: {allowedToCreateApps, allowedToCreateSecurityGroups, '
+    'allowedToCreateTenants, allowedToReadOtherUsers, permissionGrantPoliciesAssigned[], '
+    'allowedToReadBitlockerKeysForOwnedDevice}}. allowedToUseSSPR and allowUserConsentForRiskyApps '
+    'are absent when collected before entra_graph_collector 0.9.0. NULL = not read (see '
+    'authorization_policy_status). (schema v38, v46)';
+
+
+-- ============================================================================
 -- v31 ADDITIONS -- schema version tracking.
 -- ============================================================================
 
@@ -5464,7 +5653,7 @@ CREATE TABLE schema_migration_history (
 -- pretense of having stepped through intermediate versions that were
 -- never actually separately applied to this database.
 INSERT INTO schema_migration_history (version_number, description) VALUES
-    (45, 'Fresh install via schema_init.sql, consolidated through v45');
+    (46, 'Fresh install via schema_init.sql, consolidated through v46');
 
 -- ============================================================================
 -- PARTITIONED TABLE REGISTRY + INITIAL PARTITION CREATION

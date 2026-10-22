@@ -32,14 +32,21 @@ an RODC could not be remediated with LAPS; rotate an RODC's DSRM password by oth
 means (`ntdsutil "set dsrm password"`).
 
 One row per DC. medium.
+
+[v1.1] Leaves out the Microsoft Entra Kerberos server object
+(CN=AzureADKerberos in the Domain Controllers OU, linked to the krbtgt-
+AzureAD account), which Microsoft documents as functioning like a read-only
+domain controller but which is not a server: it has no host, logons, Group
+Policy or SYSVOL. Plugin 1006 reports the age of its key. Requires schema
+v46.
 """
 
 PLUGIN = {
     "plugin_id": 2039,
     "category": "Computer Accounts",
     "name": "DSRM Password Not Managed on Domain Controllers",
-    "version": "1.0",
-    "revision_date": "2026-10-04",
+    "version": "1.1",
+    "revision_date": "2026-10-22",
     "control_id": "CRED-2039",
     "framework_tags": [
         "MITRE-ATTCK-T1003.002", "DISA-STIG",
@@ -110,6 +117,7 @@ PLUGIN = {
           AND c.valid_to IS NULL
           AND c.is_domain_controller
           AND NOT c.is_read_only_dc
+          AND NOT is_entra_kerberos_server(c.sam_account_name, c.krbtgt_link)
           AND c.is_enabled IS NOT FALSE
           AND c.laps_expiration_modern IS NULL
         ORDER BY c.object_guid

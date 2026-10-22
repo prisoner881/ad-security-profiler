@@ -22,14 +22,21 @@ how PingCastle and most tools treat inactive computers.
 
 [v1.5] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
 no query change.
+
+[v1.6] Leaves out the Microsoft Entra Kerberos server object
+(CN=AzureADKerberos in the Domain Controllers OU, linked to the krbtgt-
+AzureAD account), which Microsoft documents as functioning like a read-only
+domain controller but which is not a server: it never logs on and its
+password is not rotated by a host. Plugin 1006 reports the age of its key.
+Requires schema v46.
 """
 
 PLUGIN = {
     "plugin_id": 2006,
     "category": "Computer Accounts",
     "name": "Dormant Computer Account",
-    "version": "1.5",
-    "revision_date": "2026-10-21",
+    "version": "1.6",
+    "revision_date": "2026-10-22",
     "remediation": (
         "Confirm whether the machine still physically exists and is in "
         "active use. If decommissioned, disable and eventually remove the "
@@ -117,6 +124,7 @@ PLUGIN = {
         FROM ad_computer c
         WHERE c.valid_to IS NULL
           AND c.client_id = %(client_id)s
+          AND NOT is_entra_kerberos_server(c.sam_account_name, c.krbtgt_link)
           AND (
                 (c.last_logon_timestamp IS NOT NULL AND c.last_logon_timestamp < now() - interval '90 days')
                 OR (c.last_logon_timestamp IS NULL

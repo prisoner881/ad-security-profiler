@@ -28,14 +28,19 @@ value for the account's role and any primaryGroupID mismatch.
 
 [v1.4] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
 no query change.
+
+[v1.5] Leaves out the Microsoft Entra Kerberos server object
+(CN=AzureADKerberos, linked to the krbtgt-AzureAD account): Microsoft's Set-
+AzureADKerberosServer creates it with RODC-like flags of its own, which are
+not an administrator's mistake. Requires schema v46.
 """
 
 PLUGIN = {
     "plugin_id": 2021,
     "category": "Computer Accounts",
     "name": "Domain Controller userAccountControl Value Is Inconsistent With DC Registration",
-    "version": "1.4",
-    "revision_date": "2026-10-21",
+    "version": "1.5",
+    "revision_date": "2026-10-22",
     "remediation": (
         "Confirm this userAccountControl value directly against the "
         "expected constants for the DC's actual role (532480 for a "
@@ -114,6 +119,7 @@ PLUGIN = {
             WHERE c.valid_to IS NULL
               AND c.client_id = %(client_id)s
               AND c.user_account_control IS NOT NULL
+              AND NOT is_entra_kerberos_server(c.sam_account_name, c.krbtgt_link)
               AND (c.is_domain_controller
                    OR (c.user_account_control & (8192 | 67108864)) <> 0
                    OR c.primary_group_id IN (516, 521))

@@ -47,14 +47,20 @@ Data caveats: needs the CA policy conditions (entra_graph_collector
 object, nothing is returned. Guest exclusion via
 excludeGuestsOrExternalUsers is treated as excluding every guest (the
 guest-type / external-tenant filter is not evaluated).
+
+[v1.1] Agent ID Administrator (db506228-d27e-4b7d-95e5-295956d6615f) is
+treated like Application Administrator: it manages agent identities and
+blueprints, including their credentials, and until April 2026 could also
+take over ordinary service principals (Silverfort); Microsoft labels it
+privileged.
 """
 
 PLUGIN = {
     "plugin_id": 10026,
     "category": "Hybrid Identity",
     "name": "Users Excluded from MFA Conditional Access Coverage",
-    "version": "1.0",
-    "revision_date": "2026-10-05",
+    "version": "1.1",
+    "revision_date": "2026-10-22",
     "control_id": "HYBRID-10026",
     "framework_tags": [
         "CISA-SCUBA-MS.AAD.3.1",
@@ -104,6 +110,7 @@ PLUGIN = {
             VALUES ('62e90394-69f5-4237-9190-012177145e10'::uuid), ('e8611ab8-c189-46e8-94e1-60213ab1f814'::uuid),
                    ('7be44c8a-adaf-4e2a-84d6-ab2649e08a13'::uuid), ('194ae4cb-b126-40b2-bd5b-6091b380977d'::uuid),
                    ('8ac3fc64-6eca-42ea-9e69-59f4c7b60eb2'::uuid), ('9b895d92-2cd3-44c7-9d02-a6ac2d5ea5c3'::uuid),
+                   ('db506228-d27e-4b7d-95e5-295956d6615f'::uuid),
                    ('158c047a-c907-4556-b7ef-446551a6b5f7'::uuid), ('29232cdf-9323-42fd-ade2-1d097af3e4de'::uuid),
                    ('f28a1f50-f6e7-4571-818b-6a12f2af6b6c'::uuid), ('fe930be7-5e62-47db-91af-98c3a49a38b1'::uuid),
                    ('b1be1c3e-b65d-4f19-8427-f6fa0d97feb9'::uuid), ('c4e39bd9-1100-46d3-8c65-fb160da0071f'::uuid),

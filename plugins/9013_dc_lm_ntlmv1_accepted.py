@@ -36,14 +36,21 @@ Gating: returns nothing unless SYSVOL has been collected for the client
 the DC's actual state; if a GPO applying to the DC could not be read from
 SYSVOL that conclusion is marked uncertain and the GPOs are listed in
 detail. Read-only DCs are included.
+
+[v1.1] Leaves out the Microsoft Entra Kerberos server object
+(CN=AzureADKerberos in the Domain Controllers OU, linked to the krbtgt-
+AzureAD account), which Microsoft documents as functioning like a read-only
+domain controller but which is not a server: it has no host, logons, Group
+Policy or SYSVOL. Plugin 1006 reports the age of its key. Requires schema
+v46.
 """
 
 PLUGIN = {
     "plugin_id": 9013,
     "category": "Organizational Units",
     "name": "LM / NTLMv1 Authentication Accepted by Domain Controllers",
-    "version": "1.0",
-    "revision_date": "2026-10-04",
+    "version": "1.1",
+    "revision_date": "2026-10-22",
     "control_id": "GPO-9013",
     "framework_tags": [
         "NIST-800-53-CM-6", "NIST-CSF-2.0-PR.PS-01", "PCI-DSS-4.0-2.2.1", "CIS-CSC-8-4.1",
@@ -89,6 +96,7 @@ PLUGIN = {
             JOIN directory_object o
               ON o.object_guid = c.object_guid AND o.client_id = c.client_id AND NOT o.is_deleted
             WHERE c.client_id = %(client_id)s AND c.valid_to IS NULL AND c.is_domain_controller
+              AND NOT is_entra_kerberos_server(c.sam_account_name, c.krbtgt_link)
               AND EXISTS (SELECT 1 FROM ad_gpo_sysvol s
                           WHERE s.client_id = %(client_id)s AND s.read_status = 'ok')
         ),

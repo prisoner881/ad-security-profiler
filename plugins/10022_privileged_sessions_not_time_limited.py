@@ -34,14 +34,20 @@ Data caveats: needs the CA policy conditions and session controls
 (entra_graph_collector 0.7.0+). If an enabled policy with a sign-in
 frequency has no conditions object, coverage can't be evaluated and no row
 is returned. No row when no Entra posture was collected.
+
+[v1.1] Agent ID Administrator (db506228-d27e-4b7d-95e5-295956d6615f) is
+treated like Application Administrator: it manages agent identities and
+blueprints, including their credentials, and until April 2026 could also
+take over ordinary service principals (Silverfort); Microsoft labels it
+privileged.
 """
 
 PLUGIN = {
     "plugin_id": 10022,
     "category": "Hybrid Identity",
     "name": "Privileged Sessions Not Time-Limited",
-    "version": "1.0",
-    "revision_date": "2026-10-05",
+    "version": "1.1",
+    "revision_date": "2026-10-22",
     "control_id": "HYBRID-10022",
     "framework_tags": [
         "NIST-800-53-AC-6(5)",
@@ -87,6 +93,7 @@ PLUGIN = {
                    ('194ae4cb-b126-40b2-bd5b-6091b380977d', 'Security Administrator'),
                    ('8ac3fc64-6eca-42ea-9e69-59f4c7b60eb2', 'Hybrid Identity Administrator'),
                    ('9b895d92-2cd3-44c7-9d02-a6ac2d5ea5c3', 'Application Administrator'),
+                   ('db506228-d27e-4b7d-95e5-295956d6615f', 'Agent ID Administrator'),
                    ('158c047a-c907-4556-b7ef-446551a6b5f7', 'Cloud Application Administrator'),
                    ('29232cdf-9323-42fd-ade2-1d097af3e4de', 'Exchange Administrator'),
                    ('f28a1f50-f6e7-4571-818b-6a12f2af6b6c', 'SharePoint Administrator'),

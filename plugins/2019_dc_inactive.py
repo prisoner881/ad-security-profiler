@@ -19,14 +19,21 @@ identity because object_guid is always set for this plugin.
 
 [v1.4] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
 no query change.
+
+[v1.5] Leaves out the Microsoft Entra Kerberos server object
+(CN=AzureADKerberos in the Domain Controllers OU, linked to the krbtgt-
+AzureAD account), which Microsoft documents as functioning like a read-only
+domain controller but which is not a server: it has no host, logons, Group
+Policy or SYSVOL. Plugin 1006 reports the age of its key. Requires schema
+v46.
 """
 
 PLUGIN = {
     "plugin_id": 2019,
     "category": "Computer Accounts",
     "name": "Domain Controller Computer Account Appears Inactive",
-    "version": "1.4",
-    "revision_date": "2026-10-21",
+    "version": "1.5",
+    "revision_date": "2026-10-22",
     "remediation": (
         "If this DC has genuinely been retired, demote it properly "
         "(`Uninstall-ADDSDomainController`, or metadata cleanup via "
@@ -96,6 +103,7 @@ PLUGIN = {
         WHERE c.valid_to IS NULL
           AND c.client_id = %(client_id)s
           AND c.is_domain_controller
+          AND NOT is_entra_kerberos_server(c.sam_account_name, c.krbtgt_link)
           AND c.is_enabled
           AND c.last_logon_timestamp IS NOT NULL
           AND c.last_logon_timestamp < now() - INTERVAL '45 days'

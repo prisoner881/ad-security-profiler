@@ -16,14 +16,21 @@ on every audit; the date only moves when the underlying attribute does.
 Severity and inclusion thresholds are unchanged. The day count is still
 reported in detail (days_since_rotation), which is not part of the
 finding's identity because object_guid is always set for this plugin.
+
+[v1.4] Leaves out the Microsoft Entra Kerberos server object
+(CN=AzureADKerberos in the Domain Controllers OU, linked to the krbtgt-
+AzureAD account), which Microsoft documents as functioning like a read-only
+domain controller but which is not a server: it has no host, logons, Group
+Policy or SYSVOL. Plugin 1006 reports the age of its key. Requires schema
+v46.
 """
 
 PLUGIN = {
     "plugin_id": 2020,
     "category": "Computer Accounts",
     "name": "Domain Controller Computer Account Password Has Not Rotated Recently",
-    "version": "1.3",
-    "revision_date": "2026-10-03",
+    "version": "1.4",
+    "revision_date": "2026-10-22",
     "remediation": (
         "Investigate why this DC's computer account password hasn't "
         "rotated on the normal ~30-day cycle -- check the registry "
@@ -90,6 +97,7 @@ PLUGIN = {
         WHERE c.valid_to IS NULL
           AND c.client_id = %(client_id)s
           AND c.is_domain_controller
+          AND NOT is_entra_kerberos_server(c.sam_account_name, c.krbtgt_link)
           AND c.is_enabled
           AND c.pwd_last_set IS NOT NULL
           AND c.pwd_last_set < now() - INTERVAL '45 days'

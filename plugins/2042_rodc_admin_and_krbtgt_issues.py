@@ -29,14 +29,20 @@ krbtgt account is treated as unknown, not old.
 
 One row per RODC; severity = worst issue; the summary lists the issue
 types only (exact ages are in detail).
+
+[v1.1] Leaves out the Microsoft Entra Kerberos server object
+(CN=AzureADKerberos, linked to the krbtgt-AzureAD account). It has no
+delegated administrator to set, since nobody logs on to it, and the age of
+its krbtgt-AzureAD key is reported by plugin 1006 against the krbtgt
+thresholds rather than here. Requires schema v46.
 """
 
 PLUGIN = {
     "plugin_id": 2042,
     "category": "Computer Accounts",
     "name": "RODC Delegated Administration and krbtgt Account Issues",
-    "version": "1.0",
-    "revision_date": "2026-10-04",
+    "version": "1.1",
+    "revision_date": "2026-10-22",
     "control_id": "HYGIENE-2042",
     "framework_tags": [
         "MITRE-ATTCK-T1558.001",
@@ -105,6 +111,7 @@ PLUGIN = {
                 ORDER BY o.object_guid LIMIT 1
             ) ku ON true
             WHERE c.client_id = %(client_id)s AND c.valid_to IS NULL AND c.is_read_only_dc
+              AND NOT is_entra_kerberos_server(c.sam_account_name, c.krbtgt_link)
         ),
         assessed AS (
             SELECT r.*,

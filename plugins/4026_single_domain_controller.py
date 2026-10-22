@@ -30,14 +30,21 @@ collection run (lastLogonTimestamp lags up to ~14 days). The finding is
 raised when there is exactly one writable DC object, or when there are
 several but only one is active (e.g. a decommissioned DC whose metadata
 was never cleaned up). The detail lists the DCs.
+
+[v1.2] Leaves out the Microsoft Entra Kerberos server object
+(CN=AzureADKerberos in the Domain Controllers OU, linked to the krbtgt-
+AzureAD account), which Microsoft documents as functioning like a read-only
+domain controller but which is not a server: it has no host, logons, Group
+Policy or SYSVOL. Plugin 1006 reports the age of its key. Requires schema
+v46.
 """
 
 PLUGIN = {
     "plugin_id": 4026,
     "category": "Domain",
     "name": "Domain Is Supported by Only One Domain Controller",
-    "version": "1.1",
-    "revision_date": "2026-10-04",
+    "version": "1.2",
+    "revision_date": "2026-10-22",
     "remediation": (
         "Deploy at least one additional domain controller for this "
         "domain. A single domain controller is a single point of "
@@ -93,6 +100,7 @@ PLUGIN = {
               AND c.valid_to IS NULL
               AND c.is_domain_controller
               AND NOT c.is_read_only_dc
+              AND NOT is_entra_kerberos_server(c.sam_account_name, c.krbtgt_link)
         ),
         dc_count AS (
             SELECT count(*) AS n,

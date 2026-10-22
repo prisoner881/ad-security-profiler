@@ -46,14 +46,20 @@ administrative-unit-only scope one step lower, floor low; disabled guests
 stay low. status is 'fail' at medium/high, 'warn' at low. If eligibility or
 group membership couldn't be read (e.g. no Entra ID P2),
 detail.coverage_notes says so.
+
+[v1.3] Agent ID Administrator (db506228-d27e-4b7d-95e5-295956d6615f) is
+treated like Application Administrator: it manages agent identities and
+blueprints, including their credentials, and until April 2026 could also
+take over ordinary service principals (Silverfort); Microsoft labels it
+privileged.
 """
 
 PLUGIN = {
     "plugin_id": 10006,
     "category": "Hybrid Identity",
     "name": "Guest Account Holds a Privileged Directory Role",
-    "version": "1.2",
-    "revision_date": "2026-10-04",
+    "version": "1.3",
+    "revision_date": "2026-10-22",
     "remediation": (
         "Confirm this is intentional and necessary -- a genuine "
         "external-partner administration scenario is possible but "
@@ -121,6 +127,7 @@ PLUGIN = {
             ('7be44c8a-adaf-4e2a-84d6-ab2649e08a13'::uuid, 'high'),  -- Privileged Authentication Administrator
             ('8ac3fc64-6eca-42ea-9e69-59f4c7b60eb2'::uuid, 'high'),  -- Hybrid Identity Administrator
             ('9b895d92-2cd3-44c7-9d02-a6ac2d5ea5c3'::uuid, 'high'),  -- Application Administrator
+            ('db506228-d27e-4b7d-95e5-295956d6615f'::uuid, 'high'),  -- Agent ID Administrator
             ('158c047a-c907-4556-b7ef-446551a6b5f7'::uuid, 'high'),  -- Cloud Application Administrator
             ('c4e39bd9-1100-46d3-8c65-fb160da0071f'::uuid, 'high'),  -- Authentication Administrator
             ('0526716b-113d-4c15-b2c8-68e3c22b9f80'::uuid, 'high'),  -- Authentication Policy Administrator

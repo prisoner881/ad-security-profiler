@@ -45,14 +45,25 @@ T1606.002, T1484.002).
 One finding per domain (object_guid md5('10090:' || client_id || ':' ||
 lower(domain name))), worst severity wins, every issue listed. status
 'fail' at medium or above, 'warn' at low.
+
+[v1.2] Two more issues. A token-signing certificate valid for more than 3
+years (medium): AD FS generates 1-year certificates, and the certificates of
+forged or attacker-added trusts are often issued for decades (Tenable). And,
+when the beta federatedTokenValidationPolicy was read (source
+federated_token_validation_policy, entra_graph_collector 0.9.0),
+validatingDomains rootDomains other than 'all' (high when 'none' or not set,
+medium when partial): Entra then accepts a token from this domain's identity
+provider for a user of another domain, which is how Storm-0501 used a
+federated domain it added to sign in as other users. When that source was
+not read the issue is not evaluated.
 """
 
 PLUGIN = {
     "plugin_id": 10090,
     "category": "Hybrid Identity",
     "name": "Federated Domain Trust Is Risky",
-    "version": "1.1",
-    "revision_date": "2026-10-21",
+    "version": "1.2",
+    "revision_date": "2026-10-22",
     "control_id": "HYBRID-10090",
     "requires_sources": ["federation"],
     "framework_tags": [
@@ -79,6 +90,10 @@ PLUGIN = {
          "url": "https://learn.microsoft.com/en-us/windows-server/identity/ad-fs/deployment/best-practices-securing-ad-fs"},
         {"title": "Microsoft: AD FS certificate rollover and Microsoft Entra ID",
          "url": "https://learn.microsoft.com/en-us/entra/identity/hybrid/connect/how-to-connect-fed-o365-certs"},
+        {"title": "Microsoft Graph (beta): federatedTokenValidationPolicy resource type",
+         "url": "https://learn.microsoft.com/en-us/graph/api/resources/federatedtokenvalidationpolicy?view=graph-rest-beta"},
+        {"title": "Microsoft Threat Intelligence: Storm-0501's evolving techniques lead to cloud-based ransomware",
+         "url": "https://www.microsoft.com/en-us/security/blog/2025/08/27/storm-0501s-evolving-techniques-lead-to-cloud-based-ransomware/"},
         {"title": "MITRE ATT&CK T1606.002 Forge Web Credentials: SAML Tokens",
          "url": "https://attack.mitre.org/techniques/T1606/002/"},
         {"title": "MITRE ATT&CK T1484.002 Domain or Tenant Policy Modification: Trust Modification",
@@ -94,8 +109,11 @@ PLUGIN = {
         "valid next certificate is already trusted) or has not been rolled "
         "over for more than a year (medium); a next "
         "signing certificate is already trusted (low, confirm it is "
-        "expected). Issuer and sign-in URIs are listed for review. One "
-        "finding per domain."
+        "expected); the signing certificate is valid for more than 3 years "
+        "(medium); the tenant's federated token validation policy does not "
+        "cover every domain, so the federated IdP can sign in users of other "
+        "domains (high when off, medium when partial). Issuer and sign-in "
+        "URIs are listed for review. One finding per domain."
     ),
     "remediation": (
         "Set federatedIdpMfaBehavior to enforceMfaByFederatedIdp only if "
@@ -110,7 +128,10 @@ PLUGIN = {
         "Update-MgDomainFederationConfiguration with the new certificate), "
         "keep AD FS servers Tier 0, protect the DKM key, and verify any "
         "nextSigningCertificate and the issuer/sign-in URIs match your own "
-        "AD FS farm."
+        "AD FS farm. Set the federated token validation policy to all domains "
+        "(Graph beta: PATCH /policies/federatedTokenValidationPolicy with "
+        "validatingDomains @odata.type #microsoft.graph.allDomains, rootDomains "
+        "'all')."
     ),
     "base_severity": "high",
     "query": """
@@ -130,6 +151,18 @@ PLUGIN = {
                 ON d.client_id = f.client_id AND lower(d.domain_name) = lower(f.domain_name)
              WHERE f.client_id = %(client_id)s
                AND src.ok
+        ),
+        -- [v1.2] tenant-wide federatedTokenValidationPolicy (beta), when it was read
+        ftv AS (
+            SELECT ts.content->'validatingDomains'->>'rootDomains' AS root_domains,
+                   ts.content->'validatingDomains'->'domainNames' AS domain_names
+              FROM entra_tenant_setting ts
+             WHERE ts.client_id = %(client_id)s
+               AND ts.setting_name = 'federated_token_validation_policy'
+               AND jsonb_typeof(ts.content->'validatingDomains') = 'object'
+               AND EXISTS (SELECT 1 FROM entra_collection_status s
+                            WHERE s.client_id = ts.client_id
+                              AND s.source = 'federated_token_validation_policy' AND s.status = 'ok')
         ),
         issue AS (
             SELECT f.domain_name, CASE WHEN f.is_default IS TRUE THEN 5 ELSE 4 END AS rank,
@@ -162,6 +195,23 @@ PLUGIN = {
             UNION ALL
             SELECT f.domain_name, 2, 'a next token-signing certificate is already trusted (confirm it is expected)'
               FROM fed f WHERE f.next_signing_certificate_thumbprint IS NOT NULL
+            UNION ALL
+            -- [v1.2] AD FS issues 1-year token-signing certificates; a much longer one is unusual
+            SELECT f.domain_name, 3,
+                   'token-signing certificate is valid for '
+                   || floor(extract(epoch FROM f.signing_certificate_not_after - f.signing_certificate_not_before)
+                            / 31557600)::int
+                   || ' years (unusually long; confirm it was issued by your own federation service)'
+              FROM fed f
+             WHERE f.signing_certificate_not_after - f.signing_certificate_not_before > interval '3 years 1 day'
+            UNION ALL
+            SELECT f.domain_name,
+                   CASE WHEN COALESCE(t.root_domains, 'none') = 'none' THEN 4 ELSE 3 END,
+                   'federated token validation does not cover every domain (rootDomains '
+                   || COALESCE(t.root_domains, 'not set')
+                   || '): this domain''s identity provider can sign users of other domains in'
+              FROM fed f CROSS JOIN ftv t
+             WHERE t.root_domains IS DISTINCT FROM 'all'
         ),
         agg AS (
             SELECT i.dkey, max(i.rank) AS rank,
@@ -216,6 +266,9 @@ PLUGIN = {
                     || 'it is not readable through Graph, so whether MFA claims from the IdP are accepted '
                     || 'is uncertain.' END,
                 'certificate_dates_unparsed', c.cert_dates_missing,
+                'federated_token_validation', (SELECT jsonb_build_object('root_domains', t.root_domains,
+                                                                         'domain_names', t.domain_names)
+                                                 FROM ftv t),
                 'uri_note', 'Issuer and sign-in URIs are not compared with on-premises AD FS; '
                     || 'confirm they point at your own federation service.'
             ) AS detail

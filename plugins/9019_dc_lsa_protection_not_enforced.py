@@ -31,13 +31,20 @@ never as a claim about the DC's actual state. If a GPO applying to the DC
 could not be read from SYSVOL, the "not configured" conclusion is flagged as
 uncertain and the unreadable GPOs are listed in detail. One row per DC
 (object_guid = the DC's computer object); read-only DCs are included.
+
+[v1.1] Leaves out the Microsoft Entra Kerberos server object
+(CN=AzureADKerberos in the Domain Controllers OU, linked to the krbtgt-
+AzureAD account), which Microsoft documents as functioning like a read-only
+domain controller but which is not a server: it has no host, logons, Group
+Policy or SYSVOL. Plugin 1006 reports the age of its key. Requires schema
+v46.
 """
 
 PLUGIN = {   'plugin_id': 9019,
     'category': 'Organizational Units',
     'name': 'LSA Protection Not Enforced on Domain Controllers',
-    'version': '1.0',
-    'revision_date': '2026-10-04',
+    'version': '1.1',
+    'revision_date': '2026-10-22',
     'control_id': 'GPO-9019',
     'framework_tags': [   'NIST-800-53-IA-5(1)',
                           'NIST-800-53-SC-28',
@@ -79,6 +86,7 @@ PLUGIN = {   'plugin_id': 9019,
             JOIN directory_object o
               ON o.object_guid = c.object_guid AND o.client_id = c.client_id AND NOT o.is_deleted
             WHERE c.client_id = %(client_id)s AND c.valid_to IS NULL AND c.is_domain_controller
+              AND NOT is_entra_kerberos_server(c.sam_account_name, c.krbtgt_link)
               AND EXISTS (SELECT 1 FROM ad_gpo_sysvol s
                           WHERE s.client_id = %(client_id)s AND s.read_status = 'ok')
         ),
