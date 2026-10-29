@@ -33,6 +33,7 @@ USB drive, secure file transfer, etc.):
 - `entra_graph_collector.py`
 - `adaudit.py`
 - `adaudit_push.py` (used by `adaudit.py --push`)
+- `run_lock.py` (used by all three scripts: one run at a time)
 - `requirements.txt`
 - `schema_init.sql`
 - `RELEASE_NOTES.md`
@@ -49,6 +50,7 @@ adprofiler/
     entra_graph_collector.py
     adaudit.py
     adaudit_push.py
+    run_lock.py
     requirements.txt
     schema_init.sql
     plugins/
@@ -397,6 +399,16 @@ troubleshooting if anything looked wrong during collection.
 - **`ModuleNotFoundError` when running any script**: the venv likely
   isn't active. Run `source venv/bin/activate` from inside
   `~/adprofiler` and try again.
+- **A script stops with "Cannot start ...: another adprofiler.py,
+  entra_graph_collector.py or adaudit.py run is in progress" (exit status
+  75)**: the three scripts run one at a time against a database, and
+  another run holds the run lock. Nothing was done; run it again once the
+  other run finishes. The message names the holder (script, `pid=`,
+  `host=`, start time and PostgreSQL session). PostgreSQL releases the
+  lock as soon as that process exits, so a lock never outlives its run.
+  If the run is hung, stop it on that host with `kill -INT <pid>`; only if
+  the process no longer exists, end its leftover database session with
+  the `pg_terminate_backend(...)` command the message prints.
 - **A script can't connect to PostgreSQL**: double-check
   `--pg-host`/`--pg-port` are reachable from this machine (e.g.
   `nc -zv <host> <port>`), and that the database/user actually exist

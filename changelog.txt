@@ -9,6 +9,21 @@ the script's own docstring now keeps a one-line summary per entry, this
 file keeps the complete detail (root causes, what was verified, why a
 decision was made a particular way) for anyone who wants it.
 
+    1.0.2 - One run at a time. adprofiler.py, entra_graph_collector.py and
+            adaudit.py now share a PostgreSQL advisory lock (new module
+            run_lock.py), taken right after the PostgreSQL settings are read
+            and held until the process exits. Before, nothing stopped two
+            runs overlapping: a second adprofiler.py run waited on the first
+            one's row locks and then applied changes worked out from data
+            that was no longer current, which could leave duplicate current
+            versions of objects and edges. If another run holds the lock the
+            script logs who holds it (script, process ID, host, start time,
+            PostgreSQL session) and how to clear it by hand, and exits with
+            status 75 without doing anything. PostgreSQL releases the lock
+            whenever the holding process exits, crashes or is killed. A
+            PostgreSQL connection failure is now reported before the domain
+            controller is contacted. No schema change.
+
     1.0.1 - A run without --sysvol says so: "Group Policy settings not
             collected this run (no --sysvol): adaudit.py will report the Group
             Policy settings checks as NOT ASSESSED." adaudit.py 1.0.1 only

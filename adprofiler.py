@@ -4,7 +4,7 @@
  adprofiler.py -- Active Directory Security & Compliance Profiler (Collector)
 ================================================================================
 
-VERSION: 1.0.1
+VERSION: 1.0.2
 
 PURPOSE:
     Connects to an on-premise Active Directory Domain Controller via LDAP,
@@ -57,6 +57,11 @@ INPUT FORMAT (command line):
         --pg-password    PostgreSQL password. If omitted, you will be
                          prompted securely.
         --version        Print version and exit.
+
+    Exit status: 0 success; 1 failed (nothing committed; the reason is
+    logged); 75 not started because another adprofiler.py,
+    entra_graph_collector.py or adaudit.py run holds the run lock
+    (run_lock.py); 130 interrupted (Ctrl-C).
 
     Example:
         python3 adprofiler.py --dc-host dc01.lab.local \\
@@ -153,6 +158,8 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
+import run_lock  # [v1.0.2] one run at a time, see run_lock.py
+
 try:
     # [v0.3.0] Security descriptor (ACL) parsing. Same library BloodHound.py
     # and Certipy use for this exact task -- binary nTSecurityDescriptor
@@ -170,7 +177,7 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 
 # [v0.7.7] The oldest collector version whose stored derived fields
 # (parsed / typed columns computed from raw attributes) are current. A
@@ -5261,6 +5268,20 @@ def main():
         PG_PASSWORD = args.pg_password
     else:
         PG_PASSWORD = getpass.getpass(f"PostgreSQL password for {args.pg_user}@{args.pg_host}: ")
+
+    # [v1.0.2] Never alongside another adprofiler.py, entra_graph_collector.py
+    # or adaudit.py run against this database (run_lock.py). Taken before
+    # anything is read; held until this process exits.
+    try:
+        run_lock.acquire("adprofiler.py", PG_HOST, PG_PORT, PG_DBNAME, PG_USER, PG_PASSWORD)
+    except run_lock.RunLocked as exc:
+        log_error(str(exc))
+        sys.exit(run_lock.EXIT_LOCKED)
+    except psycopg2.Error as exc:
+        log_error(f"Could not connect to PostgreSQL at {PG_HOST}:{PG_PORT}/{PG_DBNAME}: "
+                  f"{str(exc).strip()}")
+        sys.exit(1)
+    log_info("Run lock acquired (no other collector or adaudit.py run in progress).")
 
     if args.password:
         log_warn("Password supplied via --password is visible in shell history "

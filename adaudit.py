@@ -2,7 +2,7 @@
 """
 adaudit.py -- AD Security & Compliance Plugin Runner
 ======================================================
-VERSION: 1.0.1
+VERSION: 1.0.2
 
 Companion to adprofiler.py. Where adprofiler.py collects AD data,
 adaudit.py analyzes it: discovers every plugin file in plugins/, runs each
@@ -25,6 +25,13 @@ DESIGN:
       as: (status, object_guid, stig_severity, stig_reference,
       tool_severity, tool_reference, fd_severity, summary, detail).
       Zero rows returned = clean pass, nothing to report.
+    - [v1.0.2] One run at a time: every mode that uses the database takes
+      the run lock shared with adprofiler.py and entra_graph_collector.py
+      (run_lock.py) right after the PostgreSQL settings are read, so an
+      evaluation never sees a collection half-committed and two
+      evaluations never overlap. If another run holds it, logs who holds
+      it and how to clear it, and exits with status 75 (EXIT_LOCKED)
+      without doing anything.
     - [v1.0.1] SYSVOL plugins (Group Policy settings, preferences and
       scripts) are NOT ASSESSED unless the evaluated sync_run itself read
       SYSVOL (sysvol_collection_status for that run: 'ok', or 'partial'
@@ -252,6 +259,9 @@ EXIT STATUS ([v0.7.3]; always 0 before):
         are sent, oldest first, on the next push. A new installation
         waiting for approval (403) is not a failure: exit status is
         unaffected.
+    75  [v1.0.2] Not started: another adprofiler.py, entra_graph_collector.py
+        or adaudit.py run holds the run lock (run_lock.py). Nothing was
+        done; the logged message names the holder and how to clear it.
     130 Interrupted (Ctrl-C).
     Precedence when several apply: 3, then 5, then 4 -- an incomplete run
     can't vouch for its findings either way.
@@ -271,8 +281,9 @@ import psycopg2
 import psycopg2.extras
 
 import adaudit_push
+import run_lock  # [v1.0.2] one run at a time, see run_lock.py
 
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 
 # [test-candidate-branch] Always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
@@ -295,6 +306,7 @@ EXIT_FATAL = 1
 EXIT_INCOMPLETE = 3
 EXIT_FINDINGS = 4
 EXIT_PUSH_FAILED = 5
+EXIT_LOCKED = run_lock.EXIT_LOCKED  # 75
 EXIT_INTERRUPTED = 130
 
 REQUIRED_PLUGIN_KEYS = {"plugin_id", "category", "name", "base_severity", "query",
@@ -1760,6 +1772,15 @@ def main():
         PG_PASSWORD = args.pg_password
     else:
         PG_PASSWORD = getpass.getpass(f"PostgreSQL password for {args.pg_user}@{args.pg_host}: ")
+
+    # [v1.0.2] Never alongside adprofiler.py, entra_graph_collector.py or
+    # another adaudit.py run against this database (run_lock.py). Held until
+    # this process exits. A connection failure is fatal (cli()).
+    try:
+        run_lock.acquire("adaudit.py", PG_HOST, PG_PORT, PG_DBNAME, PG_USER, PG_PASSWORD)
+    except run_lock.RunLocked as exc:
+        log(f"[ERROR] {exc}")
+        return EXIT_LOCKED
 
     push_cfg = resolve_push_config(args, parser)
 
