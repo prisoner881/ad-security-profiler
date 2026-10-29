@@ -2,9 +2,20 @@
 """
 entra_graph_collector.py -- Microsoft Entra ID / Graph API Email Collector
 
-VERSION: 1.0.1
+VERSION: 1.0.2
 
 CHANGELOG:
+    1.0.2 - An optional source still throttled (HTTP 429), failing with a
+            transient 5xx or hitting network errors after its retries is
+            recorded as not read (entra_collection_status, e.g. "HTTP 429
+            (throttled by Microsoft): still failing after 6 attempts") and
+            the run carries on, as for a 400/403/404; adaudit.py shows the
+            plugins that need it as NOT ASSESSED. Before, it aborted the
+            whole run and left the Entra tables partly refreshed (seen with
+            sp_sign_in_activity, beta reports/servicePrincipalSignInActivities).
+            The required steps (users, directory roles, security posture,
+            applications, Graph permission grants) still abort.
+
     1.0.1 - One run at a time: takes the run lock shared with adprofiler.py
             and adaudit.py (run_lock.py) right after the PostgreSQL settings
             are read, before the Graph token is requested. If another run
@@ -278,7 +289,7 @@ PG_DBNAME = "adprofiler"
 PG_USER = None
 PG_PASSWORD = None
 
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 
 # [v0.5.0] Retry policy shared by every Graph/token request (see
 # _send_with_retry()). 429 and transient 5xx responses, plus network
@@ -665,6 +676,17 @@ class CollectorAbort(Exception):
     pass
 
 
+class GraphRetriesExhausted(CollectorAbort):
+    """[v1.0.2] A Graph request still throttled (429), failing with a
+    transient 5xx or hitting network errors after GRAPH_MAX_ATTEMPTS.
+    Fatal in the required collection steps (main() catches CollectorAbort);
+    an optional source records .reason as its status and the run carries
+    on (run_optional_sources())."""
+    def __init__(self, message, reason):
+        super().__init__(message)
+        self.reason = reason
+
+
 # ============================================================================
 # Microsoft Graph
 # ============================================================================
@@ -726,10 +748,14 @@ def _send_with_retry(send, what, on_unauthorized=None):
                 if resp is not None and resp.status_code == 429 else
                 " Re-run once Microsoft Graph / network connectivity is healthy."
             )
-            raise CollectorAbort(
+            raise GraphRetriesExhausted(
                 f"{what}: still failing after {GRAPH_MAX_ATTEMPTS} attempts "
                 f"(last error: {problem}). Aborting rather than recording incomplete "
-                f"data.{throttle_hint}"
+                f"data.{throttle_hint}",
+                reason=(f"{problem}"
+                        + (" (throttled by Microsoft)" if resp is not None and resp.status_code == 429
+                           else "")
+                        + f": still failing after {GRAPH_MAX_ATTEMPTS} attempts"),
             )
         delay = _retry_delay(resp, attempt)
         log_warn(f"  {what} failed ({problem}); retrying in {delay:.0f}s "
@@ -850,7 +876,9 @@ def graph_get_optional(graph, url, what):
     """[v0.6.0] Like graph.get(), but a 400/403/404 (feature not licensed,
     permission not granted, object gone) returns (None, "<reason>") instead
     of aborting the run. Throttling and transient errors are still retried
-    by _send_with_retry(), and still abort once retries run out."""
+    by _send_with_retry(); once retries run out GraphRetriesExhausted is
+    raised, which aborts a required step and is recorded as the status of
+    an optional source (run_optional_sources(), v1.0.2)."""
     resp = _send_with_retry(
         lambda: requests.get(url, headers={"Authorization": f"Bearer {graph._token}"}, timeout=60),
         f"Graph request for {what}",
@@ -982,10 +1010,12 @@ def graph_batch_get_all(graph, requests_list, what):
             pending = retry
             if pending:
                 if attempt >= GRAPH_MAX_ATTEMPTS:
-                    raise CollectorAbort(
+                    raise GraphRetriesExhausted(
                         f"Graph request for {what}: {len(pending)} JSON batch sub-request(s) still "
                         f"throttled/failing after {GRAPH_MAX_ATTEMPTS} attempts. Aborting rather "
-                        f"than recording incomplete data. Re-run later.")
+                        f"than recording incomplete data. Re-run later.",
+                        reason=(f"{len(pending)} JSON batch sub-request(s) still throttled/failing "
+                                f"after {GRAPH_MAX_ATTEMPTS} attempts"))
                 if not delay:
                     delay = _retry_delay(None, attempt)
                 log_warn(f"  {len(pending)} JSON batch sub-request(s) for {what} throttled or "
@@ -3159,10 +3189,17 @@ def record_source(pg_conn, client_id, source, status, data=None):
 
 def run_optional_sources(graph, pg_conn, client_id, ctx, completed_steps):
     """[v0.8.0] Runs every OPTIONAL_SOURCES entry; fills ctx["statuses"]
-    and ctx["data"] (used by later sources and by change history)."""
+    and ctx["data"] (used by later sources and by change history).
+
+    [v1.0.2] A source whose Graph reads are still throttled or failing after
+    their retries (GraphRetriesExhausted) is recorded as not read, like a
+    400/403/404, instead of aborting the run."""
     for source in OPTIONAL_SOURCES:
         log_info(f"Source {source}...")
-        data, status = globals()[f"collect_{source}"](graph, ctx)
+        try:
+            data, status = globals()[f"collect_{source}"](graph, ctx)
+        except GraphRetriesExhausted as exc:
+            data, status = None, exc.reason
         status, written = record_source(pg_conn, client_id, source, status, data)
         ctx["statuses"][source] = status
         ctx["data"][source] = data if status == "ok" else None
