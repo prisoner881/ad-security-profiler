@@ -240,8 +240,11 @@ Group Policy Preferences passwords (MS14-025).
   like an attacker's reconnaissance, so endpoint or identity monitoring
   tools may raise an alert. Tell the security team before the run, or
   have them allowlist this machine.
-- If SMB is unreachable the run still succeeds; the SYSVOL-based checks
-  are then shown as NOT ASSESSED in the report.
+- If SMB is unreachable, or a run is made without `--sysvol`, the run
+  still succeeds; the SYSVOL-based checks are then shown as NOT ASSESSED
+  for that run (their open findings stay open). Group Policy data from an
+  earlier `--sysvol` run is kept in the database but not evaluated, so
+  for current Group Policy results use `--sysvol` on every run.
 
 **Step 2 -- collect Entra ID data (skip this step entirely if there's
 no Entra ID tenant to collect from):**

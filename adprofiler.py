@@ -4,7 +4,7 @@
  adprofiler.py -- Active Directory Security & Compliance Profiler (Collector)
 ================================================================================
 
-VERSION: 1.0.0
+VERSION: 1.0.1
 
 PURPOSE:
     Connects to an on-premise Active Directory Domain Controller via LDAP,
@@ -170,7 +170,7 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 # [v0.7.7] The oldest collector version whose stored derived fields
 # (parsed / typed columns computed from raw attributes) are current. A
@@ -5894,6 +5894,11 @@ def main():
             if args.sysvol:
                 collect_sysvol_step(args, password, cur, client_id, run_id, run_timestamp,
                                     base_dn, gpo_entries, stats)
+            else:
+                # [v1.0.1] adaudit.py 1.0.1 only uses SYSVOL data read by the
+                # run it evaluates.
+                log_info("Group Policy settings not collected this run (no --sysvol): "
+                         "adaudit.py will report the Group Policy settings checks as NOT ASSESSED.")
 
             try:
                 pso_container = f"CN=Password Settings Container,CN=System,{base_dn}"

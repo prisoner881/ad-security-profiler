@@ -9,6 +9,14 @@ the script's own docstring now keeps a one-line summary per entry, this
 file keeps the complete detail (root causes, what was verified, why a
 decision was made a particular way) for anyone who wants it.
 
+    1.0.1 - A run without --sysvol says so: "Group Policy settings not
+            collected this run (no --sysvol): adaudit.py will report the Group
+            Policy settings checks as NOT ASSESSED." adaudit.py 1.0.1 only
+            uses SYSVOL data read by the run it evaluates; before, a run
+            without --sysvol (or whose SMB read failed) was evaluated against
+            the Group Policy data of the last --sysvol run. No collection or
+            schema change.
+
     1.0.0 - Release 1.0, together with entra_graph_collector.py 1.0.0,
             adaudit.py 1.0.0 and sysvol_collector.py 1.1 on schema v46 (see
             RELEASE_NOTES.md). No collection change from 0.9.1 and no
