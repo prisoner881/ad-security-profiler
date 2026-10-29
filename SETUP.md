@@ -153,8 +153,9 @@ PostgreSQL password unless it's already set via `PGPASSWORD` or a
   (password protection / group) settings. Each optional permission
   below unlocks more checks; grant only the ones you want, all as
   **Application** permissions with admin consent. When a permission or
-  its licence is missing, the collector records why for that data
-  source (table `entra_collection_status`) and carries on, and
+  its licence is missing, or Microsoft is still throttling the source
+  (HTTP 429) after the collector's retries, the collector records why for
+  that data source (table `entra_collection_status`) and carries on, and
   `adaudit.py` shows the plugins that need it as **NOT ASSESSED**
   rather than passing them.
 
