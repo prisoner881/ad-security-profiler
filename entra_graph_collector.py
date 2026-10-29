@@ -2,9 +2,16 @@
 """
 entra_graph_collector.py -- Microsoft Entra ID / Graph API Email Collector
 
-VERSION: 1.0.0
+VERSION: 1.0.1
 
 CHANGELOG:
+    1.0.1 - One run at a time: takes the run lock shared with adprofiler.py
+            and adaudit.py (run_lock.py) right after the PostgreSQL settings
+            are read, before the Graph token is requested. If another run
+            holds it, logs who holds it and how to clear it, and exits with
+            status 75 without doing anything. Exit status: 0 success, 1
+            failed, 75 not started (run lock held), 130 interrupted.
+
     1.0.0 - Release 1.0 (adprofiler.py 1.0.0, adaudit.py 1.0.0, schema
             v46; see RELEASE_NOTES.md). No change in behavior from 0.9.1.
 
@@ -259,6 +266,8 @@ import requests
 import psycopg2
 import psycopg2.extras
 
+import run_lock  # [v1.0.1] one run at a time, see run_lock.py
+
 # [test-candidate-branch] Always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
 # connect_postgres() is ever called -- placeholders, not a real
@@ -269,7 +278,7 @@ PG_DBNAME = "adprofiler"
 PG_USER = None
 PG_PASSWORD = None
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 # [v0.5.0] Retry policy shared by every Graph/token request (see
 # _send_with_retry()). 429 and transient 5xx responses, plus network
@@ -3632,6 +3641,20 @@ def main():
         PG_PASSWORD = args.pg_password
     else:
         PG_PASSWORD = getpass.getpass(f"PostgreSQL password for {args.pg_user}@{args.pg_host}: ")
+
+    # [v1.0.1] Never alongside another adprofiler.py, entra_graph_collector.py
+    # or adaudit.py run against this database (run_lock.py). Taken before
+    # anything is read; held until this process exits.
+    try:
+        run_lock.acquire("entra_graph_collector.py", PG_HOST, PG_PORT, PG_DBNAME, PG_USER, PG_PASSWORD)
+    except run_lock.RunLocked as exc:
+        log_error(str(exc))
+        sys.exit(run_lock.EXIT_LOCKED)
+    except psycopg2.Error as exc:
+        log_error(f"Could not connect to PostgreSQL at {PG_HOST}:{PG_PORT}/{PG_DBNAME}: "
+                  f"{str(exc).strip()}")
+        sys.exit(1)
+    log_info("Run lock acquired (no other collector or adaudit.py run in progress).")
 
     if args.app_secret:
         log_warn("App secret supplied via --app-secret is visible in shell history "
