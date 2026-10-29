@@ -2,7 +2,7 @@
 """
 adaudit.py -- AD Security & Compliance Plugin Runner
 ======================================================
-VERSION: 1.0.0
+VERSION: 1.0.1
 
 Companion to adprofiler.py. Where adprofiler.py collects AD data,
 adaudit.py analyzes it: discovers every plugin file in plugins/, runs each
@@ -25,6 +25,17 @@ DESIGN:
       as: (status, object_guid, stig_severity, stig_reference,
       tool_severity, tool_reference, fd_severity, summary, detail).
       Zero rows returned = clean pass, nothing to report.
+    - [v1.0.1] SYSVOL plugins (Group Policy settings, preferences and
+      scripts) are NOT ASSESSED unless the evaluated sync_run itself read
+      SYSVOL (sysvol_collection_status for that run: 'ok', or 'partial'
+      with at least one GPO read). Before, they were NOT ASSESSED only when
+      SYSVOL had never been read for the client: a run made without
+      --sysvol, or whose SMB read failed, evaluated the Group Policy data of
+      the last --sysvol run as if it were current. Their queries are not
+      run then, so stale data cannot raise or close findings; open findings
+      stay open, as for missing Entra data. A plugin that assesses without
+      SYSVOL and checks its freshness itself sets PLUGIN["sysvol_optional"]
+      = True (4009 v1.5) and is exempt.
     - [v1.0.0] Release 1.0 (adprofiler.py 1.0.0, entra_graph_collector.py
       1.0.0, sysvol_collector.py 1.1, schema v46; see RELEASE_NOTES.md).
       No change in behavior from 0.10.6: same plugins, same findings.
@@ -261,7 +272,7 @@ import psycopg2.extras
 
 import adaudit_push
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 # [test-candidate-branch] Always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
@@ -507,6 +518,12 @@ def discover_plugins(plugins_dir):
                        + ", ".join(sorted(ENTRA_DATA_SOURCES)), plugin)
             continue
 
+        # [v1.0.1] True: the plugin assesses without SYSVOL and checks itself
+        # whether SYSVOL data is current (exempt from SYSVOL NOT ASSESSED).
+        if not isinstance(plugin.get("sysvol_optional", False), bool):
+            fail(path, "sysvol_optional must be True or False", plugin)
+            continue
+
         pid = plugin["plugin_id"]
         if pid in seen_ids:
             fail(path, f"plugin_id {pid} already used by {seen_ids[pid]}", plugin)
@@ -617,19 +634,31 @@ def connect_postgres():
 REQUIRED_SCHEMA_VERSION = 46
 
 # [v0.9.0] Data sources a client may not have collected: (table/view names a
-# plugin query mentions, probe returning TRUE when the client has the data).
-# A plugin that reads one and passes while the data is absent is shown as
-# NOT ASSESSED on the compliance sheets.
+# plugin query mentions, probe returning TRUE when the client has the data,
+# skip_query). A plugin that reads one and passes while the data is absent is
+# shown as NOT ASSESSED on the compliance sheets. [v1.0.1] Probes get %(c)s
+# (client_id) and %(r)s (the evaluated sync_run). skip_query: when the data
+# is absent the plugin's query is not run at all -- for data that is kept
+# rather than removed when it is not collected again (SYSVOL), so an old
+# copy is never evaluated as current.
 OPTIONAL_DATA_SOURCES = [
     # [v0.10.1] A regex for table references, not the bare substring "entra_":
     # an AD-only plugin whose detail key merely contains "entra_" (11016's
     # all_entra_whfb) was shown as NOT ASSESSED on clients without Entra data.
     ((re.compile(r"\b(?:FROM|JOIN)\s+(?:ad_intel\.)?v?_?entra_\w+", re.IGNORECASE),),
      "SELECT EXISTS (SELECT 1 FROM entra_security_posture WHERE client_id = %(c)s) "
-     "    OR EXISTS (SELECT 1 FROM entra_user WHERE client_id = %(c)s);"),
+     "    OR EXISTS (SELECT 1 FROM entra_user WHERE client_id = %(c)s);",
+     False),
     (("gpo_setting_edge", "gpo_preference_item_edge", "sysvol_script_edge", "ad_gpo_sysvol",
       "v_dc_effective_gpo_setting"),
-     "SELECT EXISTS (SELECT 1 FROM ad_gpo_sysvol WHERE client_id = %(c)s AND read_status = 'ok');"),
+     # [v1.0.1] Read by the evaluated run itself, not by any earlier one:
+     # without --sysvol (or when the share could not be read) the last
+     # collected Group Policy data is kept, and would otherwise be
+     # evaluated as current.
+     "SELECT EXISTS (SELECT 1 FROM sysvol_collection_status "
+     "               WHERE client_id = %(c)s AND run_id = %(r)s "
+     "                 AND (status = 'ok' OR (status = 'partial' AND gpos_read > 0)));",
+     True),
 ]
 
 # [v0.9.2] Optional Entra data sources (entra_graph_collector.py 0.8.0,
@@ -701,28 +730,38 @@ def _marker_matches(marker, query):
     return bool(marker.search(query)) if hasattr(marker, "search") else marker in query
 
 
-def compute_not_assessed_ids(conn, client_id, finding_plugins):
+def compute_not_assessed_ids(conn, client_id, run_id, finding_plugins):
     """plugin_ids that cannot assess anything for this client because their
     source data was not collected: [v0.8.0] Entra plugins with no Entra data
     at all, [v0.9.0] SYSVOL plugins when SYSVOL was never collected
     (OPTIONAL_DATA_SOURCES), [v0.9.2] plugins whose requires_sources include
     an Entra source not read successfully (missing optional permission or
     licence). A passing result from one of these is NOT ASSESSED on the
-    compliance sheets, and zero rows from one of these closes nothing."""
+    compliance sheets, and zero rows from one of these closes nothing.
+
+    Returns (not_assessed_ids, skip_ids): [v1.0.1] skip_ids is the subset
+    whose query must not run at all (absent skip_query data, e.g. SYSVOL not
+    read by run_id). A plugin with PLUGIN["sysvol_optional"] assesses
+    without SYSVOL and is in neither set because of it."""
     not_assessed_ids = set()
+    skip_ids = set()
     with conn.cursor() as cur:
-        for markers, probe in OPTIONAL_DATA_SOURCES:
-            cur.execute(probe, {"c": client_id})
+        for markers, probe, skip_query in OPTIONAL_DATA_SOURCES:
+            cur.execute(probe, {"c": client_id, "r": run_id})
             if not cur.fetchone()[0]:
-                not_assessed_ids |= {p["plugin_id"] for p in finding_plugins
-                                     if any(_marker_matches(m, p["query"]) for m in markers)}
+                ids = {p["plugin_id"] for p in finding_plugins
+                       if any(_marker_matches(m, p["query"]) for m in markers)
+                       and not (skip_query and p.get("sysvol_optional"))}
+                not_assessed_ids |= ids
+                if skip_query:
+                    skip_ids |= ids
         cur.execute("SELECT source FROM entra_collection_status "
                     "WHERE client_id = %(c)s AND status = 'ok';", {"c": client_id})
         ok_sources = {r[0] for r in cur.fetchall()}
         not_assessed_ids |= {p["plugin_id"] for p in finding_plugins
                              if set(p.get("requires_sources") or []) - ok_sources}
     conn.commit()
-    return not_assessed_ids
+    return not_assessed_ids, skip_ids
 
 
 def check_schema_version(conn):
@@ -1810,7 +1849,11 @@ def main():
         # [v0.9.2] Worked out before the plugins run (it depends only on which
         # data was collected), so a plugin that cannot assess anything this run
         # leaves its open findings open instead of closing them as remediated.
-        not_assessed_ids = compute_not_assessed_ids(conn, client_id, finding_plugins)
+        not_assessed_ids, skip_ids = compute_not_assessed_ids(conn, client_id, run_id, finding_plugins)
+        if skip_ids:
+            log(f"SYSVOL (Group Policy content) was not read by this collection run "
+                f"(adprofiler.py --sysvol): {len(skip_ids)} Group Policy check(s) are NOT ASSESSED "
+                f"and were not run against older Group Policy data.")
         not_assessed_kept = 0
         plugin_errors = {}
 
@@ -1823,7 +1866,10 @@ def main():
             conn.commit()
             executed_control_test_ids.add(control_test_id)
 
-            rows = run_plugin_query(conn, plugin, client_id, run_id, errors=plugin_errors)
+            # [v1.0.1] Not run when its source data is absent and kept from an
+            # earlier run (skip_ids): zero rows, so it is NOT ASSESSED below.
+            rows = ([] if plugin["plugin_id"] in skip_ids
+                    else run_plugin_query(conn, plugin, client_id, run_id, errors=plugin_errors))
             if rows is None:
                 plugin_summaries.append({"plugin_id": plugin["plugin_id"], "category": plugin["category"],
                                           "name": plugin["name"], "version": plugin["version"], "rollup": "error",

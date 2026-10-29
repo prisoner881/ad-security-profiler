@@ -35,14 +35,21 @@ plugin 9015 reads it) decides the finding:
 Without SYSVOL the v1.3 behaviour and note are kept. detail adds
 right_assignment ('not_collected', 'not_configured', 'broad',
 'restricted') and add_workstations_principals.
+
+[v1.5] SYSVOL counts as collected only when the evaluated run read it
+(sysvol_collection_status for %(run_id)s: 'ok', or 'partial' with at least
+one GPO read), not when any earlier run did: a run without --sysvol keeps
+the old Group Policy data, which is no longer used here. sysvol_optional:
+this plugin assesses without SYSVOL, so adaudit.py 1.0.1 does not show it
+as NOT ASSESSED when SYSVOL was not read.
 """
 
 PLUGIN = {
     "plugin_id": 4009,
     "category": "Domain",
     "name": "Machine Account Quota Allows Unprivileged Users to Join Computers to the Domain",
-    "version": "1.4",
-    "revision_date": "2026-10-07",
+    "version": "1.5",
+    "revision_date": "2026-10-29",
     "remediation": (
         "Set ms-DS-MachineAccountQuota to 0 "
         "(`Set-ADDomain -Identity <domain> -Replace "
@@ -101,10 +108,14 @@ PLUGIN = {
         "on a domain that has already removed it."
     ),
     "base_severity": "medium",
+    "sysvol_optional": True,
     "query": """
         WITH sysvol AS (
-            SELECT EXISTS (SELECT 1 FROM ad_gpo_sysvol s
-                           WHERE s.client_id = %(client_id)s AND s.read_status = 'ok') AS collected
+            -- [v1.5] read by this run (an older copy is kept without --sysvol)
+            SELECT EXISTS (SELECT 1 FROM sysvol_collection_status s
+                           WHERE s.client_id = %(client_id)s AND s.run_id = %(run_id)s
+                             AND (s.status = 'ok' OR (s.status = 'partial' AND s.gpos_read > 0)))
+                   AS collected
         ),
         -- [v1.4] effective "Add workstations to domain" per DC
         eff AS (
@@ -189,7 +200,7 @@ PLUGIN = {
                         'Exploitable only by principals granted SeMachineAccountPrivilege '
                         '("Add workstations to domain"; Authenticated Users by default in the '
                         'Default Domain Controllers Policy). Not verified: SYSVOL was not collected '
-                        '(adprofiler.py --sysvol).'
+                        'by this run (adprofiler.py --sysvol).'
                     WHEN 'not_configured' THEN
                         'No GPO applying to one or more domain controllers sets "Add workstations to '
                         'domain", so the Windows default (Authenticated Users) applies there unless it '
