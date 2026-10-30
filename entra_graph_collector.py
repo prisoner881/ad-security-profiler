@@ -2,9 +2,25 @@
 """
 entra_graph_collector.py -- Microsoft Entra ID / Graph API Email Collector
 
-VERSION: 1.0.2
+VERSION: 1.0.3
 
 CHANGELOG:
+    1.0.3 - Sensitive groups: a new change-history entity, sensitive_group
+            (one per sensitive group, with its reasons), lets plugins 11027
+            and 11029 report a new member or owner only of a group that was
+            already sensitive in the previous collection; when a group
+            became sensitive, all its existing members and owners were
+            reported as added. group_member history no longer stores the
+            group's reasons (a change of reasons versioned every member;
+            expect one "changed" version per member on the first 1.0.3
+            run, which no plugin reports). If the app role assignments of a
+            privileged service principal can't be read, the groups that
+            were sensitive through an app role in the previous collection
+            stay sensitive instead of being dropped. A role assignment not
+            seen in the previous successful role read (removed, then granted
+            again) gets a new first_seen_at in entra_role_assignment_history,
+            so plugin 11020 reports the re-grant; it kept its original one.
+
     1.0.2 - An optional source still throttled (HTTP 429), failing with a
             transient 5xx or hitting network errors after its retries is
             recorded as not read (entra_collection_status, e.g. "HTTP 429
@@ -289,7 +305,7 @@ PG_DBNAME = "adprofiler"
 PG_USER = None
 PG_PASSWORD = None
 
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 
 # [v0.5.0] Retry policy shared by every Graph/token request (see
 # _send_with_retry()). 429 and transient 5xx responses, plus network
@@ -1707,7 +1723,11 @@ def sync_role_assignment_history(pg_conn, client_id, role_members, collected_at)
     "first seen recently" means a newly granted assignment (plugin 11020).
     Only called after role membership was read and stored successfully: an
     aborted read never reaches here, so it can't make every assignment look
-    new (or old) on the next run."""
+    new (or old) on the next run.
+    [v1.0.3] An assignment that was not seen in the previous successful
+    read (removed, then granted again) gets first_seen_at = this run, so a
+    re-grant is reported as new; it kept its original first_seen_at, so
+    removing and re-granting a role was never reported."""
     distinct = {}
     for rm in role_members:
         role, member = rm["role"], rm["member"]
@@ -1721,6 +1741,10 @@ def sync_role_assignment_history(pg_conn, client_id, role_members, collected_at)
                              member.get("@odata.type"), key[2], collected_at, collected_at)
     with pg_conn.cursor() as cur:
         cur.execute("SET search_path TO ad_intel, public;")
+        # the previous successful role read
+        cur.execute("SELECT max(last_seen_at) FROM entra_role_assignment_history "
+                    "WHERE client_id = %s;", (client_id,))
+        previous_read = cur.fetchone()[0]
         if distinct:
             psycopg2.extras.execute_values(
                 cur,
@@ -1731,6 +1755,10 @@ def sync_role_assignment_history(pg_conn, client_id, role_members, collected_at)
                      first_seen_at, last_seen_at)
                 VALUES %s
                 ON CONFLICT (client_id, role_template_id, member_id, assignment_type) DO UPDATE SET
+                    first_seen_at = CASE WHEN entra_role_assignment_history.last_seen_at
+                                              < """ + cur.mogrify("%s::timestamptz", (previous_read,)).decode() + """
+                                         THEN EXCLUDED.first_seen_at
+                                         ELSE entra_role_assignment_history.first_seen_at END,
                     last_seen_at = EXCLUDED.last_seen_at,
                     role_display_name = COALESCE(EXCLUDED.role_display_name,
                                                  entra_role_assignment_history.role_display_name),
@@ -2484,7 +2512,11 @@ def collect_groups(graph, ctx):
     is not 'disabled'); app_role (assigned an app role on a service
     principal that holds a PRIVILEGED_ROLE_TEMPLATE_IDS role or a
     DANGEROUS_GRAPH_PERMISSIONS grant). A single group's 403/404 is skipped
-    with a warning; if every sensitive group fails, the source fails."""
+    with a warning; if every sensitive group fails, the source fails.
+    [v1.0.3] If the app role assignments of any such service principal
+    can't be read, every group that had the app_role reason in the
+    previous collection keeps it (it used to be dropped, marking the group
+    not sensitive and closing its member and owner history)."""
     groups, status = graph_get_all_optional(
         graph, f"{GRAPH_GROUPS_URL}?$select={GRAPH_GROUP_SELECT}&$top=999", "groups")
     if groups is None:
@@ -2523,14 +2555,21 @@ def collect_groups(graph, ctx):
         assigned = graph_batch_get_all(
             graph, [(sp, f"/servicePrincipals/{sp}/appRoleAssignedTo") for sp in sorted(privileged_sps)],
             "app role assignments on privileged service principals")
+        unread = 0
         for sp, (items, st) in assigned.items():
             if items is None:
-                log_warn(f"  App role assignments on service principal {sp} could not be read ({st}); "
-                         f"groups assigned to it may not be marked sensitive.")
+                log_warn(f"  App role assignments on service principal {sp} could not be read ({st}).")
+                unread += 1
                 continue
             for a in items:
                 if a.get("principalType") == "Group":
                     add(a.get("principalId"), "app_role")
+        if unread:
+            previous = ctx.get("previous_app_role_groups") or set()
+            for gid in previous:
+                add(gid, "app_role")
+            log_warn(f"  {unread} service principal(s) unreadable: the {len(previous)} group(s) "
+                     f"sensitive through an app role in the previous collection are kept sensitive.")
 
     rows = []
     for g in groups:
@@ -2585,6 +2624,15 @@ def collect_groups(graph, ctx):
              f"{len(members)} transitive member row(s) of sensitive groups")
     return {"groups": rows, "owners": _dedupe(owners, ["group_id", "owner_id"]),
             "members": _dedupe(members, ["group_id", "member_id"]), "failed": failed}, "ok"
+
+
+def previous_app_role_groups(pg_conn, client_id):
+    """[v1.0.3] Lower-case ids of the groups sensitive through an app role
+    in the previous collection (collect_groups())."""
+    with pg_conn.cursor() as cur:
+        cur.execute("SELECT entra_object_id::text FROM entra_group "
+                    "WHERE client_id = %s AND 'app_role' = ANY(sensitive_reasons);", (client_id,))
+        return {_lower(r[0]) for r in cur.fetchall()}
 
 
 def write_groups(cur, client_id, now, data):
@@ -3429,13 +3477,31 @@ def _history_group_member(ctx):
         g = groups.get(_lower(m["group_id"]), {})
         entities[f"{_lower(m['group_id'])}:{_lower(m['member_id'])}"] = (
             f"{m['member_upn'] or m['member_display_name']} in {g.get('display_name')}", {
+                # [v1.0.3] group_sensitive_reasons no longer stored here: a
+                # change of the group's reasons versioned every member (the
+                # reasons are in the group's sensitive_group entity)
                 "group_id": _lower(m["group_id"]), "group_display_name": g.get("display_name"),
-                "group_sensitive_reasons": g.get("sensitive_reasons"), "member_id": _lower(m["member_id"]),
+                "member_id": _lower(m["member_id"]),
                 "member_type": m["member_type"], "member_display_name": m["member_display_name"],
                 "member_upn": m["member_upn"], "member_user_type": m["member_user_type"],
                 "on_premises_sync_enabled": m["on_premises_sync_enabled"]})
     protected = tuple(f"{gid}:" for gid in ctx["data"]["groups"]["failed"])
     return entities, protected
+
+
+def _history_sensitive_group(ctx):
+    """[v1.0.3] One entity per sensitive group (the groups whose members and
+    owners are read): plugins 11027 and 11029 report a new member or owner
+    only of a group that was already sensitive in the previous collection
+    -- when a group becomes sensitive, its existing members are not
+    "added"."""
+    entities = {}
+    for g in ctx["data"]["groups"]["groups"]:
+        if g["is_sensitive"]:
+            entities[_lower(g["entra_object_id"])] = (g["display_name"], {
+                "group_id": _lower(g["entra_object_id"]), "display_name": g["display_name"],
+                "sensitive_reasons": g["sensitive_reasons"]})
+    return entities
 
 
 def _history_federated_identity_credential(ctx):
@@ -3474,6 +3540,8 @@ CHANGE_HISTORY_INPUTS = (
     ("owner", ("app_owners", "groups")),
     ("partner", ("partner_contracts", "cross_tenant_policy")),
     ("group_member", ("groups",)),
+    # [v1.0.3] plugins 11027 and 11029
+    ("sensitive_group", ("groups",)),
     # [v0.9.0] plugins 11030 and 11031
     ("federated_identity_credential", ("federated_identity_credentials",)),
     ("pim_policy", ("pim_policies",)),
@@ -3788,6 +3856,7 @@ def main():
             "authorization_policy_status": authorization_policy_status,
             "include_pta_agents": args.include_pta_agents,
             "statuses": {}, "data": {},
+            "previous_app_role_groups": previous_app_role_groups(pg_conn, client_id),
         }
         source_statuses = run_optional_sources(graph, pg_conn, client_id, ctx, completed_steps)
 

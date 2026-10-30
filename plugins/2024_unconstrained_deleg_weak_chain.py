@@ -18,14 +18,18 @@ summary (enabled accounts stay 'fail'/critical, summary unchanged), and
 detail carries is_enabled. The unsupported-OS list no longer matches
 Windows 10 Enterprise LTSC (2019/2021 and IoT LTSC are still in support)
 and now includes Windows 2000 and Windows NT. Summary is NULL-safe.
+
+[v1.4] Windows Server 2008 is matched as "server ... 2008", so the
+"Windows Server® 2008 ..." spelling (with the registered sign, as 2008 RTM
+hosts report it) counts as unsupported; it was missed.
 """
 
 PLUGIN = {
     "plugin_id": 2024,
     "category": "Computer Accounts",
     "name": "Computer With Unconstrained Delegation Is Also Unsupported or Dormant",
-    "version": "1.3",
-    "revision_date": "2026-10-04",
+    "version": "1.4",
+    "revision_date": "2026-10-30",
     "remediation": (
         "Prioritize for remediation or decommissioning over an ordinary "
         "unconstrained-delegation finding -- this specific machine "
@@ -104,7 +108,7 @@ PLUGIN = {
                 || ' has unconstrained Kerberos delegation enabled AND is independently weak: '
                 || (SELECT string_agg(x, ', ') FROM (VALUES
                         (CASE WHEN (c.operating_system ILIKE '%%windows 10%%' AND c.operating_system NOT ILIKE '%%LTSC%%') OR c.operating_system ILIKE '%%server 2012%%'
-                              OR c.operating_system ILIKE '%%server 2008%%' OR c.operating_system ILIKE '%%server 2003%%'
+                              OR c.operating_system ILIKE '%%server%%2008%%' OR c.operating_system ILIKE '%%server 2003%%'
                               OR c.operating_system ILIKE '%%windows 7%%' OR c.operating_system ILIKE '%%windows 8%%'
                               OR c.operating_system ILIKE '%%windows xp%%' OR c.operating_system ILIKE '%%windows vista%%'
                               OR c.operating_system ILIKE '%%windows 2000%%' OR c.operating_system ILIKE '%%windows nt%%'
@@ -126,7 +130,7 @@ PLUGIN = {
           AND NOT c.is_domain_controller
           AND (
                 (c.operating_system ILIKE '%%windows 10%%' AND c.operating_system NOT ILIKE '%%LTSC%%') OR c.operating_system ILIKE '%%server 2012%%'
-                OR c.operating_system ILIKE '%%server 2008%%' OR c.operating_system ILIKE '%%server 2003%%'
+                OR c.operating_system ILIKE '%%server%%2008%%' OR c.operating_system ILIKE '%%server 2003%%'
                 OR c.operating_system ILIKE '%%windows 7%%' OR c.operating_system ILIKE '%%windows 8%%'
                 OR c.operating_system ILIKE '%%windows xp%%' OR c.operating_system ILIKE '%%windows vista%%'
                 OR c.operating_system ILIKE '%%windows 2000%%' OR c.operating_system ILIKE '%%windows nt%%'

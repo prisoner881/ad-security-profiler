@@ -26,6 +26,11 @@ AzureAD account), which Microsoft documents as functioning like a read-only
 domain controller but which is not a server: it has no host, logons, Group
 Policy or SYSVOL. Plugin 1006 reports the age of its key. Requires schema
 v46.
+
+[v1.3] Honours the Registry.pol "**delvals." marker: a GPO that replaces the
+ASR rule list deletes the values a lower-precedence GPO set under the same key
+(sysvol_collector.py 1.2 stores "**del." deletions under the value they
+delete).
 """
 
 # ---------------------------------------------------------------------------
@@ -126,8 +131,8 @@ COMPUTER_GPO_SQL = r"""        gpo_som AS (
 PLUGIN = {   'plugin_id': 9037,
     'category': 'Organizational Units',
     'name': 'Microsoft Defender Attack Surface Reduction Rules Not Configured',
-    'version': '1.2',
-    'revision_date': '2026-10-22',
+    'version': '1.3',
+    'revision_date': '2026-10-30',
     'control_id': 'GPO-9037',
     'framework_tags': [   'NIST-800-53-CM-6',
                           'NIST-800-53-CM-7',
@@ -166,10 +171,26 @@ PLUGIN = {   'plugin_id': 9037,
             ORDER BY m.object_guid LIMIT 1
         ),
         @COMPGPO@,
+        eff AS (
+            -- Registry.pol "**delvals." marker (a DELETE row under the list
+            -- key): the GPO deletes every value under the key before setting
+            -- its own, so list values won from a lower-precedence GPO are
+            -- gone. (Value names here can contain '\', so values are matched
+            -- to the list key by prefix.)
+            SELECT * FROM (
+                SELECT e.*, starts_with(lower(e.setting_key), lower('Software\Policies\Microsoft\Windows Defender\Windows Defender Exploit Guard\ASR\Rules\')) AS in_list,
+                       min(e.precedence) FILTER (WHERE e.value_type = 'DELETE'
+                                                   AND lower(e.setting_key) IN (lower('Software\Policies\Microsoft\Windows Defender\Windows Defender Exploit Guard\ASR\Rules\**delvals.'),
+                                                                                lower('Software\Policies\Microsoft\Windows Defender\Windows Defender Exploit Guard\ASR\Rules\**delvals')))
+                           OVER (PARTITION BY e.computer_guid) AS delvals_precedence
+                FROM gpo_eff e
+            ) e
+            WHERE NOT e.in_list OR e.delvals_precedence IS NULL OR e.precedence <= e.delvals_precedence
+        ),
         pv AS (
             -- winning HKLM registry values per computer, keyed by lower-case path
             SELECT e.computer_guid, jsonb_object_agg(lower(e.setting_key), e.setting_value) AS v
-            FROM gpo_eff e
+            FROM eff e
             WHERE e.source = 'registry' AND e.section = 'HKLM' AND e.value_type IS DISTINCT FROM 'DELETE'
             GROUP BY e.computer_guid
         ),
@@ -177,7 +198,7 @@ PLUGIN = {   'plugin_id': 9037,
             SELECT e.computer_guid,
                    count(*) FILTER (WHERE trim(e.setting_value) = '1') AS block_rules,
                    count(*) FILTER (WHERE trim(e.setting_value) IN ('2', '6')) AS audit_or_warn_rules
-            FROM gpo_eff e
+            FROM eff e
             WHERE starts_with(lower(e.setting_key), lower('Software\Policies\Microsoft\Windows Defender\Windows Defender Exploit Guard\ASR\Rules\'))
               AND e.value_type IS DISTINCT FROM 'DELETE'
             GROUP BY e.computer_guid

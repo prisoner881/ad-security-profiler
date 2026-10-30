@@ -9,6 +9,40 @@ the script's own docstring now keeps a one-line summary per entry, this
 file keeps the complete detail (root causes, what was verified, why a
 decision was made a particular way) for anyone who wants it.
 
+    1.0.4 - Schema v48. Medium-severity fixes from the code review:
+            - User, computer and group description stored with
+              _first_value() (text), not as the array literal psycopg2 made
+              of ldap3's list ('{"..."}'), the bug fixed for OUs in 0.7.8.
+              DERIVED_FIELDS_VERSION = 1.0.4, so the first 1.0.4 run
+              rescans every object once to rewrite them.
+            - A failed optional read no longer closes edges. When the OU,
+              GPO, site, KDS root key, AD FS, DNS zone or certificate
+              services collection raised, the objects it would have covered
+              got no acl_desired entries and their acl_edge rows were
+              closed by the single ACL sync (and gpo_link_edge rows of OUs
+              and sites by resolve_gpo_links()); the next good run reopened
+              them all, which change plugins read as newly granted rights.
+              Each failure now records its scope (typed table or container
+              DN, unread_scope_guids()), whose open ACL edges are carried
+              forward like an unreadable security descriptor's, and whose
+              gPLinks are kept (resolve_gpo_links(unread_containers=)).
+              GPOs and foreign security principals not collected this run
+              resolve through directory_object (resolve_dns_from_database())
+              in gPLink and group membership resolution, so their links and
+              memberships stay open. With --sysvol, a failed GPO read skips
+              SYSVOL (status 'failed'): reading it against an empty GPO list
+              closed every setting.
+            - sysvol_collector.py 1.2: Registry.pol "**del.X" is stored as a
+              DELETE row under "<key>\X" (it was "<key>\**del.X", which
+              never overrode X set by a lower-precedence GPO), as is each
+              value named in "**DeleteValues"; "**delvals." stays a marker
+              row that plugins 9029 and 9037 now honour; the last entry for
+              a key in a Registry.pol wins (entries apply in order); and
+              ad_gpo_sysvol.first_read_run_id (schema v48) is kept across
+              runs for plugin 11021.
+            Plugin 11021 1.2 does not report the one-time re-keying of
+            "**del." rows on the first 1.0.4 run.
+
     1.0.3 - Schema v47. Fixes from the code review:
             - The "view_deleted_objects" capability probe paged its search
               of CN=Deleted Objects. Unpaged, a DC answers sizeLimitExceeded

@@ -26,14 +26,20 @@ Severity: high. Medium when the owned object is an application registration
 created after the previous owner snapshot (entra_application.created_at):
 that is the creator becoming the initial owner of a new app. One row per
 (owned object, owner) (object_guid = md5('11027:' || client_id || ':' || key)).
+
+[v1.1] A new owner of a group is reported only if the group was already
+sensitive in the previous collection (entra_change_history entity_type
+'sensitive_group', entra_graph_collector.py 1.0.3): owners are read only for
+sensitive groups, so when a group became sensitive its existing owners were
+reported as added.
 """
 
 PLUGIN = {
     "plugin_id": 11027,
     "category": "Change Detection",
     "name": "New Owner on an Application, Service Principal or Sensitive Group",
-    "version": "1.0",
-    "revision_date": "2026-10-05",
+    "version": "1.1",
+    "revision_date": "2026-10-30",
     "control_id": "CHANGE-11027",
     "requires_sources": ["app_owners", "groups"],
     "framework_tags": [
@@ -97,6 +103,20 @@ PLUGIN = {
               AND NOT EXISTS (SELECT 1 FROM entra_change_history e
                               WHERE e.client_id = h.client_id AND e.entity_type = h.entity_type
                                 AND e.entity_key = h.entity_key AND e.valid_from < b.last_run_at)
+              -- [v1.1] only a group already sensitive in the previous
+              -- collection (its sensitive_group version was open then): when
+              -- a group becomes sensitive its existing members and owners
+              -- are read for the first time, not added. Not applied until
+              -- sensitive_group has a previous collection (collector 1.0.3).
+              AND (h.content->>'owned_object_type' IS DISTINCT FROM 'group'
+                   OR NOT EXISTS (SELECT 1 FROM entra_change_baseline sb
+                               WHERE sb.client_id = h.client_id AND sb.entity_type = 'sensitive_group'
+                                 AND sb.first_run_at < sb.last_run_at)
+                   OR EXISTS (SELECT 1 FROM entra_change_history sg
+                              WHERE sg.client_id = h.client_id AND sg.entity_type = 'sensitive_group'
+                                AND sg.entity_key = lower(h.content->>'owned_object_id')
+                                AND sg.valid_from < b.last_run_at
+                                AND (sg.valid_to IS NULL OR sg.valid_to >= b.last_run_at)))
         ),
         enriched AS (
             SELECT n.*,

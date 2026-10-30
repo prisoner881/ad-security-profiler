@@ -33,14 +33,18 @@ Enterprise LTSC (2019/2021 and IoT LTSC are still in support) and now
 includes Windows 2000 and Windows NT. Detail adds is_enabled (disabled
 accounts stay in scope: the standing ACL rights return the moment the
 account is re-enabled).
+
+[v1.5] Windows Server 2008 is matched as "server ... 2008", so the
+"Windows Server® 2008 ..." spelling (with the registered sign, as 2008 RTM
+hosts report it) counts as unsupported; it was missed.
 """
 
 PLUGIN = {
     "plugin_id": 2025,
     "category": "Computer Accounts",
     "name": "Computer Directly Holding DCSync or Dangerous ACL Rights Runs an Unsupported Operating System",
-    "version": "1.4",
-    "revision_date": "2026-10-04",
+    "version": "1.5",
+    "revision_date": "2026-10-30",
     "remediation": (
         "Prioritize over an ordinary unsupported-OS finding -- this "
         "machine's exposure to known, unpatched vulnerabilities is "
@@ -175,7 +179,7 @@ PLUGIN = {
           AND c.client_id = %(client_id)s
           AND (
                 (c.operating_system ILIKE '%%windows 10%%' AND c.operating_system NOT ILIKE '%%LTSC%%') OR c.operating_system ILIKE '%%server 2012%%'
-                OR c.operating_system ILIKE '%%server 2008%%' OR c.operating_system ILIKE '%%server 2003%%'
+                OR c.operating_system ILIKE '%%server%%2008%%' OR c.operating_system ILIKE '%%server 2003%%'
                 OR c.operating_system ILIKE '%%windows 7%%' OR c.operating_system ILIKE '%%windows 8%%'
                 OR c.operating_system ILIKE '%%windows xp%%' OR c.operating_system ILIKE '%%windows vista%%'
                 OR c.operating_system ILIKE '%%windows 2000%%' OR c.operating_system ILIKE '%%windows nt%%'

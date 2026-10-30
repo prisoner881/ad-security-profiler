@@ -3,25 +3,76 @@
 ## Release 1.0.x updates (2026-10-30)
 
 Fixes and hardening made after release 1.0, from running it against a live
-domain and tenant and from a full code review. One schema migration (v47);
-no plugin added or removed.
+domain and tenant and from a full code review. Two schema migrations (v47,
+v48); no plugin added or removed.
 
 ### Components
 
 | Component | Version |
 |---|---|
-| `adprofiler.py` (Active Directory collector) | 1.0.3 |
-| `sysvol_collector.py` (used by `adprofiler.py --sysvol`) | 1.1 |
-| `entra_graph_collector.py` (Entra ID collector) | 1.0.2 |
-| `adaudit.py` (plugin runner and report writer) | 1.0.3 |
+| `adprofiler.py` (Active Directory collector) | 1.0.4 |
+| `sysvol_collector.py` (used by `adprofiler.py --sysvol`) | 1.2 |
+| `entra_graph_collector.py` (Entra ID collector) | 1.0.3 |
+| `adaudit.py` (plugin runner and report writer) | 1.0.4 |
 | `adaudit_push.py` (ingest API push contract) | contract 1.0 |
 | `run_lock.py` (one run at a time; new) | 1.0 |
-| PostgreSQL schema (`schema_init.sql`) | v47 |
+| PostgreSQL schema (`schema_init.sql`) | v48 |
 
 ### Changes
 
-Code review fixes (2026-10-30, adprofiler.py 1.0.3, adaudit.py 1.0.3, schema
-v47):
+Code review fixes, medium severity (2026-10-30, adprofiler.py 1.0.4,
+sysvol_collector.py 1.2, entra_graph_collector.py 1.0.3, adaudit.py 1.0.4,
+schema v48):
+
+- **Group Policy deletions take effect.** A Registry.pol "delete this
+  value" entry was stored under its own key, so a value a higher-precedence
+  GPO deleted still looked set to the Group Policy checks (9010-9038). It
+  now overrides the value it deletes, and the Hardened UNC Paths (9029) and
+  ASR rules (9037) lists honour a GPO that replaces the whole list.
+- **Group Policy OU matching treats `_` and `%` in OU names literally**
+  (schema view `v_gpo_dc_application`, plugin 9039). They acted as
+  wildcards, so GPOs could be applied to the wrong DCs.
+- **A failed optional read no longer looks like everything was removed.**
+  When the OUs, GPOs, sites, KDS keys, AD FS, DNS zones or certificate
+  services objects could not be read, adprofiler.py closed all their ACL,
+  GPO link and SYSVOL records, and the next good run reported them all as
+  newly granted. They are now kept unchanged for that run; if the GPOs
+  could not be read, SYSVOL is not read either (the Group Policy checks are
+  NOT ASSESSED for that run).
+- **Descriptions are stored as text** for users, computers and groups,
+  instead of as `{"..."}` array literals. The first adprofiler.py 1.0.4 run
+  rescans every object once to rewrite them (automatic).
+- **Members who can add themselves to Domain Admins count as privileged**
+  (schema view `v_privileged_principal`): write access to the member
+  attribute of Tier 0 groups or AdminSDHolder, reset-password on
+  AdminSDHolder, and inheritable domain-root ACEs aimed at OUs.
+- **Entra licences in their grace period count as licensed**
+  (`v_entra_tenant_capability`); 10121 reported "no P1/P2" and 10025, 10037
+  and 10038 were suppressed.
+- **Entra change detection** (11020, 11027, 11029): a group that becomes
+  sensitive no longer reports all its existing members and owners as
+  added; a privileged role that was removed and later granted again is
+  reported; groups sensitive through an app role stay sensitive when that
+  app's assignments can't be read.
+- **Group Policy change detection** (11021): the first settings added to a
+  GPO that was empty when SYSVOL was first read are reported.
+- **Fewer false findings:** 6007 ignores inherit-only ACEs (false critical
+  ESC5 on CA hosts); 5009 ignores read-only Enterprise Key Admins ACEs;
+  1025 treats Key Admins and Enterprise Key Admins as protected groups and
+  honours dwAdminSDExMask; 2006 and 2007 leave out the Seamless SSO account
+  AZUREADSSOACC$ (10008 covers it); 10058 no longer reports an active and an
+  eligible assignment twice.
+- **Fewer missed findings:** 10004 treats "MFA or terms of use" as optional
+  MFA; 10053 and 10058 match custom-role actions written for
+  `.myOrganization`; 2024, 2025, 2027 and 2028 match "Windows Server(R)
+  2008" hosts.
+- **adaudit.py counts the open findings of NOT ASSESSED plugins.** They are
+  kept open and pushed, but were left out of `--fail-on`, the console report
+  and the compliance sheets; they are now listed there, marked as kept from
+  the last assessment.
+
+Code review fixes, high severity (2026-10-30, adprofiler.py 1.0.3, adaudit.py
+1.0.3, schema v47):
 
 - **Domains with more than 1,000 deleted objects** could not be collected:
   the deleted-objects capability check used an unpaged search, which a domain
@@ -96,11 +147,18 @@ interrupted.
 ### Upgrading from 1.0 or an earlier 1.0.x
 
 Replace the scripts and `plugins/`, **add `run_lock.py`** next to them (all
-three scripts import it and fail to start without it), and **apply
-`schema_migration_v47.sql`** to the existing database
-(`psql -v ON_ERROR_STOP=1 -f schema_migration_v47.sql`); adprofiler.py 1.0.3
-refuses to run against v46. No `--full-rescan` is needed. The first
-adprofiler.py run afterwards checks every deleted object once.
+three scripts import it and fail to start without it), and **apply the
+schema migrations the database does not have yet, in order**:
+`schema_migration_v47.sql`, then `schema_migration_v48.sql`
+(`psql -v ON_ERROR_STOP=1 -f schema_migration_v47.sql`, and the same for
+v48). adprofiler.py 1.0.4 and adaudit.py 1.0.4 refuse to run against an
+older schema. No `--full-rescan` is needed:
+
+- the first adprofiler.py 1.0.3+ run checks every deleted object once;
+- the first adprofiler.py 1.0.4 run rescans every object once by itself
+  (descriptions), so it takes as long as a first collection;
+- the first entra_graph_collector.py 1.0.3 run stores a new version of each
+  sensitive-group member's change history (not reported by any plugin).
 
 ## Release 1.0 (2026-10-22)
 

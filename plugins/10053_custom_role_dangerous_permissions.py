@@ -46,14 +46,19 @@ Assignment scope (directory_scope_id: '/' tenant-wide, '/administrativeUnits/
 reported as assigned.
 
 object_guid: the role definition id.
+
+[v1.1] Actions on the ".myOrganization" form of an entity (for example
+microsoft.directory/applications.myOrganization/credentials/update, which
+custom roles use to limit a permission to the tenant's own applications)
+are matched like the plain entity; they were missed.
 """
 
 PLUGIN = {
     "plugin_id": 10053,
     "category": "Hybrid Identity",
     "name": "Custom Entra Role Grants Dangerous Permissions",
-    "version": "1.0",
-    "revision_date": "2026-10-05",
+    "version": "1.1",
+    "revision_date": "2026-10-30",
     "control_id": "HYBRID-10053",
     "requires_sources": ["role_definitions"],
     "framework_tags": [
@@ -129,7 +134,10 @@ PLUGIN = {
                AND rd.is_built_in IS FALSE
         ),
         parts AS (
-            SELECT role_definition_id, action, seg[1] AS ns, COALESCE(seg[2], '') AS e,
+            -- [v1.1] "applications.myOrganization" (the tenant's own objects)
+            -- is the same entity as "applications"
+            SELECT role_definition_id, action, seg[1] AS ns,
+                   regexp_replace(COALESCE(seg[2], ''), '[.]myorganization$', '') AS e,
                    COALESCE(seg[3], '') AS p,
                    CASE WHEN cardinality(seg) >= 4 THEN seg[cardinality(seg)] ELSE '' END AS v
               FROM act
