@@ -1,5 +1,65 @@
 # Release Notes
 
+## Release 1.0.x updates (2026-10-29)
+
+Fixes and hardening made after release 1.0, from running it against a live
+domain and tenant. No schema change (still v46) and no plugin added or
+removed.
+
+### Components
+
+| Component | Version |
+|---|---|
+| `adprofiler.py` (Active Directory collector) | 1.0.2 |
+| `sysvol_collector.py` (used by `adprofiler.py --sysvol`) | 1.1 |
+| `entra_graph_collector.py` (Entra ID collector) | 1.0.2 |
+| `adaudit.py` (plugin runner and report writer) | 1.0.2 |
+| `adaudit_push.py` (ingest API push contract) | contract 1.0 |
+| `run_lock.py` (one run at a time; new) | 1.0 |
+| PostgreSQL schema (`schema_init.sql`) | v46 |
+
+### Changes
+
+- **Group Policy checks need SYSVOL from the run being evaluated**
+  (adaudit.py 1.0.1, adprofiler.py 1.0.1, plugin 4009 v1.5). The Group
+  Policy settings checks are NOT ASSESSED unless that collection run read
+  SYSVOL (`adprofiler.py --sysvol`). Before, a run without `--sysvol`, or
+  whose SMB read failed, was checked against the Group Policy data of the
+  last `--sysvol` run as if it were current. adprofiler.py says when a run
+  does not collect Group Policy settings. Plugin 4009 (MachineAccountQuota)
+  now reports from LDAP alone without SYSVOL instead of NOT ASSESSED.
+- **One run at a time** (adprofiler.py 1.0.2, entra_graph_collector.py
+  1.0.1, adaudit.py 1.0.2, new `run_lock.py`). The three scripts share a
+  PostgreSQL advisory lock taken right after the PostgreSQL settings are
+  read. A script started while another run holds it logs who holds it and
+  how to clear the lock, and exits with status **75** without doing
+  anything. PostgreSQL releases the lock whenever the holding process
+  exits, crashes or is killed. Before, overlapping collections could leave
+  duplicate current versions of objects.
+- **A throttled optional Entra source no longer aborts the collection**
+  (entra_graph_collector.py 1.0.2). An optional source that Microsoft keeps
+  throttling (HTTP 429), or that keeps failing with a temporary server or
+  network error, is recorded as not read and its checks are NOT ASSESSED,
+  as for a missing licence. The required reads (users, directory roles,
+  security posture, applications, Graph permission grants) still abort.
+- `.gitignore` keeps compiled files, collected output (`*.log`, `*.xlsx`),
+  the virtual environment and credentials out of the repository.
+
+### Exit status
+
+For a scheduler or supervising process: every script exits non-zero when it
+did not complete. adprofiler.py and entra_graph_collector.py: 0 success, 1
+failed, 75 not started (another run holds the run lock), 130 interrupted.
+adaudit.py: 0 complete, 1 fatal error, 3 complete but a plugin errored, 4
+findings at or above `--fail-on`, 5 push failed, 75 not started, 130
+interrupted.
+
+### Upgrading from 1.0
+
+Replace the scripts and `plugins/`, and **add `run_lock.py`** next to them:
+all three scripts import it and fail to start without it. No migration and
+no `--full-rescan`.
+
 ## Release 1.0 (2026-10-22)
 
 The first release of ad-security-profiler, made from the `api-push` branch
@@ -23,7 +83,8 @@ collection, no plugin change and no schema change.
 
 ### Coverage
 
-385 active finding plugins (5 more are retired stubs):
+385 active plugins -- 381 finding checks and 4 inventory reports -- plus 5
+retired stubs:
 
 | Category | Plugins |
 |---|---|

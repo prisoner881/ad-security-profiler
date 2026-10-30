@@ -18,9 +18,8 @@ PURPOSE:
     also reads Group Policy settings from SYSVOL and NETLOGON over SMB.
 
     adaudit.py analyzes what this script and entra_graph_collector.py
-    collect. Release 1.0: adprofiler.py 1.0.0, entra_graph_collector.py
-    1.0.0, adaudit.py 1.0.0, sysvol_collector.py 1.1, schema v46 (see
-    RELEASE_NOTES.md).
+    collect. RELEASE_NOTES.md lists the current version of every
+    component.
 
 INPUT FORMAT (command line):
     python3 adprofiler.py --dc-host <fqdn-or-ip> --username <bind-user> \\
