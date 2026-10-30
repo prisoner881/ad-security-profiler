@@ -31,14 +31,19 @@ md5('10076:' || client_id)). Service principal restrictions are listed in
 detail but not judged. Needs Microsoft Entra Workload ID licensing for
 some restriction types in production; the policy itself can be read and
 set in every tenant.
+
+[v1.1] When adding client secrets is blocked (passwordAddition enforced),
+the client secret lifetime and custom secret restrictions are not listed as
+gaps: no new client secret can be added, so they constrain nothing. Existing
+secrets are reported by the credential plugins (10060 and others).
 """
 
 PLUGIN = {
     "plugin_id": 10076,
     "category": "Hybrid Identity",
     "name": "App Management Policy Does Not Restrict Application Credentials",
-    "version": "1.0",
-    "revision_date": "2026-10-22",
+    "version": "1.1",
+    "revision_date": "2026-10-30",
     "control_id": "HYBRID-10076",
     "requires_sources": ["app_management_policy"],
     "framework_tags": [
@@ -115,13 +120,20 @@ PLUGIN = {
                    (3, 'asymmetricKeyLifetime', 365, 'certificate lifetime is not limited to 365 days (SCuBA MS.AAD.5.7)'),
                    (4, 'customPasswordAddition', NULL, 'custom (user-chosen) client secrets are not blocked')
         ),
-        gaps AS (
+        missing AS (
             SELECT p.client_id, c.ord, c.label
               FROM pol p CROSS JOIN checks c
              WHERE NOT p.enabled
                 OR NOT EXISTS (SELECT 1 FROM r
                                 WHERE r.client_id = p.client_id AND r.rtype = c.rtype AND r.state = 'enabled'
                                   AND (c.max_days IS NULL OR r.max_days <= c.max_days))
+        ),
+        gaps AS (
+            -- [v1.1] with adding client secrets blocked, their lifetime and
+            -- custom secrets do not matter for new credentials
+            SELECT m.* FROM missing m
+             WHERE m.ord NOT IN (2, 4)
+                OR EXISTS (SELECT 1 FROM missing b WHERE b.client_id = m.client_id AND b.ord = 1)
         )
         SELECT
             'fail' AS status,

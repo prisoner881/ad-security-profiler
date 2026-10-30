@@ -17,14 +17,18 @@ group holding any of those still count. detail gains privilege_sources
 
 [v1.6] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
 no query change.
+
+[v1.7] The disabled built-in Guest (RID 501) and DefaultAccount (RID 503)
+accounts are left out: their passwords never expire by default and they
+cannot sign in while disabled. Enabled, they are still reported.
 """
 
 PLUGIN = {
     "plugin_id": 1001,
     "category": "User Accounts",
     "name": "User Account Password Set to Never Expire",
-    "version": "1.6",
-    "revision_date": "2026-10-21",
+    "version": "1.7",
+    "revision_date": "2026-10-30",
     "remediation": (
     'Remove the DONT_EXPIRE_PASSWORD flag (uncheck "Password never expires" in '
     'ADUC, or `Set-ADUser -PasswordNeverExpires $false`) and let the account '
@@ -175,5 +179,12 @@ PLUGIN = {
         WHERE u.valid_to IS NULL
           AND u.client_id = %(client_id)s
           AND u.pwd_never_expires
+          -- [v1.7] the disabled built-in Guest (RID 501) and DefaultAccount
+          -- (RID 503) never expire by default; enabled, they are reported
+          AND NOT (NOT COALESCE(u.is_enabled, false) AND EXISTS (
+                SELECT 1 FROM directory_object o
+                WHERE o.object_guid = u.object_guid
+                  AND o.client_id = u.client_id
+                  AND (o.object_sid LIKE '%%-501' OR o.object_sid LIKE '%%-503')))
     """,
 }

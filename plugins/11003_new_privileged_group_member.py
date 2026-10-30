@@ -32,14 +32,19 @@ object_guid and broke the one-open-version-per-identity constraint.
 Individual additions are now listed in detail.memberships (sorted by
 group), and the summary names every group in a stable order; a single
 addition is worded exactly as before.
+
+[v1.2] A membership that already existed is not reported when only its
+primary-group flag changed (an account's primaryGroupID set to, or moved
+away from, a group it was already a member of): the edge is re-versioned
+in that run, and was reported as a new addition.
 """
 
 PLUGIN = {
     "plugin_id": 11003,
     "category": "Change Detection",
     "name": "New Membership in a Privileged Group Since Previous Run",
-    "version": "1.1",
-    "revision_date": "2026-10-03",
+    "version": "1.2",
+    "revision_date": "2026-10-30",
     "remediation": (
         "Match every addition to an approved request before accepting "
         "it. Security event IDs 4728, 4732 and 4756 (member added to a "
@@ -167,6 +172,14 @@ PLUGIN = {
             WHERE gme.client_id = %(client_id)s
               AND gme.valid_to IS NULL
               AND gme.run_id_valid_from = %(run_id)s
+              -- [v1.2] not a membership that already existed and was only
+              -- re-versioned (e.g. the group became or stopped being the
+              -- member's primary group)
+              AND NOT EXISTS (SELECT 1 FROM group_member_edge prev
+                              WHERE prev.client_id = gme.client_id
+                                AND prev.group_guid = gme.group_guid
+                                AND prev.member_guid = gme.member_guid
+                                AND prev.run_id_valid_to = %(run_id)s)
             GROUP BY gme.member_guid, gme.group_guid, gme.is_direct, gme.valid_from
         ),
         -- [v1.1] One row per member. The finding is keyed on the member's

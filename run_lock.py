@@ -2,7 +2,7 @@
 run_lock.py -- one run at a time for adprofiler.py, entra_graph_collector.py
 and adaudit.py
 ==============================================================================
-VERSION: 1.0
+VERSION: 1.1
 
 adprofiler.py, entra_graph_collector.py and adaudit.py must never run at the
 same time against the same database:
@@ -29,6 +29,12 @@ done, try again later).
 
 The connection's application_name ("<script> pid=<pid> host=<host>") is
 what identifies the holder in that message and in pg_stat_activity.
+
+[1.1] The lock connection sits idle for the whole run, so it is kept alive:
+TCP keepalives (a NAT or firewall that drops idle connections would close
+it, and with it the lock, without the script noticing) and
+idle_session_timeout = 0 for that session (a server-wide
+idle_session_timeout would end it the same way).
 """
 
 import os
@@ -107,9 +113,12 @@ def acquire(script_name, host, port, dbname, user, password):
     global _held_connection
     app_name = f"{script_name} pid={os.getpid()} host={socket.gethostname()}"[:63]
     conn = psycopg2.connect(host=host, port=port, dbname=dbname, user=user, password=password,
-                            application_name=app_name)
+                            application_name=app_name, keepalives=1, keepalives_idle=60,
+                            keepalives_interval=10, keepalives_count=6)
     conn.autocommit = True
     with conn.cursor() as cur:
+        if conn.server_version >= 140000:  # idle_session_timeout is PostgreSQL 14+
+            cur.execute("SET idle_session_timeout = 0;")
         cur.execute("SELECT pg_try_advisory_lock(%s, %s);", (LOCK_KEY1, LOCK_KEY2))
         if cur.fetchone()[0]:
             _held_connection = conn

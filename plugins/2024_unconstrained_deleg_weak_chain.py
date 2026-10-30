@@ -22,13 +22,18 @@ and now includes Windows 2000 and Windows NT. Summary is NULL-safe.
 [v1.4] Windows Server 2008 is matched as "server ... 2008", so the
 "Windows Server® 2008 ..." spelling (with the registered sign, as 2008 RTM
 hosts report it) counts as unsupported; it was missed.
+
+[v1.5] "Dormant" (no logon for 90 days) is measured from the time of the
+collection being evaluated, not from when adaudit.py runs: re-evaluating the
+same collection later could add "dormant" to the summary and record a
+change that did not happen in the directory.
 """
 
 PLUGIN = {
     "plugin_id": 2024,
     "category": "Computer Accounts",
     "name": "Computer With Unconstrained Delegation Is Also Unsupported or Dormant",
-    "version": "1.4",
+    "version": "1.5",
     "revision_date": "2026-10-30",
     "remediation": (
         "Prioritize for remediation or decommissioning over an ordinary "
@@ -113,7 +118,7 @@ PLUGIN = {
                               OR c.operating_system ILIKE '%%windows xp%%' OR c.operating_system ILIKE '%%windows vista%%'
                               OR c.operating_system ILIKE '%%windows 2000%%' OR c.operating_system ILIKE '%%windows nt%%'
                               THEN 'unsupported OS (' || c.operating_system || ')' END),
-                        (CASE WHEN c.last_logon_timestamp IS NULL OR c.last_logon_timestamp < now() - interval '90 days'
+                        (CASE WHEN c.last_logon_timestamp IS NULL OR c.last_logon_timestamp < (SELECT COALESCE(max(sr.completed_at), now()) FROM sync_run sr WHERE sr.run_id = %(run_id)s) - interval '90 days'
                               THEN 'dormant' END)
                     ) AS v(x) WHERE x IS NOT NULL)
                 || (CASE WHEN c.is_enabled IS FALSE THEN ' (account disabled)' ELSE '' END) AS summary,
@@ -134,7 +139,7 @@ PLUGIN = {
                 OR c.operating_system ILIKE '%%windows 7%%' OR c.operating_system ILIKE '%%windows 8%%'
                 OR c.operating_system ILIKE '%%windows xp%%' OR c.operating_system ILIKE '%%windows vista%%'
                 OR c.operating_system ILIKE '%%windows 2000%%' OR c.operating_system ILIKE '%%windows nt%%'
-                OR c.last_logon_timestamp IS NULL OR c.last_logon_timestamp < now() - interval '90 days'
+                OR c.last_logon_timestamp IS NULL OR c.last_logon_timestamp < (SELECT COALESCE(max(sr.completed_at), now()) FROM sync_run sr WHERE sr.run_id = %(run_id)s) - interval '90 days'
               )
     """,
 }

@@ -4,7 +4,7 @@ These steps take a brand-new Ubuntu 26 LTS machine to a working state
 where the three scripts can be run interactively, in sequence, against
 your live Active Directory and Entra ID environment.
 
-This guide covers release 1.0 and its 1.0.x updates (schema v48).
+This guide covers release 1.0 and its 1.0.x updates (schema v49).
 `RELEASE_NOTES.md` lists the current version of each script, what changed
 and how to upgrade.
 
@@ -213,6 +213,12 @@ python3 adprofiler.py \
 You'll be prompted for the AD bind password and the PostgreSQL
 password if you didn't pass `--password`/`--pg-password`. Drop `--ssl`
 if your domain controller doesn't have LDAPS configured.
+
+With `--ssl` the connection is encrypted, but the domain controller's
+certificate is not checked unless you add `--ca-cert <file.pem>`: a PEM file
+with the certificate of the CA that issued the DC's certificate (for an
+enterprise CA, export its certificate as Base-64). The certificate must also
+name the host given in `--dc-host`, so use the DC's FQDN there.
 
 This creates a timestamped log file in the current directory:
 `adprofiler-results_<timestamp>.log`, mirroring everything shown on

@@ -3,22 +3,56 @@
 ## Release 1.0.x updates (2026-10-30)
 
 Fixes and hardening made after release 1.0, from running it against a live
-domain and tenant and from a full code review. Two schema migrations (v47,
-v48); no plugin added or removed.
+domain and tenant and from a full code review. Three schema migrations (v47,
+v48, v49); no plugin added or removed.
 
 ### Components
 
 | Component | Version |
 |---|---|
-| `adprofiler.py` (Active Directory collector) | 1.0.4 |
+| `adprofiler.py` (Active Directory collector) | 1.0.5 |
 | `sysvol_collector.py` (used by `adprofiler.py --sysvol`) | 1.2 |
-| `entra_graph_collector.py` (Entra ID collector) | 1.0.3 |
-| `adaudit.py` (plugin runner and report writer) | 1.0.4 |
+| `entra_graph_collector.py` (Entra ID collector) | 1.0.4 |
+| `adaudit.py` (plugin runner and report writer) | 1.0.5 |
 | `adaudit_push.py` (ingest API push contract) | contract 1.0 |
-| `run_lock.py` (one run at a time; new) | 1.0 |
-| PostgreSQL schema (`schema_init.sql`) | v48 |
+| `run_lock.py` (one run at a time; new) | 1.1 |
+| PostgreSQL schema (`schema_init.sql`) | v49 |
 
 ### Changes
+
+Code review fixes, low severity (2026-10-30, adprofiler.py 1.0.5,
+entra_graph_collector.py 1.0.4, adaudit.py 1.0.5, run_lock.py 1.1, schema
+v49):
+
+- **Partitions no longer depend on the session time zone.** Monthly
+  partitions are made on UTC month boundaries; runs from sessions in
+  different time zones could make overlapping partitions (the run aborted)
+  or leave a gap. The migration also rebuilds empty future partitions so an
+  existing gap or overlap is removed.
+- **The run lock survives an idle network path.** Its connection, idle for
+  the whole run, now uses TCP keepalives and is exempt from
+  `idle_session_timeout`; a dropped connection released the lock silently.
+- **LDAPS certificates can be verified:** new optional `--ca-cert FILE`
+  (with `--ssl`) checks the domain controller's certificate and name.
+  Without it the certificate is still not checked, and the log now says so.
+- **Collector details:** an ACE that changed between explicit and inherited
+  is versioned; the gMSA "unresolved" count in the log is right; log files
+  are UTF-8; PIM-eligible synced admins are matched to their AD accounts;
+  a repeated Graph page no longer breaks the Entra run; the partial-run
+  report lists every source; a non-GUID `--client-id` gives a clear error.
+- **Change detection:** a group is no longer a member of itself through a
+  nesting cycle; 11003 no longer reports a membership that only changed its
+  primary-group flag; 11027 uses the real time of the previous Entra
+  collection; a delegated grant whose resource could not be looked up no
+  longer churns the history; a changed STIG or tool reference is recorded;
+  the push sends a reopened finding with the date it reopened.
+- **Plugin accuracy:** 9035 reads the KDC armoring level
+  (`CbacAndArmorLevel`); 9020 and 9040 ignore the disabled half of a GPO;
+  5020 accepts SYSVOL paths through the NetBIOS or a DC name; 1001 and 1002
+  leave out the disabled built-in Guest and DefaultAccount; 2024, 2027,
+  2028, 10042-10044 and 10110 measure age from the collection, not from
+  when adaudit.py runs; 10076 no longer lists secret-lifetime gaps when
+  secrets are blocked; 10021 checks the device filter's mode.
 
 Code review fixes, medium severity (2026-10-30, adprofiler.py 1.0.4,
 sysvol_collector.py 1.2, entra_graph_collector.py 1.0.3, adaudit.py 1.0.4,
@@ -149,10 +183,11 @@ interrupted.
 Replace the scripts and `plugins/`, **add `run_lock.py`** next to them (all
 three scripts import it and fail to start without it), and **apply the
 schema migrations the database does not have yet, in order**:
-`schema_migration_v47.sql`, then `schema_migration_v48.sql`
-(`psql -v ON_ERROR_STOP=1 -f schema_migration_v47.sql`, and the same for
-v48). adprofiler.py 1.0.4 and adaudit.py 1.0.4 refuse to run against an
-older schema. No `--full-rescan` is needed:
+`schema_migration_v47.sql`, `schema_migration_v48.sql`, then
+`schema_migration_v49.sql` (`psql -v ON_ERROR_STOP=1 -f
+schema_migration_v47.sql`, and the same for the others). adprofiler.py 1.0.5
+and adaudit.py 1.0.5 refuse to run against an older schema. No
+`--full-rescan` is needed:
 
 - the first adprofiler.py 1.0.3+ run checks every deleted object once;
 - the first adprofiler.py 1.0.4 run rescans every object once by itself

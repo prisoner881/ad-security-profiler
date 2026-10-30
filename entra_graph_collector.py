@@ -2,9 +2,21 @@
 """
 entra_graph_collector.py -- Microsoft Entra ID / Graph API Email Collector
 
-VERSION: 1.0.3
+VERSION: 1.0.4
 
 CHANGELOG:
+    1.0.4 - PIM-eligible role holders get their on-premises SID and
+            accountEnabled from the user list (Graph's $expand returns only
+            default properties, so eligible synced admins were never matched
+            to AD). Users, applications and dangerous permission grants are
+            de-duplicated before insert (a repeated Graph page broke the
+            insert). The partial-run report lists the six sources added in
+            0.9.0. A delegated grant whose resource could not be looked up
+            is not recorded in change history that run (its key said "None"
+            and churned). --client-id must be a GUID (it gave a traceback).
+            entra_change_baseline.previous_run_at (schema v49) is kept for
+            plugin 11027. The log file is written as UTF-8.
+
     1.0.3 - Sensitive groups: a new change-history entity, sensitive_group
             (one per sensitive group, with its reasons), lets plugins 11027
             and 11029 report a new member or owner only of a group that was
@@ -286,6 +298,7 @@ import random
 import re
 import sys
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -305,7 +318,7 @@ PG_DBNAME = "adprofiler"
 PG_USER = None
 PG_PASSWORD = None
 
-VERSION = "1.0.3"
+VERSION = "1.0.4"
 
 # [v0.5.0] Retry policy shared by every Graph/token request (see
 # _send_with_retry()). 429 and transient 5xx responses, plus network
@@ -1204,6 +1217,27 @@ def fetch_role_eligibility(graph):
     return entries, "ok"
 
 
+def complete_role_member_users(role_members, users):
+    """[v1.0.4] PIM-eligible holders come from $expand=principal, which
+    returns a user's default properties only: onPremisesSecurityIdentifier
+    and accountEnabled were missing, so eligible synced admins were never
+    matched to their AD account and their enabled state was unknown. Fills
+    the missing fields from this run's user list."""
+    by_id = {_lower(u.get("id")): u for u in users if u.get("id")}
+    filled = 0
+    for rm in role_members:
+        member = rm["member"]
+        user = by_id.get(_lower(member.get("id")))
+        if user is None:
+            continue
+        missing = [f for f in ("onPremisesSecurityIdentifier", "accountEnabled", "userPrincipalName")
+                   if f not in member and f in user]
+        if missing:
+            rm["member"] = dict(member, **{f: user[f] for f in missing})
+            filled += 1
+    return filled
+
+
 def expand_group_role_members(graph, role_members):
     """[v0.6.0] A role held by a (role-assignable) group is held by every
     member of that group. Adds one entry per transitive member, tagged
@@ -1595,6 +1629,9 @@ def sync_entra_users(pg_conn, client_id, users):
     now = datetime.now(timezone.utc)
     rows = []
     matched = 0
+    # [v1.0.4] a user listed twice (Graph can repeat one across pages) broke
+    # the insert on the primary key
+    users = _dedupe([u for u in users if u.get("id")], ["id"])
 
     with pg_conn.cursor() as cur:
         cur.execute("SET search_path TO ad_intel, public;")
@@ -1910,6 +1947,7 @@ def sync_applications(pg_conn, client_id, applications):
     ad_ntauth_store's certificate parsing)."""
     now = datetime.now(timezone.utc)
     rows = []
+    applications = _dedupe([a for a in applications if a.get("id")], ["id"])  # [v1.0.4]
     for app in applications:
         creds = [
             {
@@ -1984,7 +2022,7 @@ def sync_dangerous_permission_grants(pg_conn, client_id, grants):
     rows = [
         (client_id, g["principal_id"], g["principal_display_name"],
          g["principal_type"], g["permission_name"], now)
-        for g in grants
+        for g in _dedupe(grants, ["principal_id", "permission_name"])  # [v1.0.4]
     ]
     with pg_conn.cursor() as cur:
         cur.execute("SET search_path TO ad_intel, public;")
@@ -3319,14 +3357,31 @@ def update_change_history(pg_conn, client_id, entity_type, entities, run_time,
                 insert_rows,
                 template="(%s, %s, %s, %s, %s::jsonb, %s, %s)",
             )
-        cur.execute(
-            """
-            INSERT INTO entra_change_baseline (client_id, entity_type, first_run_at, last_run_at)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (client_id, entity_type) DO UPDATE SET last_run_at = EXCLUDED.last_run_at;
-            """,
-            (client_id, entity_type, run_time, run_time),
-        )
+        # [v1.0.4] previous_run_at (schema v49): the run before this one, for
+        # "since the previous collection" (plugin 11027)
+        cur.execute("SELECT EXISTS (SELECT 1 FROM information_schema.columns "
+                    "WHERE table_schema = 'ad_intel' AND table_name = 'entra_change_baseline' "
+                    "AND column_name = 'previous_run_at');")
+        if cur.fetchone()[0]:
+            cur.execute(
+                """
+                INSERT INTO entra_change_baseline (client_id, entity_type, first_run_at, last_run_at)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (client_id, entity_type) DO UPDATE
+                    SET previous_run_at = entra_change_baseline.last_run_at,
+                        last_run_at = EXCLUDED.last_run_at;
+                """,
+                (client_id, entity_type, run_time, run_time),
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO entra_change_baseline (client_id, entity_type, first_run_at, last_run_at)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (client_id, entity_type) DO UPDATE SET last_run_at = EXCLUDED.last_run_at;
+                """,
+                (client_id, entity_type, run_time, run_time),
+            )
     pg_conn.commit()
     return new, changed, closed
 
@@ -3381,7 +3436,10 @@ def _history_app_credential(ctx):
 
 
 def _history_app_permission(ctx):
-    entities = {}
+    """[v1.0.4] Returns (entities, protected prefixes): a delegated grant
+    whose resource service principal could not be looked up is not recorded
+    this run, and the client's other entries are left as they are."""
+    entities, protected = {}, set()
     for g in ctx["data"]["app_role_grants"]:
         key = f"{_lower(g['principal_id'])}:{_lower(g['resource_app_id'])}:{_lower(g['permission_id'])}"
         entities[key] = (
@@ -3396,6 +3454,11 @@ def _history_app_permission(ctx):
         if g["consent_type"] != "AllPrincipals":
             continue
         for scope in g["scopes"]:
+            if not g["resource_app_id"]:
+                # [v1.0.4] resource lookup refused this run: the key would
+                # say "None" and churn (a "new" grant) once it resolves
+                protected.add(f"{_lower(g['client_sp_id'])}:")
+                continue
             key = f"{_lower(g['client_sp_id'])}:{_lower(g['resource_app_id'])}:AllPrincipals:{scope}"
             entities[key] = (
                 f"{g['client_display_name']} -> {g['resource_display_name']}: {scope} (admin consent)",
@@ -3403,7 +3466,7 @@ def _history_app_permission(ctx):
                  "principal_display_name": g["client_display_name"],
                  "resource_app_id": _lower(g["resource_app_id"]),
                  "resource_display_name": g["resource_display_name"], "permission_name": scope})
-    return entities
+    return entities, tuple(sorted(protected))
 
 
 def _history_ca_policy(ctx):
@@ -3565,7 +3628,7 @@ def update_entra_change_history(pg_conn, client_id, ctx):
         scope, protected = None, ()
         if entity_type == "tenant_policy":
             entities, scope = _history_tenant_policy(ctx)
-        elif entity_type in ("owner", "group_member"):
+        elif entity_type in ("owner", "group_member", "app_permission"):
             entities, protected = globals()[f"_history_{entity_type}"](ctx)
         else:
             entities = globals()[f"_history_{entity_type}"](ctx)
@@ -3643,6 +3706,13 @@ def parse_args():
         parser.error("the following arguments are required: --tenant-id, --app-id")
     if not args.version and not args.domain_fqdn and not args.client_id:
         parser.error("one of the following arguments is required: --domain-fqdn, --client-id")
+    if not args.version and args.client_id:
+        # [v1.0.4] a value that is not a GUID failed later with a traceback
+        try:
+            uuid.UUID(args.client_id)
+        except ValueError:
+            parser.error(f"--client-id must be a client_id GUID (SELECT client_id, domain_fqdn "
+                         f"FROM ad_intel.client;), not {args.client_id!r}")
     if not args.version and (not args.pg_host or not args.pg_user):
         parser.error("the following arguments are required: --pg-host, --pg-user")
 
@@ -3690,6 +3760,13 @@ COLLECTION_STEPS = [
     ("registration_details", ["entra_user_registration"]),
     ("risky_users", ["entra_risky_user"]),
     ("risk_detections", ["entra_risk_detection"]),
+    # [v1.0.4] the v0.9.0 sources were missing from the partial-run report
+    ("ca_policies_beta", ["entra_tenant_setting 'ca_policies_beta'"]),
+    ("app_management_policy", ["entra_tenant_setting 'app_management_policy'"]),
+    ("federated_token_validation_policy", ["entra_tenant_setting 'federated_token_validation_policy'"]),
+    ("federated_identity_credentials", ["entra_federated_identity_credential"]),
+    ("administrative_units", ["entra_administrative_unit", "entra_administrative_unit_member"]),
+    ("devices", ["entra_device"]),
     ("change history", ["entra_change_history", "entra_change_baseline"]),
 ]
 
@@ -3722,7 +3799,7 @@ def main():
     # [test-candidate-branch] Same reasoning as adprofiler.py's identical
     # addition -- see that script's main() for the full comment.
     log_filename = f"entra-graph-collector-results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-    log_fh = open(log_filename, "w")
+    log_fh = open(log_filename, "w", encoding="utf-8")  # [v1.0.4] not the locale encoding (Windows)
     real_stdout = sys.stdout
     sys.stdout = _TeeStream(real_stdout, log_fh)
 
@@ -3794,6 +3871,7 @@ def main():
         log_header("Collecting Directory Role Membership from Microsoft Graph")
         role_members = fetch_directory_roles_with_members(graph)
         eligible_members, role_eligibility_status = fetch_role_eligibility(graph)
+        complete_role_member_users(eligible_members, users)
         role_members += eligible_members
         group_members, group_expansion_status = expand_group_role_members(graph, role_members)
         role_members += group_members
