@@ -32,14 +32,20 @@ test keeps that right even if the edge is missing.
 
 [v1.7] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
 no query change.
+
+[v1.8] Key Admins (RID 526) and Enterprise Key Admins (RID 527) are roots,
+as in plugin 3005: their members carry admin_count=1 by design on 2016+
+domains and were reported as stale. Operator groups that dSHeuristics
+dwAdminSDExMask excludes from SDProp are no longer roots (as in 3005), so a
+marker that rests only on membership of one of them is reported as stale.
 """
 
 PLUGIN = {
     "plugin_id": 1025,
     "category": "User Accounts",
     "name": "User Account Has a Stale AdminSDHolder Protection Marker",
-    "version": "1.7",
-    "revision_date": "2026-10-21",
+    "version": "1.8",
+    "revision_date": "2026-10-30",
     "remediation": (
         "Investigate why this account is no longer a member of a "
         "privileged group despite carrying the AdminSDHolder protection "
@@ -91,21 +97,40 @@ PLUGIN = {
     ),
     "base_severity": "low",
     "query": """
-        WITH well_known_roots AS (
+        WITH sd_ex AS (
+            -- [v1.8] dSHeuristics dwAdminSDExMask, as in plugin 3005. NULL =
+            -- unknown, treated as "none excluded".
+            SELECT max(d.dsheuristics_admin_sd_ex_mask) AS mask
+            FROM ad_domain d
+            WHERE d.client_id = %(client_id)s
+              AND d.valid_to IS NULL
+        ),
+        well_known_roots AS (
             SELECT g.object_guid
             FROM ad_group g
             JOIN directory_object do2
                 ON do2.object_guid = g.object_guid AND do2.client_id = g.client_id
+            CROSS JOIN sd_ex sx
             WHERE g.valid_to IS NULL
               AND g.client_id = %(client_id)s
-              -- Same verified 11-group AdminSDHolder-protected list as
-              -- plugin 3005 -- see that plugin for source citations.
+              -- Same verified AdminSDHolder-protected list as plugin 3005 --
+              -- see that plugin for source citations. [v1.8] With Key
+              -- Admins (526) and Enterprise Key Admins (527), as in 3005.
               AND (do2.object_sid LIKE '%%-512' OR do2.object_sid LIKE '%%-516'
                    OR do2.object_sid LIKE '%%-518' OR do2.object_sid LIKE '%%-519'
                    OR do2.object_sid LIKE '%%-521' OR do2.object_sid LIKE '%%-544'
                    OR do2.object_sid LIKE '%%-548' OR do2.object_sid LIKE '%%-549'
                    OR do2.object_sid LIKE '%%-550' OR do2.object_sid LIKE '%%-551'
+                   OR do2.object_sid LIKE '%%-526' OR do2.object_sid LIKE '%%-527'
                    OR do2.object_sid LIKE '%%-552')
+              -- [v1.8] operator groups the mask excludes from SDProp (1
+              -- Account, 2 Server, 4 Print, 8 Backup Operators) protect nobody
+              AND NOT COALESCE(CASE do2.object_sid
+                                   WHEN 'S-1-5-32-548' THEN (sx.mask & 1) <> 0
+                                   WHEN 'S-1-5-32-549' THEN (sx.mask & 2) <> 0
+                                   WHEN 'S-1-5-32-550' THEN (sx.mask & 4) <> 0
+                                   WHEN 'S-1-5-32-551' THEN (sx.mask & 8) <> 0
+                               END, false)
         ),
         currently_nested AS (
             SELECT DISTINCT vem.member_guid AS object_guid

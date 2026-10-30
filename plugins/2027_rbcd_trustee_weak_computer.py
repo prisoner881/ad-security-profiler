@@ -27,14 +27,18 @@ carries is_enabled). Enabled trustees with only non-DC resources keep the
 previous 'warn'/high and unchanged summary. The unsupported-OS list no
 longer matches Windows 10 Enterprise LTSC and now includes Windows
 2000/NT. Names in the summary are NULL-safe.
+
+[v1.6] Windows Server 2008 is matched as "server ... 2008", so the
+"Windows Server® 2008 ..." spelling (with the registered sign, as 2008 RTM
+hosts report it) counts as unsupported; it was missed.
 """
 
 PLUGIN = {
     "plugin_id": 2027,
     "category": "Computer Accounts",
     "name": "RBCD Trustee Computer Is Itself Unsupported or Dormant",
-    "version": "1.5",
-    "revision_date": "2026-10-04",
+    "version": "1.6",
+    "revision_date": "2026-10-30",
     "remediation": (
         "Prioritize over an ordinary RBCD finding (plugin 2022) -- this "
         "specific trustee is an easier-than-average target due to its "
@@ -140,7 +144,7 @@ PLUGIN = {
                 || tr.resource_list || ') is '
                 || (SELECT string_agg(x, ', ') FROM (VALUES
                         (CASE WHEN (trustee.operating_system ILIKE '%%windows 10%%' AND trustee.operating_system NOT ILIKE '%%LTSC%%') OR trustee.operating_system ILIKE '%%server 2012%%'
-                              OR trustee.operating_system ILIKE '%%server 2008%%' OR trustee.operating_system ILIKE '%%server 2003%%'
+                              OR trustee.operating_system ILIKE '%%server%%2008%%' OR trustee.operating_system ILIKE '%%server 2003%%'
                               OR trustee.operating_system ILIKE '%%windows 7%%' OR trustee.operating_system ILIKE '%%windows 8%%'
                               OR trustee.operating_system ILIKE '%%windows xp%%' OR trustee.operating_system ILIKE '%%windows vista%%'
                               OR trustee.operating_system ILIKE '%%windows 2000%%' OR trustee.operating_system ILIKE '%%windows nt%%'
@@ -165,7 +169,7 @@ PLUGIN = {
            AND trustee.valid_to IS NULL
         WHERE (
                 (trustee.operating_system ILIKE '%%windows 10%%' AND trustee.operating_system NOT ILIKE '%%LTSC%%') OR trustee.operating_system ILIKE '%%server 2012%%'
-                OR trustee.operating_system ILIKE '%%server 2008%%' OR trustee.operating_system ILIKE '%%server 2003%%'
+                OR trustee.operating_system ILIKE '%%server%%2008%%' OR trustee.operating_system ILIKE '%%server 2003%%'
                 OR trustee.operating_system ILIKE '%%windows 7%%' OR trustee.operating_system ILIKE '%%windows 8%%'
                 OR trustee.operating_system ILIKE '%%windows xp%%' OR trustee.operating_system ILIKE '%%windows vista%%'
                 OR trustee.operating_system ILIKE '%%windows 2000%%' OR trustee.operating_system ILIKE '%%windows nt%%'

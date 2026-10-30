@@ -30,14 +30,23 @@ collection.
 Severity: high for ca_exclude or role_assignable groups; medium for app_role
 only. One row per (group, member) (object_guid = md5('11029:' || client_id ||
 ':' || key)).
+
+[v1.1] Reports a new member only of a group that was already sensitive in
+the previous collection (entra_change_history entity_type 'sensitive_group',
+entra_graph_collector.py 1.0.3): members and owners are read only for
+sensitive groups, so when a group became sensitive every existing member
+was reported as added. A group becoming sensitive is reported by the plugins
+for its cause (11020 role assignments, 11025 Conditional Access changes).
+Since collector 1.0.3 the member version no longer holds
+group_sensitive_reasons; the current entra_group row gives them.
 """
 
 PLUGIN = {
     "plugin_id": 11029,
     "category": "Change Detection",
     "name": "New Member of a Role-Assignable, CA-Exclusion or Privileged App-Role Group",
-    "version": "1.0",
-    "revision_date": "2026-10-05",
+    "version": "1.1",
+    "revision_date": "2026-10-30",
     "control_id": "CHANGE-11029",
     "requires_sources": ["groups"],
     "framework_tags": [
@@ -92,6 +101,19 @@ PLUGIN = {
               AND NOT EXISTS (SELECT 1 FROM entra_change_history e
                               WHERE e.client_id = h.client_id AND e.entity_type = h.entity_type
                                 AND e.entity_key = h.entity_key AND e.valid_from < b.last_run_at)
+              -- [v1.1] only a group already sensitive in the previous
+              -- collection (its sensitive_group version was open then): when
+              -- a group becomes sensitive its existing members and owners
+              -- are read for the first time, not added. Not applied until
+              -- sensitive_group has a previous collection (collector 1.0.3).
+              AND (NOT EXISTS (SELECT 1 FROM entra_change_baseline sb
+                               WHERE sb.client_id = h.client_id AND sb.entity_type = 'sensitive_group'
+                                 AND sb.first_run_at < sb.last_run_at)
+                   OR EXISTS (SELECT 1 FROM entra_change_history sg
+                              WHERE sg.client_id = h.client_id AND sg.entity_type = 'sensitive_group'
+                                AND sg.entity_key = lower(h.content->>'group_id')
+                                AND sg.valid_from < b.last_run_at
+                                AND (sg.valid_to IS NULL OR sg.valid_to >= b.last_run_at)))
         ),
         reasons AS (
             SELECT n.*,

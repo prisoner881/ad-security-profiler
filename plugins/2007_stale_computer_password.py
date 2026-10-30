@@ -23,14 +23,18 @@ AzureAD account), which Microsoft documents as functioning like a read-only
 domain controller but which is not a server: it never logs on and its
 password is not rotated by a host. Plugin 1006 reports the age of its key.
 Requires schema v46.
+
+[v1.6] Leaves out AZUREADSSOACC$, the computer account Microsoft Entra
+Seamless SSO creates: it never logs on and its password (the SSO Kerberos
+key) is rolled by hand, not by a host. Plugin 10008 reports its key age.
 """
 
 PLUGIN = {
     "plugin_id": 2007,
     "category": "Computer Accounts",
     "name": "Computer Account Password Has Not Rotated Recently",
-    "version": "1.5",
-    "revision_date": "2026-10-22",
+    "version": "1.6",
+    "revision_date": "2026-10-30",
     "remediation": (
         "If the machine still exists, confirm it can actually reach a "
         "domain controller and that its computer account password "
@@ -117,6 +121,8 @@ PLUGIN = {
         WHERE c.valid_to IS NULL
           AND c.client_id = %(client_id)s
           AND NOT is_entra_kerberos_server(c.sam_account_name, c.krbtgt_link)
+          -- [v1.6] the Seamless SSO account: plugin 10008 reports its key age
+          AND lower(COALESCE(c.sam_account_name, '')) <> 'azureadssoacc$'
           AND c.pwd_last_set IS NOT NULL
           AND c.pwd_last_set < now() - interval '90 days'
     """,

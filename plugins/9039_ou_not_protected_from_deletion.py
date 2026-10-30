@@ -18,14 +18,18 @@ Severity ('warn'): low for an OU that contains Tier 0 objects (a domain
 controller, or a privileged account or group per v_privileged_principal);
 info otherwise. OUs whose ACL was not collected (no acl_edge rows) are
 skipped rather than reported.
+
+[v1.1] Whether an OU contains a Tier 0 object is tested by comparing the
+end of the object's DN as text; LIKE treated '_' and '%' in OU names as
+wildcards and '\\' as an escape character.
 """
 
 PLUGIN = {
     "plugin_id": 9039,
     "category": "Organizational Units",
     "name": "Organizational Unit Not Protected From Accidental Deletion",
-    "version": "1.0",
-    "revision_date": "2026-10-20",
+    "version": "1.1",
+    "revision_date": "2026-10-30",
     "control_id": "OU-9039",
     "framework_tags": [
         "NIST-800-53-CP-9",
@@ -93,7 +97,9 @@ PLUGIN = {
         ),
         holds AS (
             SELECT DISTINCT ou.object_guid
-            FROM ou JOIN tier0 x ON x.dn LIKE '%%,' || ou.dn
+            -- [v1.1] DN suffix compared as text: with LIKE, '_' and '%%' in an
+            -- OU name were wildcards and '\\' an escape
+            FROM ou JOIN tier0 x ON right(x.dn, length(ou.dn) + 1) = ',' || ou.dn
         )
         SELECT
             'warn' AS status,

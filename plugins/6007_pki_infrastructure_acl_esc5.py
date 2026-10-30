@@ -77,13 +77,18 @@ so a grant to Everyone produced no finding. Such broad well-known
 principals are now reported (named in the summary, object_guid NULL);
 other object-less SIDs (SYSTEM, Creator Owner, Self, Enterprise Domain
 Controllers) are still left out, and expected holders are matched by SID.
+
+[v1.6] Inherit-only ACEs are left out: they grant nothing on the object
+that carries them (for example an OU delegation over computer objects,
+inherited by a CA host's computer account only as an ACE that applies to
+its children, was reported as a critical ESC5 finding on the CA host).
 """
 
 PLUGIN = {
     "plugin_id": 6007,
     "category": "Certificate Services",
     "name": "PKI Infrastructure Object ACL Misconfiguration Matches ESC5",
-    "version": "1.5",
+    "version": "1.6",
     "revision_date": "2026-10-30",
     "remediation": (
         "Confirm whether this grant is a deliberate PKI administration "
@@ -201,6 +206,8 @@ PLUGIN = {
             WHERE a.client_id = %(client_id)s
               AND a.valid_to IS NULL
               AND a.ace_type = 'allow'
+              -- [v1.6] an inherit-only ACE grants nothing on this object
+              AND a.inherit_only IS NOT TRUE
               AND (
                     (a.access_mask & (268435456 | 1073741824 | 262144 | 524288)) != 0
                     OR (a.access_mask & 983551) = 983551                    -- GenericAll, as stored

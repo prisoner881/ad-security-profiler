@@ -19,14 +19,18 @@ order) and listed in detail.object_dns, which replaces detail.object_dn.
 longer matched, Windows 2000 and Windows NT now are. The ad_domain test
 is client-scoped, deleted owner objects are excluded, and the owner's
 name in the summary is NULL-safe.
+
+[v1.4] Windows Server 2008 is matched as "server ... 2008", so the
+"Windows Server® 2008 ..." spelling (with the registered sign, as 2008 RTM
+hosts report it) counts as unsupported; it was missed.
 """
 
 PLUGIN = {
     "plugin_id": 2028,
     "category": "Computer Accounts",
     "name": "Domain Root or AdminSDHolder Owned by an Unsupported or Dormant Computer",
-    "version": "1.3",
-    "revision_date": "2026-10-04",
+    "version": "1.4",
+    "revision_date": "2026-10-30",
     "remediation": (
         "Take ownership back to a recognized default holder immediately "
         "(see plugin 5006's remediation) -- this is a higher-priority "
@@ -128,7 +132,7 @@ PLUGIN = {
                 || ' and is independently weak: '
                 || (SELECT string_agg(x, ', ') FROM (VALUES
                         (CASE WHEN (owner.operating_system ILIKE '%%windows 10%%' AND owner.operating_system NOT ILIKE '%%LTSC%%') OR owner.operating_system ILIKE '%%server 2012%%'
-                              OR owner.operating_system ILIKE '%%server 2008%%' OR owner.operating_system ILIKE '%%server 2003%%'
+                              OR owner.operating_system ILIKE '%%server%%2008%%' OR owner.operating_system ILIKE '%%server 2003%%'
                               OR owner.operating_system ILIKE '%%windows 7%%' OR owner.operating_system ILIKE '%%windows 8%%'
                               OR owner.operating_system ILIKE '%%windows xp%%' OR owner.operating_system ILIKE '%%windows vista%%'
                               OR owner.operating_system ILIKE '%%windows 2000%%' OR owner.operating_system ILIKE '%%windows nt%%'
@@ -149,7 +153,7 @@ PLUGIN = {
            AND owner.valid_to IS NULL
         WHERE (
                 (owner.operating_system ILIKE '%%windows 10%%' AND owner.operating_system NOT ILIKE '%%LTSC%%') OR owner.operating_system ILIKE '%%server 2012%%'
-                OR owner.operating_system ILIKE '%%server 2008%%' OR owner.operating_system ILIKE '%%server 2003%%'
+                OR owner.operating_system ILIKE '%%server%%2008%%' OR owner.operating_system ILIKE '%%server 2003%%'
                 OR owner.operating_system ILIKE '%%windows 7%%' OR owner.operating_system ILIKE '%%windows 8%%'
                 OR owner.operating_system ILIKE '%%windows xp%%' OR owner.operating_system ILIKE '%%windows vista%%'
                 OR owner.operating_system ILIKE '%%windows 2000%%' OR owner.operating_system ILIKE '%%windows nt%%'

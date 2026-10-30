@@ -36,14 +36,20 @@ right inherited by every descendant is the dangerous part of the ADPREP
 bug pattern.
 
 [v1.3] dead reference link replaced; no query change.
+
+[v1.4] Only ACEs that grant a right that changes something are reported
+(create child, validated write, write property, delete, delete tree,
+control access, write DACL, write owner, GenericAll / GenericWrite); a
+read-only Enterprise Key Admins ACE (read property, list) was reported as a
+critical finding. The domain is matched within the client.
 """
 
 PLUGIN = {
     "plugin_id": 5009,
     "category": "ACLs",
     "name": "Enterprise Key Admins Holds Excessive Rights on the Domain Root",
-    "version": "1.3",
-    "revision_date": "2026-10-21",
+    "version": "1.4",
+    "revision_date": "2026-10-30",
     "remediation": (
         "Remove the overly broad ACE and replace it with the correctly-"
         "scoped one Microsoft's own remediation guidance specifies: "
@@ -104,11 +110,16 @@ PLUGIN = {
             SELECT a.object_guid, a.trustee_sid, a.access_mask, a.object_type_guid,
                    ((a.access_mask & 983551) = 983551 OR (a.access_mask & 268435456) <> 0) AS is_generic_all
             FROM acl_edge a
-            JOIN ad_domain d ON d.object_guid = a.object_guid AND d.valid_to IS NULL
+            JOIN ad_domain d ON d.object_guid = a.object_guid AND d.client_id = a.client_id
+                            AND d.valid_to IS NULL
             WHERE a.client_id = %(client_id)s
               AND a.valid_to IS NULL
               AND a.ace_type = 'allow'
               AND a.trustee_sid LIKE '%%-527'
+              -- [v1.4] a right that changes something: CreateChild, Self,
+              -- WriteProperty, DeleteTree, ControlAccess, Delete, WriteDacl,
+              -- WriteOwner, GenericAll, GenericWrite (read-only ACEs left out)
+              AND (a.access_mask & 1343029609) <> 0
               AND (a.object_type_guid IS NULL
                    OR a.object_type_guid != '5b47d60f-6090-40b2-9f37-2a4de88f3063')
         ),

@@ -28,6 +28,12 @@ object_guid md5('10058:' || client_id || ':' || principal || ':' || scope
 custom_role_assignments; built-in app-scoped active assignments from
 entra_graph_collector 0.9.0) and PIM-eligible scoped assignments in
 entra_directory_role_member, plus the sources plugin 10062 uses.
+
+[v1.1] Custom role actions on the ".myOrganization" form of an entity
+(microsoft.directory/applications.myOrganization/credentials/update) are
+matched like the plain entity; they were missed. An active and a
+PIM-eligible assignment of the same role at the same scope are one finding
+(reported as active); they produced two rows with the same identity.
 """
 
 # ---------------------------------------------------------------------------
@@ -149,8 +155,8 @@ PLUGIN = {
     "plugin_id": 10058,
     "category": "Hybrid Identity",
     "name": "App-Scoped Role Lets a Non-Privileged Principal Take Over a Privileged Application",
-    "version": "1.0",
-    "revision_date": "2026-10-22",
+    "version": "1.1",
+    "revision_date": "2026-10-30",
     "control_id": "HYBRID-10058",
     "requires_sources": ["custom_role_assignments", "app_role_grants", "service_principals"],
     "framework_tags": [
@@ -212,10 +218,10 @@ PLUGIN = {
              WHERE rd.client_id = %(client_id)s
                AND rd.is_built_in IS FALSE
                AND EXISTS (SELECT 1 FROM unnest(rd.allowed_actions) a
-                            WHERE lower(a) ~ '^microsoft[.]directory/(applications|serviceprincipals)/(credentials|owners|allproperties|[*])/(update|alltasks|[*])$'
-                               OR lower(a) ~ '^microsoft[.]directory/(applications|serviceprincipals)/[*]$')
+                            WHERE lower(a) ~ '^microsoft[.]directory/(applications|serviceprincipals)([.]myorganization)?/(credentials|owners|allproperties|[*])/(update|alltasks|[*])$'
+                               OR lower(a) ~ '^microsoft[.]directory/(applications|serviceprincipals)([.]myorganization)?/[*]$')
         ),
-        scoped AS (
+        scoped_raw AS (
             SELECT a.principal_id, a.principal_type, COALESCE(a.principal_upn, a.principal_display_name) AS principal_name,
                    a.role_definition_id, cr.display_name AS role_name, a.assignment_type,
                    lower(substr(a.directory_scope_id, 2)) AS scope_object_id, a.directory_scope_id
@@ -233,6 +239,18 @@ PLUGIN = {
                AND rm.role_template_id IN ('9b895d92-2cd3-44c7-9d02-a6ac2d5ea5c3',
                                            '158c047a-c907-4556-b7ef-446551a6b5f7')
                AND rm.directory_scope_id ~ '^/[0-9a-fA-F-]{36}$'
+        ),
+        scoped AS (
+            -- [v1.1] one row per (principal, role, scope): an active and a
+            -- PIM-eligible assignment of the same role had the same identity
+            SELECT principal_id, min(principal_type) AS principal_type,
+                   min(principal_name) AS principal_name, role_definition_id,
+                   min(role_name) AS role_name,
+                   CASE WHEN bool_and(assignment_type = 'eligible') THEN 'eligible' ELSE 'active' END
+                       AS assignment_type,
+                   scope_object_id, min(directory_scope_id) AS directory_scope_id
+              FROM scoped_raw
+             GROUP BY principal_id, role_definition_id, scope_object_id
         ),
         target AS (
             -- the scope is an application registration (-> its service principal) or a service principal

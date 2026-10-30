@@ -45,14 +45,21 @@ treated like Application Administrator: it manages agent identities and
 blueprints, including their credentials, and until April 2026 could also
 take over ordinary service principals (Silverfort); Microsoft labels it
 privileged.
+
+[v1.2] No query change. Since entra_graph_collector.py 1.0.3, an assignment
+that was not seen in the previous successful role read -- removed, then
+granted again -- gets a new first_seen_at, so the re-grant is reported as a
+new assignment. Before, it kept the first_seen_at of the original grant and
+was never reported, which hid re-granting Global Administrator after a
+clean-up (a persistence step).
 """
 
 PLUGIN = {
     "plugin_id": 11020,
     "category": "Change Detection",
     "name": "New Highly Privileged Entra ID Role Assignment",
-    "version": "1.1",
-    "revision_date": "2026-10-22",
+    "version": "1.2",
+    "revision_date": "2026-10-30",
     "control_id": "CHANGE-11020",
     "framework_tags": [
         "CISA-SCUBA-MS.AAD.7.7",

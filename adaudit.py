@@ -2,7 +2,7 @@
 """
 adaudit.py -- AD Security & Compliance Plugin Runner
 ======================================================
-VERSION: 1.0.3
+VERSION: 1.0.4
 
 Companion to adprofiler.py. Where adprofiler.py collects AD data,
 adaudit.py analyzes it: discovers every plugin file in plugins/, runs each
@@ -25,6 +25,13 @@ DESIGN:
       as: (status, object_guid, stig_severity, stig_reference,
       tool_severity, tool_reference, fd_severity, summary, detail).
       Zero rows returned = clean pass, nothing to report.
+    - [v1.0.4] The open findings a NOT ASSESSED plugin keeps (they are
+      pushed as unchanged) count like any other open finding: they are
+      listed under the plugin in the console report and the workbook, make
+      its controls failing or warning on the compliance sheets, and count
+      for --fail-on. They used to be left out, so the exit status and
+      totals disagreed with what was pushed. Needs schema v48 (plugins
+      11021, 11027, 11029).
     - [v1.0.3] Push (adaudit_push.py): change labels are relative to the
       last run the API was sent -- skipped and expired runs no longer count
       as the previous run. A finding fixed during a skipped run used to be
@@ -287,7 +294,7 @@ import psycopg2.extras
 import adaudit_push
 import run_lock  # [v1.0.2] one run at a time, see run_lock.py
 
-VERSION = "1.0.3"
+VERSION = "1.0.4"
 
 # [test-candidate-branch] Always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
@@ -646,8 +653,9 @@ def connect_postgres():
 # dSHeuristics / msDS-Other-Settings / NetBIOS / scriptPath columns and the
 # SYSVOL script commands (plugins 1052, 4038, 4039, 9040-9042), v45 the
 # computer creator SID, DC SYSVOL subscriptions and users' Java attributes
-# (plugins 2044-2046, 4021, 11001).
-REQUIRED_SCHEMA_VERSION = 46
+# (plugins 2044-2046, 4021, 11001), v48 ad_gpo_sysvol.first_read_run_id
+# (plugin 11021; v47 changed no plugin input).
+REQUIRED_SCHEMA_VERSION = 48
 
 # [v0.9.0] Data sources a client may not have collected: (table/view names a
 # plugin query mentions, probe returning TRUE when the client has the data,
@@ -902,6 +910,21 @@ def get_open_evidence_map(pg_cur, control_test_id, client_id):
           AND valid_to IS NULL;
     """, {"control_test_id": control_test_id, "client_id": client_id})
     return {row["identity_guid"]: row for row in pg_cur.fetchall()}
+
+
+def kept_open_findings(pg_cur, control_test_id, client_id, plugin):
+    """[v1.0.4] The open findings of a plugin that is NOT ASSESSED this run
+    (kept open, pushed as unchanged), in sync_evidence()'s finding shape,
+    with kept_not_assessed = True."""
+    return [{
+        "plugin_id": plugin["plugin_id"], "plugin_version": plugin["version"],
+        "category": plugin["category"], "name": plugin["name"],
+        "status": row["status"], "change_status": "unchanged", "kept_not_assessed": True,
+        "stig_severity": row["stig_severity"], "stig_reference": row.get("stig_reference"),
+        "tool_severity": row["tool_severity"], "tool_reference": row.get("tool_reference"),
+        "fd_severity": row["fd_severity"], "summary": row["summary"],
+        "detail": row.get("detail"), "references": plugin.get("references"),
+    } for row in get_open_evidence_map(pg_cur, control_test_id, client_id).values()]
 
 
 def close_evidence_version(pg_cur, evidence_fact_id, valid_to, evidence_run_id_valid_to, change_status):
@@ -1169,6 +1192,7 @@ def print_report(plugin_summaries, all_findings):
 
     finding_marker = {"fail": "[FAIL]", "warn": "[WARN]"}
     change_tag = {"new": "[NEW]", "changed": "[CHANGED]", "remediated": "[REMEDIATED]", "unchanged": ""}
+    total_kept = sum(1 for f in all_findings if f.get("kept_not_assessed"))
 
     for category in sorted(by_category):
         print()
@@ -1201,7 +1225,8 @@ def print_report(plugin_summaries, all_findings):
                 remediated = f["change_status"] == "remediated"
                 status_marker = ("[ OK ]" if remediated else
                                  finding_marker.get(f["status"], f"[{f['status'].upper()}]"))
-                ctag = change_tag.get(f["change_status"], "")
+                ctag = ("[KEPT: not assessed this run]" if f.get("kept_not_assessed")
+                        else change_tag.get(f["change_status"], ""))
                 ctag_str = f" {ctag}" if ctag else ""
                 print(f"         {status_marker} #{f['plugin_id']} [v{f['plugin_version']}]"
                       f"{ctag_str} [{'/'.join(sev_bits)}] {f['summary']}")
@@ -1229,9 +1254,25 @@ def print_report(plugin_summaries, all_findings):
     print(f"  Summary: {total_fail} FAIL, {total_warn} WARN, {total_pass} PASS"
           + (f", {total_error} ERROR" if total_error else "")
           + (f", {total_na} NOT ASSESSED (source data not collected)" if total_na else ""))
+    if total_kept:
+        print(f"  {total_kept} open finding(s) of NOT ASSESSED plugins kept from their last "
+              f"assessment (still open, counted for --fail-on)")
     print(f"  Change tracking: {total_new} new, {total_changed} changed, "
           f"{total_remediated} remediated since last run")
     print("=" * 78)
+
+
+def _compliance_result(summary, open_counts, not_assessed_plugin_ids):
+    """A plugin's result on the compliance sheets. [v1.0.4] A NOT ASSESSED
+    plugin that keeps open findings from its last assessment is failing or
+    warning by those findings (they are still open, and pushed)."""
+    if summary["rollup"] == "pass" and summary["plugin_id"] in not_assessed_plugin_ids:
+        if open_counts["fail"]:
+            return "fail"
+        if open_counts["warn"]:
+            return "warn"
+        return "not_assessed"
+    return summary["rollup"]
 
 
 def build_compliance(plugin_summaries, all_findings, not_assessed_plugin_ids=()):
@@ -1280,8 +1321,7 @@ def build_compliance(plugin_summaries, all_findings, not_assessed_plugin_ids=())
             result[key]["rows"].append({
                 "control": control, "plugin_id": p["plugin_id"], "name": p["name"],
                 "category": p["category"],
-                "result": ("not_assessed" if p["rollup"] == "pass"
-                           and p["plugin_id"] in not_assessed_plugin_ids else p["rollup"]),
+                "result": _compliance_result(p, open_counts, not_assessed_plugin_ids),
                 "open_fail": open_counts["fail"], "open_warn": open_counts["warn"],
                 "severity": open_counts["severity"],
             })
@@ -1918,13 +1958,13 @@ def main():
             if not rows and plugin["plugin_id"] in not_assessed_ids:
                 # [v0.9.2] Zero rows because the plugin's source data is missing
                 # (e.g. an optional Graph permission or licence lapsed), not because
-                # anything was fixed: record nothing, close nothing.
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT count(*) FROM control_evidence_fact WHERE control_test_id = %s "
-                        "AND client_id = %s AND valid_to IS NULL;", (control_test_id, client_id))
-                    not_assessed_kept += cur.fetchone()[0]
+                # anything was fixed: record nothing, close nothing. [v1.0.4]
+                # The findings kept open are reported with the others.
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    kept = kept_open_findings(cur, control_test_id, client_id, plugin)
                 conn.commit()
+                not_assessed_kept += len(kept)
+                all_findings.extend(kept)
                 plugin_summaries.append({"plugin_id": plugin["plugin_id"], "category": plugin["category"],
                                           "name": plugin["name"], "version": plugin["version"],
                                           "rollup": "pass", "framework_tags": plugin["framework_tags"],

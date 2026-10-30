@@ -37,14 +37,18 @@ when that is the ONLY kind of MFA policy, the plugin now reports a medium
 warn instead of passing. Identity is now a fixed per-client object_guid
 (md5 of the client id) so the policy counts in detail no longer change the
 finding identity whenever an unrelated policy is added or toggled.
+
+[v1.2] Terms of use in an OR grant count as another way through: "require
+MFA OR accept the terms of use" lets a user in without MFA, and was counted
+as mandatory MFA.
 """
 
 PLUGIN = {
     "plugin_id": 10004,
     "category": "Hybrid Identity",
     "name": "No MFA Enforcement via Security Defaults or Conditional Access",
-    "version": "1.1",
-    "revision_date": "2026-10-04",
+    "version": "1.2",
+    "revision_date": "2026-10-30",
     "remediation": (
         "Enable MFA enforcement through one of the two available "
         "mechanisms. The fastest path for a tenant with no existing "
@@ -106,7 +110,10 @@ PLUGIN = {
                    upper(COALESCE(p->'grant_controls'->>'operator', 'OR')) AS operator,
                    jsonb_typeof(p->'grant_controls'->'authenticationStrength') = 'object' AS has_auth_strength,
                    COALESCE(jsonb_array_length(CASE WHEN jsonb_typeof(p->'grant_controls'->'customAuthenticationFactors') = 'array'
-                                                    THEN p->'grant_controls'->'customAuthenticationFactors' END), 0) AS custom_count
+                                                    THEN p->'grant_controls'->'customAuthenticationFactors' END), 0) AS custom_count,
+                   -- [v1.2] accepting a terms of use is another way through an OR
+                   COALESCE(jsonb_array_length(CASE WHEN jsonb_typeof(p->'grant_controls'->'termsOfUse') = 'array'
+                                                    THEN p->'grant_controls'->'termsOfUse' END), 0) AS terms_count
               FROM entra_security_posture sp
               CROSS JOIN LATERAL jsonb_array_elements(sp.ca_policies) p
              WHERE sp.client_id = %(client_id)s
@@ -117,7 +124,7 @@ PLUGIN = {
                    -- MFA is mandatory unless an OR offers another way through
                    (operator = 'AND'
                     OR (CASE WHEN jsonb_typeof(builtin) = 'array' THEN jsonb_array_length(builtin) ELSE 0 END
-                        + CASE WHEN has_auth_strength THEN 1 ELSE 0 END + custom_count) <= 1) AS strict
+                        + CASE WHEN has_auth_strength THEN 1 ELSE 0 END + custom_count + terms_count) <= 1) AS strict
               FROM pol
              WHERE builtin ? 'mfa' OR has_auth_strength IS TRUE
         ),

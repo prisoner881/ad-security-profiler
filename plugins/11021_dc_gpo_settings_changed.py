@@ -41,14 +41,22 @@ collector only started reading in adprofiler 0.8.0 (script commands, GPP
 Files and FolderOptions) is not a change on the first run made by 0.8.0 or
 later: those entries existed before, they were just not collected. Changes made and
 reverted between two runs are not observed.
+
+[1.2] Also eligible: a GPO whose folder an earlier run read
+(ad_gpo_sysvol.first_read_run_id, schema v48) -- a GPO that was empty at the
+first SYSVOL collection had no edges, so the first settings added to it were
+never reported. On the first run by adprofiler 1.0.4 or later
+(sysvol_collector.py 1.2), Registry.pol deletions move from
+"...\\**del.X" / "...\\**DeleteValues" keys to DELETE rows under the deleted
+value's own key; that re-keying is not reported as a change.
 """
 
 PLUGIN = {
     "plugin_id": 11021,
     "category": "Change Detection",
     "name": "Group Policy Settings Changed in GPOs That Apply to Domain Controllers",
-    "version": "1.1",
-    "revision_date": "2026-10-21",
+    "version": "1.2",
+    "revision_date": "2026-10-30",
     "control_id": "CHANGE-11021",
     "framework_tags": [
         "NIST-800-53-CM-3", "NIST-800-53-SI-4", "NIST-800-53-AU-6",
@@ -113,6 +121,19 @@ PLUGIN = {
                       >= ARRAY[0, 8, 0]
             ) AS baseline_run
         ),
+        -- [1.2] The first run by adprofiler 1.0.4+ (sysvol_collector.py 1.2)
+        -- re-keys Registry.pol deletions: "...\\**del.X" and "...\\**DeleteValues"
+        -- rows are replaced by DELETE rows under the deleted value's own key.
+        del_rekey AS (
+            SELECT NOT EXISTS (
+                SELECT 1 FROM sync_run r
+                WHERE r.client_id = %(client_id)s AND r.run_id < %(run_id)s
+                  AND r.status = 'succeeded'
+                  AND r.collector_version ~ '^[0-9]+(\.[0-9]+)*'
+                  AND string_to_array(substring(r.collector_version FROM '^[0-9]+(?:\.[0-9]+)*'), '.')::int[]
+                      >= ARRAY[1, 0, 4]
+            ) AS rekey_run
+        ),
         dc_gpo AS (
             SELECT DISTINCT a.gpo_guid
             FROM v_gpo_dc_application a
@@ -132,7 +153,12 @@ PLUGIN = {
                    OR EXISTS (SELECT 1 FROM gpo_preference_item_edge e
                               WHERE e.client_id = %(client_id)s AND e.gpo_guid = d.object_guid
                                 AND e.run_id_valid_from < %(run_id)s)
-                   OR (b.first_run < %(run_id)s AND d.first_seen_run_id > b.first_run))
+                   OR (b.first_run < %(run_id)s AND d.first_seen_run_id > b.first_run)
+                   -- [1.2] its folder was read by an earlier run (an empty GPO
+                   -- has no edges, so its first settings were never eligible)
+                   OR EXISTS (SELECT 1 FROM ad_gpo_sysvol g
+                              WHERE g.client_id = %(client_id)s AND g.gpo_object_guid = d.object_guid
+                                AND g.first_read_run_id < %(run_id)s))
         ),
         s_opened AS (
             SELECT e.gpo_guid, e.scope, e.source, e.section, e.setting_key, e.value_type, e.setting_value
@@ -140,12 +166,15 @@ PLUGIN = {
             WHERE e.client_id = %(client_id)s AND e.run_id_valid_from = %(run_id)s
               AND e.gpo_guid IN (SELECT gpo_guid FROM dc_gpo)
               AND NOT (e.source = 'scripts' AND (SELECT baseline_run FROM new_kinds))
+              AND NOT (e.value_type = 'DELETE' AND (SELECT rekey_run FROM del_rekey))
         ),
         s_closed AS (
             SELECT e.gpo_guid, e.scope, e.source, e.section, e.setting_key, e.value_type, e.setting_value
             FROM gpo_setting_edge e
             WHERE e.client_id = %(client_id)s AND e.run_id_valid_to = %(run_id)s
               AND e.gpo_guid IN (SELECT gpo_guid FROM dc_gpo)
+              AND NOT (lower(e.setting_key) ~ '\\\*\*(del\.|deletevalues$)'
+                       AND (SELECT rekey_run FROM del_rekey))
         ),
         s_change AS (
             SELECT COALESCE(o.gpo_guid, c.gpo_guid) AS gpo_guid,

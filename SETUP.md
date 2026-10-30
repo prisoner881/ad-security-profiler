@@ -4,7 +4,7 @@ These steps take a brand-new Ubuntu 26 LTS machine to a working state
 where the three scripts can be run interactively, in sequence, against
 your live Active Directory and Entra ID environment.
 
-This guide covers release 1.0 and its 1.0.x updates (schema v47).
+This guide covers release 1.0 and its 1.0.x updates (schema v48).
 `RELEASE_NOTES.md` lists the current version of each script, what changed
 and how to upgrade.
 

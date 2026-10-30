@@ -1,8 +1,12 @@
 """
 sysvol_collector.py -- SYSVOL / NETLOGON reader for adprofiler.py
 =================================================================
-VERSION: 1.1 (ships with adprofiler.py 0.8.0, schema v44)
+VERSION: 1.2 (ships with adprofiler.py 1.0.4, schema v48)
 
+1.2: Registry.pol deletions take effect: "**del.X" and "**DeleteValues" are
+     stored as DELETE rows under the key of the value they delete (they were
+     stored under "...\\**del.X" and never overrode X), the last entry for a
+     key wins, and ad_gpo_sysvol.first_read_run_id is kept across runs.
 1.1: the commands in scripts.ini / psscripts.ini are stored (gpo_setting_edge
      source 'scripts', CmdLine only), and the Files and FolderOptions
      preference types are read (plugins 9040-9042).
@@ -516,14 +520,38 @@ def registry_pol_settings(entries, scope):
     hive = "HKLM" if scope == "machine" else "HKCU"
     rows = []
     for key, value_name, vtype, raw in entries:
-        if value_name.lower().startswith("**del.") or value_name.lower().startswith("**delvals"):
+        lname = value_name.lower()
+        if lname.startswith("**del."):
+            # "delete value X": stored under the key of X itself, so that it
+            # overrides X set by a lower-precedence GPO
+            rows.append(("registry", hive, f"{key}\\{value_name[6:]}", "DELETE", ""))
+            continue
+        if lname == "**deletevalues":
+            # "delete values X;Y;...": one DELETE row per value, as above
+            _, names = format_reg_value(vtype, raw)
+            for name in (names or "").split(";"):
+                if name.strip():
+                    rows.append(("registry", hive, f"{key}\\{name.strip()}", "DELETE", ""))
+            continue
+        if lname.startswith("**delvals") or lname.startswith("**delete"):
+            # "**delvals.": every value under the key is deleted before this
+            # GPO's own values under it are set (list policies such as
+            # Hardened UNC Paths or ASR rules); kept as a marker row under
+            # the key that list plugins honour. "**DeleteKeys" is kept as is.
             rows.append(("registry", hive, f"{key}\\{value_name}", "DELETE", ""))
             continue
         t, v = format_reg_value(vtype, raw)
         if t in STRING_REG_TYPES and v and is_secret_value_name(value_name):
             v = REDACTED
         rows.append(("registry", hive, f"{key}\\{value_name}", t, v))
-    return rows
+    # Registry.pol entries are applied in order, so a value set after a
+    # delete of the same value (or the reverse) is what takes effect: keep
+    # the last row for each key.
+    last = {}
+    for row in rows:
+        last.pop(row[2].lower(), None)
+        last[row[2].lower()] = row
+    return list(last.values())
 
 
 def sysvol_relative_path(gpc_file_sys_path, domain_fqdn, gpo_cn):
@@ -798,13 +826,22 @@ def collect_sysvol(pg_cur, client_id, run_id, run_timestamp, reader, smb_host, d
         opened += o
         closed += c
 
+    # first_read_run_id (schema v48): the first run that read the GPO's
+    # folder; kept across runs (plugin 11021 compares against it).
+    pg_cur.execute("SELECT gpo_object_guid, first_read_run_id FROM ad_gpo_sysvol "
+                   "WHERE client_id = %s", (client_id,))
+    first_read = dict(pg_cur.fetchall())
     pg_cur.execute("DELETE FROM ad_gpo_sysvol WHERE client_id = %s", (client_id,))
     for gpo_guid, path, status, version, files, detail in status_rows:
+        first = first_read.get(gpo_guid)
+        if first is None and status == "ok":
+            first = run_id
         pg_cur.execute(
             "INSERT INTO ad_gpo_sysvol (client_id, gpo_object_guid, sysvol_path, read_status, "
-            "gpt_ini_version, files_read, error_detail, run_id, collected_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
-            (client_id, gpo_guid, path, status, version, files, detail, run_id, run_timestamp),
+            "gpt_ini_version, files_read, error_detail, run_id, collected_at, first_read_run_id) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (client_id, gpo_guid, path, status, version, files, detail, run_id, run_timestamp,
+             first),
         )
 
     overall = "ok" if not unreadable_gpos and netlogon_ok else "partial"

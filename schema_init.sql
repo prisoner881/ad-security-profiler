@@ -3611,6 +3611,15 @@ CREATE OR REPLACE VIEW ad_intel.v_privileged_principal AS
                                   WHERE dc.client_id = a.client_id AND dc.valid_to IS NULL
                                     AND dc.is_domain_controller
                                     AND dc.admin_count IS DISTINCT FROM 1))
+                 -- [v48] An inherit-only ACE on the domain root inherited by
+                 -- OUs (or by every class) lands on the OU that holds the DCs,
+                 -- a Tier 0 object; OUs are never AdminSDHolder-protected.
+                 OR (t.tier0_reason = 'domain_root'
+                     AND (a.inherited_object_type_guid IS NULL
+                          OR a.inherited_object_type_guid = 'bf967aa5-0de6-11d0-a285-00aa003049e2')
+                     AND EXISTS (SELECT 1 FROM ad_intel.v_tier0_object x
+                                  WHERE x.client_id = a.client_id
+                                    AND x.tier0_reason = 'domain_controller_ou'))
                )
            AND (
                  -- AD stores generic rights already mapped to specific ones,
@@ -3627,6 +3636,18 @@ CREATE OR REPLACE VIEW ad_intel.v_privileged_principal AS
               OR ((a.access_mask & 32) <> 0             -- write gPLink: link a GPO
                   AND a.object_type_guid = 'f30e3bbe-9ff0-11d1-b603-0000f80367c1'
                   AND t.tier0_reason IN ('domain_root', 'domain_controller_ou'))
+              -- [v48] write member (WRITE_PROP) or add/remove self (validated
+              -- write, SELF) on a protected group, or on AdminSDHolder, whose
+              -- ACL SDProp copies onto every protected group: adds anyone to
+              -- Domain Admins.
+              OR ((a.access_mask & (32 | 8)) <> 0
+                  AND a.object_type_guid = 'bf9679c0-0de6-11d0-a285-00aa003049e2'
+                  AND t.tier0_reason IN ('protected_group', 'adminsdholder'))
+              -- [v48] User-Force-Change-Password on AdminSDHolder: copied onto
+              -- every protected user (reset a Domain Admin's password).
+              OR ((a.access_mask & 256) <> 0
+                  AND a.object_type_guid = '00299570-246d-11d0-a768-00aa006e0529'
+                  AND t.tier0_reason = 'adminsdholder')
            )
     ),
     dcsync AS (
@@ -4226,7 +4247,11 @@ chain AS (
            s.block_inheritance,
            length(s.dn) - length(replace(s.dn, ',', '')) AS depth
     FROM dc
-    JOIN som s ON s.client_id = dc.client_id AND dc.dc_dn LIKE '%,' || s.dn
+    -- [v48] DN suffix compared as text, not with LIKE: '_' and '%' in an OU
+    -- name were wildcards and a backslash (DN escapes such as '\,') was
+    -- LIKE's escape character, so GPOs were applied to the wrong DCs or the
+    -- DC's own OU stopped matching.
+    JOIN som s ON s.client_id = dc.client_id AND right(dc.dc_dn, length(s.dn) + 1) = ',' || s.dn
 ),
 blocked AS (
     -- Block inheritance on an OU stops non-enforced links from containers above it.
@@ -4992,11 +5017,13 @@ COMMENT ON TABLE ad_intel.entra_tenant_license IS
 CREATE OR REPLACE VIEW ad_intel.v_entra_tenant_capability AS
 SELECT s.client_id,
        s.status AS license_status,
-       COALESCE(bool_or(l.capability_status = 'Enabled'
+       -- [v48] 'Warning' = past its end date, in the grace period: the
+       -- features still work, so the licence still counts.
+       COALESCE(bool_or(l.capability_status IN ('Enabled', 'Warning')
                         AND l.service_plans && ARRAY['AAD_PREMIUM', 'AAD_PREMIUM_P2']), FALSE) AS has_p1,
-       COALESCE(bool_or(l.capability_status = 'Enabled'
+       COALESCE(bool_or(l.capability_status IN ('Enabled', 'Warning')
                         AND l.service_plans && ARRAY['AAD_PREMIUM_P2']), FALSE) AS has_p2,
-       COALESCE(bool_or(l.capability_status = 'Enabled'
+       COALESCE(bool_or(l.capability_status IN ('Enabled', 'Warning')
                         AND l.service_plans && ARRAY['AAD_WRKLDID_P1', 'AAD_WRKLDID_P2']), FALSE)
            AS has_workload_id
 FROM ad_intel.entra_collection_status s
@@ -5657,6 +5684,20 @@ COMMENT ON COLUMN ad_intel.sync_run.dc_dns_hostname IS
 
 
 -- ============================================================================
+-- v48 ADDITIONS -- see schema_migration_v48.sql. (The v_gpo_dc_application,
+-- v_privileged_principal and v_entra_tenant_capability changes are applied in
+-- place above.)
+-- ============================================================================
+
+ALTER TABLE ad_intel.ad_gpo_sysvol
+    ADD COLUMN IF NOT EXISTS first_read_run_id bigint;
+COMMENT ON COLUMN ad_intel.ad_gpo_sysvol.first_read_run_id IS
+    'Run that first read this GPO folder successfully (kept across runs; NULL = never read). Plugin '
+    '11021 reports setting changes only for GPOs read before the run it evaluates, empty ones '
+    'included. (schema v48)';
+
+
+-- ============================================================================
 -- v31 ADDITIONS -- schema version tracking.
 -- ============================================================================
 
@@ -5670,7 +5711,7 @@ CREATE TABLE schema_migration_history (
 -- pretense of having stepped through intermediate versions that were
 -- never actually separately applied to this database.
 INSERT INTO schema_migration_history (version_number, description) VALUES
-    (47, 'Fresh install via schema_init.sql, consolidated through v47');
+    (48, 'Fresh install via schema_init.sql, consolidated through v48');
 
 -- ============================================================================
 -- PARTITIONED TABLE REGISTRY + INITIAL PARTITION CREATION

@@ -4,7 +4,7 @@
  adprofiler.py -- Active Directory Security & Compliance Profiler (Collector)
 ================================================================================
 
-VERSION: 1.0.3
+VERSION: 1.0.4
 
 PURPOSE:
     Connects to an on-premise Active Directory Domain Controller via LDAP,
@@ -176,7 +176,7 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
-VERSION = "1.0.3"
+VERSION = "1.0.4"
 
 # [v0.7.7] The oldest collector version whose stored derived fields
 # (parsed / typed columns computed from raw attributes) are current. A
@@ -192,8 +192,9 @@ VERSION = "1.0.3"
 # msDS-Other-Settings and NetBIOS name) on every existing object. 0.9.0
 # does not raise it: its new columns come from attributes and folded-in
 # keys that version exactly the objects that have them. 0.9.1 and 1.0.0
-# change no derived field either.
-DERIVED_FIELDS_VERSION = "0.8.0"
+# change no derived field either. 1.0.4: user, computer and group
+# description stored as text instead of array literals.
+DERIVED_FIELDS_VERSION = "1.0.4"
 
 
 def _version_tuple(text):
@@ -1230,6 +1231,42 @@ def carry_forward_unreadable_acl_edges(pg_cur, client_id, unreadable_guids, desi
     return carried
 
 
+def unread_scope_guids(pg_cur, client_id, table=None, container_dn=None):
+    """[v1.0.4] object_guids an optional collection that failed this run
+    would have covered: the current rows of a typed table, or the live
+    objects at or below a container DN. Their ACL and gPLink edges are
+    carried forward instead of closed: a read that failed is unknown, not
+    empty (it used to close every edge of the scope, and the next good run
+    reopened them as "newly granted")."""
+    if table:
+        # table names come from this script, never from input
+        pg_cur.execute(f"SELECT object_guid::text FROM {table} "
+                       "WHERE client_id = %s AND valid_to IS NULL", (client_id,))
+    else:
+        pg_cur.execute(
+            "SELECT object_guid::text FROM directory_object "
+            "WHERE client_id = %s AND NOT is_deleted "
+            "AND (lower(dn_current) = lower(%s) "
+            "     OR right(lower(dn_current), length(%s) + 1) = ',' || lower(%s))",
+            (client_id, container_dn, container_dn, container_dn))
+    return {row[0].lower() for row in pg_cur.fetchall()}
+
+
+def resolve_dns_from_database(pg_cur, client_id, dns):
+    """[v1.0.4] {lower-case DN: object_guid} for live objects already in
+    directory_object, for DNs this run's collection did not resolve (their
+    object class failed to read this run, e.g. foreign security principals
+    or GPOs): a link or membership to them is kept rather than closed."""
+    dns = sorted({dn.lower() for dn in dns})
+    if not dns:
+        return {}
+    pg_cur.execute(
+        "SELECT lower(dn_current), object_guid::text FROM directory_object "
+        "WHERE client_id = %s AND NOT is_deleted AND lower(dn_current) = ANY(%s)",
+        (client_id, dns))
+    return dict(pg_cur.fetchall())
+
+
 def reconcile_acl_edge_inheritance(pg_cur, client_id, run_id, run_timestamp, desired_out):
     """[v0.5.13] sync_edges() compares edge KEYS only, so a change to
     inherit_only / inherited_object_type_guid on an otherwise identical
@@ -2083,7 +2120,8 @@ REQUIRED_SCHEMA_COLUMNS = {
     "sysvol_collection_status": {"client_id", "run_id", "collected_at", "smb_host", "status",
                                  "gpos_read", "gpos_unreadable", "netlogon_read", "detail"},
     "ad_gpo_sysvol": {"client_id", "gpo_object_guid", "sysvol_path", "read_status",
-                      "gpt_ini_version", "files_read", "error_detail", "run_id", "collected_at"},
+                      "gpt_ini_version", "files_read", "error_detail", "run_id", "collected_at",
+                      "first_read_run_id"},  # first_read_run_id: schema v48
     "gpo_setting_edge": {"edge_id", "client_id", "gpo_guid", "scope", "source", "section",
                          "setting_key", "value_type", "setting_value", "valid_from", "valid_to",
                          "run_id_valid_from", "run_id_valid_to"},
@@ -2144,7 +2182,7 @@ REQUIRED_IDENTITY_COLUMNS = {
 # the structural check remains the backstop for a schema altered
 # outside the approved migration files, where the version number could
 # claim to be current while the actual structure doesn't match it.
-EXPECTED_SCHEMA_VERSION = 47  # [v1.0.3] v47: sync_run.dc_invocation_id / dc_dns_hostname
+EXPECTED_SCHEMA_VERSION = 48  # [v1.0.4] v48: ad_gpo_sysvol.first_read_run_id (v47: sync_run.dc_invocation_id / dc_dns_hostname)
 
 
 def check_schema_version(pg_conn):
@@ -3184,7 +3222,7 @@ def user_typed_columns(full):
         "service_principal_names": spns or None,
         "sid_history": sid_history or None,
         "protected_users_member": protected_users,
-        "description": full.get("description"),
+        "description": _first_value(full.get("description")),  # [v1.0.4] text, not an array literal
         "notes": full.get("info"),
         "key_credential_count": len(key_credentials),
         "key_credentials": json.dumps(parse_key_credential_link(key_credentials)) if key_credentials else None,
@@ -3250,7 +3288,7 @@ def computer_typed_columns(full):
         "laps_expiration_legacy": filetime_to_datetime(full.get("ms-Mcs-AdmPwdExpirationTime")),
         "laps_expiration_modern": filetime_to_datetime(full.get("msLAPS-PasswordExpirationTime")),
         "pwd_last_set": filetime_to_datetime(full.get("pwdLastSet")),
-        "description": full.get("description"),
+        "description": _first_value(full.get("description")),  # [v1.0.4]
         "notes": full.get("info"),
         "key_credential_count": len(_as_list(full.get("msDS-KeyCredentialLink"))),
         "key_credentials": (json.dumps(parse_key_credential_link(_as_list(full.get("msDS-KeyCredentialLink"))))
@@ -3289,7 +3327,7 @@ def group_typed_columns(full):
         "admin_count": admin_count,
         "is_protected_group": is_protected,
         "member_count_direct": None,  # populated by collect_group_membership() afterward
-        "description": full.get("description"),
+        "description": _first_value(full.get("description")),  # [v1.0.4]
         "notes": full.get("info"),
         "sid_history": sid_history or None,
         "when_created": full.get("whenCreated"),
@@ -3864,6 +3902,7 @@ def collect_group_membership(conn, pg_cur, client_id, run_id, base_dn,
     desired = {}
     valid_from = run_timestamp
     total_members_seen = 0
+    unresolved = []  # [v1.0.4] (group_guid, member_dn), looked up in the database below
 
     for object_guid, full in group_entries:
         dn = full.get("distinguishedName")
@@ -3882,10 +3921,18 @@ def collect_group_membership(conn, pg_cur, client_id, run_id, base_dn,
             member_guid = dn_to_guid.get(member_dn.lower())
             total_members_seen += 1
             if member_guid is None:
-                stats.skipped_unresolved_members += 1
+                unresolved.append((object_guid, member_dn))
                 continue
             if member_guid == object_guid:
                 continue
+            desired[(object_guid, member_guid)] = {"is_direct": True, "is_primary_group": False}
+
+    known = resolve_dns_from_database(pg_cur, client_id, [dn for _, dn in unresolved])
+    for object_guid, member_dn in unresolved:
+        member_guid = known.get(member_dn.lower())
+        if member_guid is None:
+            stats.skipped_unresolved_members += 1
+        elif member_guid != object_guid:
             desired[(object_guid, member_guid)] = {"is_direct": True, "is_primary_group": False}
 
     primary_edges = 0
@@ -3984,7 +4031,8 @@ def parse_gplink(gplink_value):
     return entries
 
 
-def resolve_gpo_links(pg_cur, client_id, run_id, dn_to_guid, linkable_entries, stats, run_timestamp):
+def resolve_gpo_links(pg_cur, client_id, run_id, dn_to_guid, linkable_entries, stats, run_timestamp,
+                      unread_containers=frozenset()):
     """[v0.5.0] Resolves gPLink on every linkable container (the domain
     object plus every OU -- both carry gPLink; sites also can, but this
     project doesn't collect site objects) into gpo_link_edge rows. Same
@@ -4001,16 +4049,25 @@ def resolve_gpo_links(pg_cur, client_id, run_id, dn_to_guid, linkable_entries, s
     their respective collect_object_class() calls (attributes_full
     already has gPLink in it from OU_ATTRS/DOMAIN_ATTRS; no extra LDAP
     round-trip needed here).
+
+    [v1.0.4] unread_containers: GUIDs of containers (OUs, sites) whose
+    collection failed this run; their open links are kept. A linked GPO
+    not collected this run (GPO collection failed) resolves through
+    directory_object.
     """
     log_info("Resolving GPO links (gPLink) across the domain and every OU...")
     desired = {}
     unresolved = 0
+    known = resolve_dns_from_database(
+        pg_cur, client_id,
+        [gpo_dn for _, full in linkable_entries for gpo_dn, _, _ in parse_gplink(full.get("gPLink"))
+         if gpo_dn.lower() not in dn_to_guid])
 
     for container_guid, full in linkable_entries:
         for order, (gpo_dn, link_enabled, link_enforced) in enumerate(
             parse_gplink(full.get("gPLink")), start=1
         ):
-            gpo_guid = dn_to_guid.get(gpo_dn.lower())
+            gpo_guid = dn_to_guid.get(gpo_dn.lower()) or known.get(gpo_dn.lower())
             if gpo_guid is None:
                 unresolved += 1
                 continue
@@ -4020,6 +4077,18 @@ def resolve_gpo_links(pg_cur, client_id, run_id, dn_to_guid, linkable_entries, s
                 "link_enforced": link_enforced,
             }
 
+    carried = 0
+    if unread_containers:
+        pg_cur.execute(
+            "SELECT container_guid::text, gpo_guid::text, link_order, link_enabled, link_enforced "
+            "FROM gpo_link_edge WHERE client_id = %s AND valid_to IS NULL "
+            "AND container_guid = ANY(%s::uuid[])", (client_id, sorted(unread_containers)))
+        for container_guid, gpo_guid, link_order, link_enabled, link_enforced in pg_cur.fetchall():
+            desired.setdefault((container_guid, gpo_guid), {
+                "link_order": link_order, "link_enabled": link_enabled,
+                "link_enforced": link_enforced})
+            carried += 1
+
     opened, closed = sync_edges(
         pg_cur, "gpo_link_edge", client_id, run_id, run_timestamp,
         ["container_guid", "gpo_guid"], desired,
@@ -4028,7 +4097,9 @@ def resolve_gpo_links(pg_cur, client_id, run_id, dn_to_guid, linkable_entries, s
     stats.edges_opened += opened
     stats.edges_closed += closed
     log_success(f"GPO links: {opened} edge(s) opened, {closed} closed, "
-                f"{unresolved} unresolved (linked GPO not found in this run's collection)")
+                f"{unresolved} unresolved (linked GPO not found in this run's collection)"
+                + (f", {carried} kept unchanged (their OU or site could not be read this run)"
+                   if carried else ""))
 
 
 def update_cert_template_enabled(pg_cur, object_guid, is_enabled):
@@ -5667,6 +5738,12 @@ def main():
             # Enterprise Admins / DCs only), so kds_root_key_count = 0
             # means "none visible to the collector", not necessarily
             # "none exist". Pre-2012 schema (no KDS classes): 0.
+            # [v1.0.4] (typed table, container DN) of each optional collection
+            # that failed this run: their objects' ACL edges are kept at the
+            # acl_edge sync (unread_scope_guids()), and an OU or site read
+            # failure keeps their gPLinks.
+            unread_acl_scopes = []
+            unread_link_containers = set()
             kds_container = (f"CN=Master Root Keys,CN=Group Key Distribution Service,"
                              f"CN=Services,{config_nc}")
             kds_entries = []
@@ -5687,6 +5764,7 @@ def main():
                 except OPTIONAL_READ_ERRORS as exc:
                     log_warn(f"KDS root key collection failed (non-fatal): {describe_read_error(exc)}")
                     kds_entries = []
+                    unread_acl_scopes.append((None, kds_container))
             else:
                 kds_root_key_count = 0
 
@@ -5757,6 +5835,8 @@ def main():
             except LDAPException as exc:
                 log_warn(f"OU collection failed (non-fatal): {exc}")
                 ou_entries = []
+                unread_acl_scopes.append(("ad_ou", None))
+                unread_link_containers |= unread_scope_guids(cur, client_id, table="ad_ou")
 
             # [v0.3.0] ACL collection. Domain root first (DCSync rights --
             # who besides Domain Admins/Enterprise Admins/DCs can
@@ -5933,6 +6013,7 @@ def main():
                 log_warn(f"Trust collection failed (non-fatal): {exc}")
 
             gpo_entries = []
+            gpo_collection_failed = False
             try:
                 gpo_entries = collect_object_class(
                     ldap_conn, cur, client_id, run_id, args.dc_host, base_dn,
@@ -5941,6 +6022,8 @@ def main():
                 )
             except LDAPException as exc:
                 log_warn(f"GPO collection failed (non-fatal): {exc}")
+                gpo_collection_failed = True
+                unread_acl_scopes.append(("ad_gpo", None))
             # [v0.6.0] GPO security descriptors (plugin 5012: who can edit a
             # GPO controls every computer/user it applies to). Read here,
             # before the single acl_edge sync further down.
@@ -5976,16 +6059,28 @@ def main():
             except LDAPException as exc:
                 log_warn(f"AD Sites collection failed (non-fatal): {exc}")
                 site_entries = []
+                unread_link_containers |= unread_scope_guids(cur, client_id, table="ad_site")
 
             resolve_gpo_links(
                 cur, client_id, run_id, dn_to_guid,
                 domain_entries + ou_entries + site_entries, stats, run_timestamp,
+                unread_containers=unread_link_containers,
             )
 
             # [v0.7.0] Group Policy content from SYSVOL (opt-in, --sysvol).
             # Never fatal: an unreachable share or folder keeps the
             # previously collected settings (see sysvol_collector.py).
-            if args.sysvol:
+            if args.sysvol and gpo_collection_failed:
+                # [v1.0.4] No list of GPO folders to read: reading SYSVOL
+                # against an empty list would close every setting.
+                log_warn("SYSVOL not collected: the GPOs could not be read from LDAP this run. "
+                         "Previously collected Group Policy data is kept; adaudit.py reports the "
+                         "Group Policy settings checks as NOT ASSESSED for this run.")
+                import sysvol_collector as SV
+                SV.write_collection_status(cur, client_id, run_id, run_timestamp,
+                                           args.smb_host or args.dc_host, "failed", 0, 0, None,
+                                           "GPO collection from LDAP failed")
+            elif args.sysvol:
                 collect_sysvol_step(args, password, cur, client_id, run_id, run_timestamp,
                                     base_dn, gpo_entries, stats)
             else:
@@ -6181,6 +6276,10 @@ def main():
                 )
             except LDAPException as exc:
                 log_warn(f"Certificate template/enrollment service collection failed (non-fatal): {exc}")
+                # [v1.0.4] templates, CAs, the PKI containers and NTAuth; and
+                # the CA host computers (the only computers with ACL edges)
+                unread_acl_scopes.append((None, f"CN=Public Key Services,CN=Services,{rootdse['config_nc']}"))
+                unread_acl_scopes.append(("ad_computer", None))
 
             # [v0.6.0] KDS root key, AD FS DKM, PKI certificate store and
             # DNS zone collection -- all before the acl_edge sync, because
@@ -6223,6 +6322,7 @@ def main():
                                 f"collection account, {adfs_acl_failures} ACL read failure(s)")
             except OPTIONAL_READ_ERRORS as exc:
                 log_warn(f"AD FS DKM collection failed (non-fatal): {describe_read_error(exc)}")
+                unread_acl_scopes.append((None, adfs_container))
 
             for store, store_label, store_cn in (("root", "PKI root CA store", "Certification Authorities"),
                                                  ("aia", "PKI AIA store", "AIA")):
@@ -6263,6 +6363,7 @@ def main():
                 except OPTIONAL_READ_ERRORS as exc:
                     log_warn(f"{dns_label} collection failed (non-fatal, possibly no "
                              f"AD-integrated DNS zones or no such partition): {exc}")
+                    unread_acl_scopes.append((None, dns_zones_container))
 
             # [v0.5.4] Moved here from right after the OU ACL loop -- see
             # the comment left in that spot for why. acl_desired now holds
@@ -6276,6 +6377,16 @@ def main():
                 log_warn(f"ACLs: {len(acl_unreadable)} object(s) had an unreadable security "
                          f"descriptor this run; their {acl_carried} previously collected ACL "
                          f"edge(s) were kept unchanged rather than closed.")
+            # [v1.0.4] Objects of the collections that failed above (none read
+            # this run): their ACL is unknown, not empty.
+            read_guids = {str(key[0]).lower() for key in acl_desired} | acl_unreadable
+            scope_unread = set()
+            for scope_table, scope_dn in unread_acl_scopes:
+                scope_unread |= unread_scope_guids(cur, client_id, scope_table, scope_dn) - read_guids
+            scope_carried = carry_forward_unreadable_acl_edges(cur, client_id, scope_unread, acl_desired)
+            if scope_carried:
+                log_warn(f"ACLs: {scope_carried} previously collected ACL edge(s) of objects whose "
+                         f"collection failed this run were kept unchanged rather than closed.")
             acl_backfilled, acl_inheritance_changed = reconcile_acl_edge_inheritance(
                 cur, client_id, run_id, run_timestamp, acl_desired,
             )
