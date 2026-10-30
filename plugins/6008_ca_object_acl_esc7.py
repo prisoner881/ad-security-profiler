@@ -59,14 +59,22 @@ own computer account (which holds full control on its enrollment
 service object by default) are excluded; the object's owner (implicit
 WriteDacl) is reported; rows are aggregated per (CA, trustee); joins are
 client-scoped; the summary COALESCEs the CA name.
+
+[v1.5] A trustee with no directory object -- Everyone, Authenticated
+Users, Anonymous Logon, Users, Network or Interactive when the domain
+has no foreignSecurityPrincipal for it -- was dropped by an inner join,
+so a grant to Everyone produced no finding. Such broad well-known
+principals are now reported (named in the summary, object_guid NULL);
+other object-less SIDs (SYSTEM, Creator Owner, Self, Enterprise Domain
+Controllers) are still left out, and expected holders are matched by SID.
 """
 
 PLUGIN = {
     "plugin_id": 6008,
     "category": "Certificate Services",
     "name": "Certificate Authority AD Object ACL Misconfiguration (ESC5)",
-    "version": "1.4",
-    "revision_date": "2026-10-04",
+    "version": "1.5",
+    "revision_date": "2026-10-30",
     "remediation": (
         "Confirm whether this grant is a deliberate PKI administration "
         "delegation or leftover/overly broad. The object is the CA's AD "
@@ -171,8 +179,8 @@ PLUGIN = {
         -- host's own computer account (default full control) excluded.
         unexpected_holders AS (
             SELECT da.ca_guid,
-                   COALESCE(trustee_do.sam_account_name, da.trustee_sid) AS trustee_label,
-                   trustee_do.object_sid AS trustee_sid,
+                   COALESCE(trustee_do.sam_account_name, CASE da.trustee_sid WHEN 'S-1-1-0' THEN 'Everyone' WHEN 'S-1-5-11' THEN 'Authenticated Users' WHEN 'S-1-5-7' THEN 'Anonymous Logon' WHEN 'S-1-5-32-545' THEN 'Users' WHEN 'S-1-5-2' THEN 'Network' WHEN 'S-1-5-4' THEN 'Interactive' END, da.trustee_sid) AS trustee_label,
+                   da.trustee_sid AS trustee_sid,
                    trustee_do.object_class AS trustee_object_class,
                    bit_or(da.access_mask) AS access_mask,
                    (SELECT string_agg(x, ', ') FROM (VALUES
@@ -183,14 +191,21 @@ PLUGIN = {
                         (CASE WHEN bool_or(da.is_write_owner) AND NOT bool_or(da.is_generic_all) THEN 'WriteOwner' END)
                     ) AS v(x) WHERE x IS NOT NULL) AS rights_label
             FROM dangerous_aces da
-            JOIN directory_object trustee_do
+            LEFT JOIN directory_object trustee_do
                 ON trustee_do.object_sid = da.trustee_sid AND trustee_do.client_id = %(client_id)s
                AND NOT trustee_do.is_deleted
-            WHERE NOT EXISTS (
+            -- [v1.5] Trustees with no directory object (Everyone, Authenticated Users,
+            -- Anonymous Logon ... when no foreignSecurityPrincipal exists for them) used
+            -- to be dropped by an inner join: a broad grant produced no finding. Kept
+            -- now when the SID is one of those broad well-known principals; other
+            -- object-less SIDs (SYSTEM, Creator Owner, Self, Enterprise Domain
+            -- Controllers ...) stay out, as before. Expected holders are tested by SID.
+            WHERE (trustee_do.object_guid IS NOT NULL OR da.trustee_sid IN ('S-1-1-0', 'S-1-5-11', 'S-1-5-7', 'S-1-5-32-545', 'S-1-5-2', 'S-1-5-4'))
+              AND NOT EXISTS (
                 SELECT 1 FROM expected_holders eh WHERE eh.object_guid = trustee_do.object_guid
             )
-              AND NOT (trustee_do.object_sid LIKE '%%-500' OR trustee_do.object_sid LIKE '%%-516'
-                       OR trustee_do.object_sid LIKE '%%-518' OR trustee_do.object_sid = 'S-1-5-9')
+              AND NOT (da.trustee_sid LIKE '%%-500' OR da.trustee_sid LIKE '%%-516'
+                       OR da.trustee_sid LIKE '%%-518' OR da.trustee_sid = 'S-1-5-9')
               AND NOT EXISTS (SELECT 1 FROM ad_group pg
                               WHERE pg.object_guid = trustee_do.object_guid AND pg.client_id = trustee_do.client_id
                                 AND pg.valid_to IS NULL AND pg.is_protected_group)

@@ -2,7 +2,7 @@
 """
 adaudit.py -- AD Security & Compliance Plugin Runner
 ======================================================
-VERSION: 1.0.2
+VERSION: 1.0.3
 
 Companion to adprofiler.py. Where adprofiler.py collects AD data,
 adaudit.py analyzes it: discovers every plugin file in plugins/, runs each
@@ -25,6 +25,10 @@ DESIGN:
       as: (status, object_guid, stig_severity, stig_reference,
       tool_severity, tool_reference, fd_severity, summary, detail).
       Zero rows returned = clean pass, nothing to report.
+    - [v1.0.3] Push (adaudit_push.py): change labels are relative to the
+      last run the API was sent -- skipped and expired runs no longer count
+      as the previous run. A finding fixed during a skipped run used to be
+      REMEDIATED only in that run, so the API kept it open for good.
     - [v1.0.2] One run at a time: every mode that uses the database takes
       the run lock shared with adprofiler.py and entra_graph_collector.py
       (run_lock.py) right after the PostgreSQL settings are read, so an
@@ -283,7 +287,7 @@ import psycopg2.extras
 import adaudit_push
 import run_lock  # [v1.0.2] one run at a time, see run_lock.py
 
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 
 # [test-candidate-branch] Always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before

@@ -5640,6 +5640,23 @@ COMMENT ON COLUMN ad_intel.entra_security_posture.authorization_policy IS
 
 
 -- ============================================================================
+-- v47 ADDITIONS -- see schema_migration_v47.sql.
+-- ============================================================================
+
+ALTER TABLE ad_intel.sync_run
+    ADD COLUMN IF NOT EXISTS dc_invocation_id uuid,
+    ADD COLUMN IF NOT EXISTS dc_dns_hostname text;
+COMMENT ON COLUMN ad_intel.sync_run.dc_invocation_id IS
+    'invocationId of the domain controller this run read (its NTDS Settings object). The '
+    'deleted-object USN watermark of a previous run is used only when this matches; otherwise '
+    'every deleted object is checked. NULL = not read or collected before adprofiler 1.0.3. '
+    '(schema v47)';
+COMMENT ON COLUMN ad_intel.sync_run.dc_dns_hostname IS
+    'DNS name of the domain controller this run read (RootDSE dnsHostName); dc_queried is what '
+    '--dc-host named. NULL = not read or collected before adprofiler 1.0.3. (schema v47)';
+
+
+-- ============================================================================
 -- v31 ADDITIONS -- schema version tracking.
 -- ============================================================================
 
@@ -5653,7 +5670,7 @@ CREATE TABLE schema_migration_history (
 -- pretense of having stepped through intermediate versions that were
 -- never actually separately applied to this database.
 INSERT INTO schema_migration_history (version_number, description) VALUES
-    (46, 'Fresh install via schema_init.sql, consolidated through v46');
+    (47, 'Fresh install via schema_init.sql, consolidated through v47');
 
 -- ============================================================================
 -- PARTITIONED TABLE REGISTRY + INITIAL PARTITION CREATION

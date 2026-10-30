@@ -39,14 +39,22 @@ Data caveats: needs the CA policy conditions (entra_graph_collector
 object, coverage can't be evaluated and no row is returned. No row when no
 Entra posture was collected. Security Defaults, when enabled, requires MFA
 for Azure management and admin roles, so nothing is reported then.
+
+[v1.1] A Conditional Access policy counts only when no condition narrows
+it: client app types all (or unset), all locations with none excluded, all
+platforms with none excluded, no user / sign-in / service-principal / insider
+risk level, no authentication-flow condition. Before, any all-users
+policy counted when it blocked or required MFA, whatever its conditions -- e.g. the standard "Block legacy authentication"
+policy (client apps Exchange ActiveSync / other, Block) was taken as
+covering every sign-in, so admin portals looked protected.
 """
 
 PLUGIN = {
     "plugin_id": 10024,
     "category": "Hybrid Identity",
     "name": "Admin Portals or Azure Management Not Covered by MFA",
-    "version": "1.0",
-    "revision_date": "2026-10-05",
+    "version": "1.1",
+    "revision_date": "2026-10-30",
     "control_id": "HYBRID-10024",
     "framework_tags": [
         "CISA-SCUBA-MS.AAD.3.2",
@@ -101,6 +109,26 @@ PLUGIN = {
                    COALESCE(p->>'display_name', p->>'id') COLLATE "C" AS name,
                    p->>'state' AS state,
                    COALESCE(jsonb_typeof(p->'conditions') = 'object', FALSE) AS evaluable,
+                   -- [CA conditions] unconditional: no client-app, location, platform,
+                   -- risk, device-filter or authentication-flow condition narrows it
+                   ((jsonb_typeof(p->'conditions'->'clientAppTypes') IS DISTINCT FROM 'array'
+                     OR jsonb_array_length(p->'conditions'->'clientAppTypes') = 0
+                     OR p->'conditions'->'clientAppTypes' ? 'all')
+                    AND (jsonb_typeof(p->'conditions'->'locations') IS DISTINCT FROM 'object'
+                         OR (COALESCE(p->'conditions'->'locations'->'includeLocations', '["All"]'::jsonb) ? 'All'
+                             AND CASE WHEN jsonb_typeof(p->'conditions'->'locations'->'excludeLocations') = 'array'
+                                      THEN jsonb_array_length(p->'conditions'->'locations'->'excludeLocations') ELSE 0 END = 0))
+                    AND (jsonb_typeof(p->'conditions'->'platforms') IS DISTINCT FROM 'object'
+                         OR (COALESCE(p->'conditions'->'platforms'->'includePlatforms', '["all"]'::jsonb) ? 'all'
+                             AND CASE WHEN jsonb_typeof(p->'conditions'->'platforms'->'excludePlatforms') = 'array'
+                                      THEN jsonb_array_length(p->'conditions'->'platforms'->'excludePlatforms') ELSE 0 END = 0))
+                    AND NOT EXISTS (SELECT 1 FROM unnest(ARRAY['userRiskLevels', 'signInRiskLevels',
+                                                               'servicePrincipalRiskLevels']) AS k
+                                     WHERE jsonb_typeof(p->'conditions'->k) = 'array'
+                                       AND jsonb_array_length(p->'conditions'->k) > 0)
+                    AND COALESCE(p->'conditions'->>'insiderRiskLevels', '') = ''
+                    AND COALESCE(p->'conditions'->'authenticationFlows'->>'transferMethods', '') = ''
+                    AND jsonb_typeof(p->'conditions'->'devices'->'deviceFilter') IS DISTINCT FROM 'object') AS unconditional,
                    CASE WHEN jsonb_typeof(p->'grant_controls'->'builtInControls') = 'array'
                         THEN p->'grant_controls'->'builtInControls' ELSE '[]'::jsonb END AS builtin,
                    upper(COALESCE(p->'grant_controls'->>'operator', 'OR')) AS operator,
@@ -123,11 +151,12 @@ PLUGIN = {
             SELECT r.*,
                    r.builtin ? 'block' AS blocks,
                    (r.builtin ? 'mfa' OR r.has_strength) AS mfa,
-                   (r.builtin ? 'block'
-                    OR ((r.builtin ? 'mfa' OR r.has_strength)
-                        AND (r.operator = 'AND'
-                             OR jsonb_array_length(r.builtin) + CASE WHEN r.has_strength THEN 1 ELSE 0 END
-                                + r.other_controls <= 1))) AS protects
+                   (r.unconditional AND
+                    (r.builtin ? 'block'
+                     OR ((r.builtin ? 'mfa' OR r.has_strength)
+                         AND (r.operator = 'AND'
+                              OR jsonb_array_length(r.builtin) + CASE WHEN r.has_strength THEN 1 ELSE 0 END
+                                 + r.other_controls <= 1)))) AS protects
               FROM raw r
         ),
         reach AS (

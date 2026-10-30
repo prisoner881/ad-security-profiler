@@ -4,7 +4,7 @@
  adprofiler.py -- Active Directory Security & Compliance Profiler (Collector)
 ================================================================================
 
-VERSION: 1.0.2
+VERSION: 1.0.3
 
 PURPOSE:
     Connects to an on-premise Active Directory Domain Controller via LDAP,
@@ -176,7 +176,7 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 
 # [v0.7.7] The oldest collector version whose stored derived fields
 # (parsed / typed columns computed from raw attributes) are current. A
@@ -1522,11 +1522,20 @@ def normalize_value(value):
     return str(value)
 
 
+# [v1.0.3] Update sequence numbers are local to each domain controller (not
+# replicated): the same unchanged object has different values on every DC,
+# so a run against another DC than the last one versioned every object as
+# "modified". Kept in attributes_full, left out of the comparison. (They
+# change together with every real change on one DC anyway; no plugin reads
+# them.)
+DC_LOCAL_ATTRS = frozenset({"uSNChanged", "uSNCreated"})
+
+
 def diff_attributes(old_full, new_full):
     if old_full is None:
         return dict(new_full)
     changed = {}
-    all_keys = set(old_full.keys()) | set(new_full.keys())
+    all_keys = (set(old_full.keys()) | set(new_full.keys())) - DC_LOCAL_ATTRS
     for key in all_keys:
         old_v = old_full.get(key)
         new_v = new_full.get(key)
@@ -1539,6 +1548,11 @@ def connect_ldap(host, port, use_ssl, username, password):
     log_info(f"Connecting to {host}:{port} ({'LDAPS' if use_ssl else 'LDAP'})...")
     try:
         server = ldap3.Server(host, port=port, use_ssl=use_ssl, get_info=ldap3.ALL)
+        # [v1.0.3] auto_referrals=False: ldap3 follows referrals by default
+        # and binds to the referred host with these credentials, over plain
+        # ldap:// whatever --ssl says -- a cleartext bind password sent to
+        # any host a referral names. A referral is read as "not on this DC"
+        # instead (see _ldap_search_with_retry(), LDAP_ABSENT_RESULT_CODES).
         conn = ldap3.Connection(
             server,
             user=username,
@@ -1546,6 +1560,7 @@ def connect_ldap(host, port, use_ssl, username, password):
             authentication=ldap3.SIMPLE,
             auto_bind=True,
             receive_timeout=30,
+            auto_referrals=False,
         )
     except LDAPException as exc:
         log_error(f"LDAP bind failed: {exc}")
@@ -1595,6 +1610,31 @@ def get_rootdse_info(conn, base_dn_override=None):
         "naming_contexts": info.naming_contexts or [],
         "forest_root_dn": forest_root_dn,
     }
+
+
+def read_dc_identity(conn):
+    """[v1.0.3] (invocation_id, dns_hostname) of the domain controller this
+    connection is bound to. USNs -- the deleted-object watermark -- are
+    local to one DC and restart under a new invocationId when a DC is
+    restored from backup, so a watermark is only valid against the same
+    invocationId. RootDSE dsServiceName names the DC's NTDS Settings
+    object, which holds invocationId. invocation_id is None when it can't
+    be read; the deletion check then scans every deleted object."""
+    other = (conn.server.info.other if conn.server.info else None) or {}
+    dns_hostname = (other.get("dnsHostName") or [None])[0]
+    service_dn = (other.get("dsServiceName") or [None])[0]
+    invocation_id = None
+    if service_dn:
+        try:
+            entries = ldap_search(conn, service_dn, "(objectClass=*)", ldap3.BASE,
+                                  ["invocationId"], what="the DC's NTDS Settings object")
+            raw = (entries[0].get("raw_attributes") or {}).get("invocationId") if entries else None
+            if raw:
+                invocation_id = guid_bytes_to_str(raw[0])
+        except OPTIONAL_READ_ERRORS as exc:
+            log_warn(f"Could not read the domain controller's invocationId: "
+                     f"{describe_read_error(exc)}")
+    return invocation_id, dns_hostname
 
 
 def get_domain_sid_and_tombstone_lifetime(conn, base_dn, config_nc):
@@ -1859,14 +1899,18 @@ def run_capability_probe(conn, base_dn):
         # [v0.5.12] Previously always passed: with raise_exceptions off,
         # a refused search returned False instead of raising, so the
         # except branch below never ran.
-        entries = ldap_search(
-            conn, deleted_container, "(isDeleted=TRUE)", ldap3.LEVEL,
-            ["distinguishedName"], controls=[(LDAP_CONTROL_SHOW_DELETED, True, None)],
-            what="the Deleted Objects container (capability probe)",
-        )
+        # [v1.0.3] Paged: a plain search answers sizeLimitExceeded once the
+        # container holds more than the DC's MaxPageSize (1000 by default)
+        # tombstones, which failed the probe -- and so every run -- on any
+        # domain with that many deleted objects, telling the user to grant
+        # a right they already had.
+        visible = sum(1 for _ in ldap_paged_search(
+            conn, deleted_container, "(isDeleted=TRUE)", ["distinguishedName"], 1000,
+            controls=[(LDAP_CONTROL_SHOW_DELETED, True, None)],
+        ))
         results["view_deleted_objects"] = {
             "passed": True,
-            "detail": f"OK ({len(entries)} deleted object(s) currently visible)",
+            "detail": f"OK ({visible} deleted object(s) currently visible)",
         }
     except (LDAPException, LDAPCollectionError) as exc:
         results["view_deleted_objects"] = {
@@ -1904,7 +1948,8 @@ REQUIRED_SCHEMA_COLUMNS = {
                "tombstone_lifetime_days"},
     "sync_run": {"run_id", "client_id", "status", "run_type",
                  "high_watermark_usn", "prior_watermark_usn",
-                 "capability_probe_result", "failure_reason", "failure_detail"},
+                 "capability_probe_result", "failure_reason", "failure_detail",
+                 "dc_invocation_id", "dc_dns_hostname"},  # [v1.0.3, schema v47]
     "directory_object": {"object_guid", "client_id", "object_sid", "dn_current",
                           "object_class", "sam_account_name", "first_seen_run_id",
                           "last_confirmed_run_id", "is_deleted", "deleted_run_id",
@@ -2099,7 +2144,7 @@ REQUIRED_IDENTITY_COLUMNS = {
 # the structural check remains the backstop for a schema altered
 # outside the approved migration files, where the version number could
 # claim to be current while the actual structure doesn't match it.
-EXPECTED_SCHEMA_VERSION = 46  # [v0.9.1] v46: Entra additions and is_entra_kerberos_server(); nothing this script writes changed
+EXPECTED_SCHEMA_VERSION = 47  # [v1.0.3] v47: sync_run.dc_invocation_id / dc_dns_hostname
 
 
 def check_schema_version(pg_conn):
@@ -2289,20 +2334,22 @@ def upsert_client(pg_conn, domain_fqdn, domain_sid, tombstone_lifetime_days):
 
 
 def create_sync_run(pg_conn, client_id, dc_host, naming_context, run_type,
-                     prior_watermark_usn, capability_probe_result):
+                     prior_watermark_usn, capability_probe_result,
+                     dc_invocation_id=None, dc_dns_hostname=None):
     with pg_conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO sync_run
                 (client_id, dc_queried, naming_context, run_type, status,
                  prior_watermark_usn, last_good_watermark_usn,
-                 collector_version, capability_probe_result)
-            VALUES (%s, %s, %s, %s, 'running', %s, %s, %s, %s)
+                 collector_version, capability_probe_result,
+                 dc_invocation_id, dc_dns_hostname)
+            VALUES (%s, %s, %s, %s, 'running', %s, %s, %s, %s, %s, %s)
             RETURNING run_id;
             """,
             (client_id, dc_host, naming_context, run_type,
              prior_watermark_usn, prior_watermark_usn, VERSION,
-             Json(capability_probe_result)),
+             Json(capability_probe_result), dc_invocation_id, dc_dns_hostname),
         )
         run_id = cur.fetchone()[0]
     pg_conn.commit()
@@ -4328,9 +4375,14 @@ def collect_deleted_objects(conn, pg_cur, client_id, run_id, dc_host, base_dn,
     if prior_watermark_usn is None:
         return
 
-    log_info("Checking for deleted objects since last successful run...")
+    # [v1.0.3] Watermark 0 (another DC than the previous run's): every
+    # deleted object is checked; already-recorded deletions are skipped
+    # (NOT is_deleted), so this is safe to repeat.
+    log_info("Checking for deleted objects since last successful run..."
+             if prior_watermark_usn else "Checking every deleted object...")
     deleted_container = f"CN=Deleted Objects,{base_dn}"
-    search_filter = f"(&(isDeleted=TRUE)(uSNChanged>={prior_watermark_usn}))"
+    search_filter = (f"(&(isDeleted=TRUE)(uSNChanged>={prior_watermark_usn}))"
+                     if prior_watermark_usn else "(isDeleted=TRUE)")
     count = 0
     try:
         for dn, attributes, raw_attributes in ldap_paged_search(
@@ -4349,9 +4401,15 @@ def collect_deleted_objects(conn, pg_cur, client_id, run_id, dc_host, base_dn,
                        deleted_run_id = %s,
                        deleted_detected_at = %s
                  WHERE object_guid = %s AND client_id = %s AND NOT is_deleted
+                   -- [v1.0.3] Seen live earlier in this run, deleted since:
+                   -- its version written this run can't also close at this
+                   -- run's timestamp (valid_to > valid_from), which rolled
+                   -- back the whole run. The next run records the deletion
+                   -- (its tombstone's USN is above this run's watermark).
+                   AND last_confirmed_run_id IS DISTINCT FROM %s
                 RETURNING object_guid;
                 """,
-                (run_id, run_timestamp, object_guid, client_id),
+                (run_id, run_timestamp, object_guid, client_id, run_id),
             )
             row = pg_cur.fetchone()
             if row is not None:
@@ -5408,13 +5466,29 @@ def main():
 
         with pg_conn.cursor() as cur:
             cur.execute(
-                "SELECT high_watermark_usn, collector_version FROM sync_run "
+                "SELECT high_watermark_usn, collector_version, dc_invocation_id::text, "
+                "       dc_dns_hostname FROM sync_run "
                 "WHERE client_id = %s AND status = 'succeeded' "
                 "ORDER BY completed_at DESC LIMIT 1;",
                 (client_id,),
             )
             row = cur.fetchone()
+        # [v1.0.3] The previous run's USN watermark is only meaningful on the
+        # same domain controller (same invocationId): USNs are per DC. Against
+        # another DC (--dc-host given as the domain name, a different DC, a
+        # DC restored from backup) -- or when either invocationId is unknown
+        # -- the deletion check scans every deleted object (watermark 0)
+        # instead. Before, a lower-numbered DC found no deletions, and the
+        # deleted accounts stayed current (and reported) for good.
+        dc_invocation_id, dc_dns_hostname = read_dc_identity(ldap_conn)
         prior_watermark = row[0] if row else None
+        if row and (dc_invocation_id is None or row[2] is None
+                    or row[2].lower() != dc_invocation_id.lower()):
+            log_info(f"Domain controller {dc_dns_hostname or args.dc_host} is not the one the "
+                     f"previous run used ({row[3] or 'unknown'}): update sequence numbers are "
+                     "per domain controller, so this run checks every deleted object instead of "
+                     "only those since the previous run.")
+            prior_watermark = 0
         # [v0.7.7] One automatic full rescan after an upgrade that changed
         # how derived fields are computed (see DERIVED_FIELDS_VERSION).
         if (row and not stats.full_rescan
@@ -5429,7 +5503,7 @@ def main():
 
         run_id = create_sync_run(
             pg_conn, client_id, args.dc_host, base_dn, run_type,
-            prior_watermark, probe_results,
+            prior_watermark, probe_results, dc_invocation_id, dc_dns_hostname,
         )
         log_info(f"sync_run row created: run_id={run_id}")
 

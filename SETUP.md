@@ -4,7 +4,7 @@ These steps take a brand-new Ubuntu 26 LTS machine to a working state
 where the three scripts can be run interactively, in sequence, against
 your live Active Directory and Entra ID environment.
 
-This guide covers release 1.0 and its 1.0.x updates (schema v46).
+This guide covers release 1.0 and its 1.0.x updates (schema v47).
 `RELEASE_NOTES.md` lists the current version of each script, what changed
 and how to upgrade.
 
@@ -411,10 +411,10 @@ python3 adaudit.py --pg-host <host> --pg-user <user> --pg-dbname <db> \
   no script is running:
   `UPDATE ad_intel.control_evidence_run SET push_status = 'skipped',
   last_push_error = 'skipped by hand' WHERE push_status = 'pending';`
-  Local findings and history are unchanged. The next pushed run labels
-  its findings relative to the previous local run, so findings the
-  platform has never seen arrive as UNCHANGED rather than NEW; for a clean
-  start, use a new database instead.
+  Local findings and history are unchanged. Later runs are labelled
+  relative to the last run the platform received, so it still learns
+  which findings were fixed in the meantime; for a clean start, use a new
+  database instead.
 
 ## 8. Reviewing results together
 
