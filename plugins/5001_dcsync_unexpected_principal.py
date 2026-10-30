@@ -70,14 +70,22 @@ still reported, critical, and named as a stale Entra Connect connector
 account: it keeps standing DCSync with nothing using it. Found on a lab
 domain with one live connector (MSOL_e8f8..., previously a critical false
 positive) and one left from a 2017 installation (MSOL_68bf..., real).
+
+[v1.7] A trustee with no directory object -- Everyone, Authenticated
+Users, Anonymous Logon, Users, Network or Interactive when the domain
+has no foreignSecurityPrincipal for it -- was dropped by an inner join,
+so a grant to Everyone produced no finding. Such broad well-known
+principals are now reported (named in the summary, object_guid NULL);
+other object-less SIDs (SYSTEM, Creator Owner, Self, Enterprise Domain
+Controllers) are still left out, and expected holders are matched by SID.
 """
 
 PLUGIN = {
     "plugin_id": 5001,
     "category": "ACLs",
     "name": "DCSync Replication Rights Held by an Unexpected Principal",
-    "version": "1.6",
-    "revision_date": "2026-10-07",
+    "version": "1.7",
+    "revision_date": "2026-10-30",
     "remediation": (
         "Confirm this grant was deliberate and is still needed. "
         "Service accounts frequently accumulate replication rights for "
@@ -184,7 +192,7 @@ PLUGIN = {
         )
         SELECT
             CASE WHEN c.full_dcsync THEN 'fail' ELSE 'warn' END AS status,
-            do2.object_guid,
+            COALESCE(do2.object_guid, md5('5001:' || %(client_id)s::text || ':' || c.trustee_sid)::uuid) AS object_guid,
             NULL AS stig_severity,
             NULL AS stig_reference,
             NULL AS tool_severity,
@@ -193,7 +201,7 @@ PLUGIN = {
             CASE WHEN cn.object_guid IS NOT NULL
                  THEN 'Stale Entra Connect connector account '
                  ELSE 'Principal ' END
-                || COALESCE(do2.sam_account_name, c.trustee_sid)
+                || COALESCE(do2.sam_account_name, CASE c.trustee_sid WHEN 'S-1-1-0' THEN 'Everyone' WHEN 'S-1-5-11' THEN 'Authenticated Users' WHEN 'S-1-5-7' THEN 'Anonymous Logon' WHEN 'S-1-5-32-545' THEN 'Users' WHEN 'S-1-5-2' THEN 'Network' WHEN 'S-1-5-4' THEN 'Interactive' END, c.trustee_sid)
                 || CASE WHEN c.full_dcsync
                         THEN ' holds DCSync replication rights on the domain root ('
                         ELSE ' holds a partial DCSync grant on the domain root ('
@@ -223,11 +231,18 @@ PLUGIN = {
                 'connector_last_logon_timestamp', cn.last_logon_timestamp
             ) AS detail
         FROM classified c
-        JOIN directory_object do2
+        LEFT JOIN directory_object do2
             ON do2.object_sid = c.trustee_sid AND do2.client_id = %(client_id)s
            AND NOT do2.is_deleted
         LEFT JOIN connector cn ON cn.object_guid = do2.object_guid
-        WHERE
+        -- [v1.7] Trustees with no directory object (Everyone, Authenticated Users,
+        -- Anonymous Logon ... when no foreignSecurityPrincipal exists for them) used
+        -- to be dropped by an inner join: a broad grant produced no finding. Kept
+        -- now when the SID is one of those broad well-known principals; other
+        -- object-less SIDs (SYSTEM, Creator Owner, Self, Enterprise Domain
+        -- Controllers ...) stay out, as before. Expected holders are tested by SID.
+        WHERE (do2.object_guid IS NOT NULL OR c.trustee_sid IN ('S-1-1-0', 'S-1-5-11', 'S-1-5-7', 'S-1-5-32-545', 'S-1-5-2', 'S-1-5-4'))
+          AND
             -- [v1.6] The active Entra Connect connector account is expected
             -- (password hash sync); plugins 10009 / 10010 report it.
             NOT COALESCE(cn.active, FALSE)
@@ -237,12 +252,12 @@ PLUGIN = {
             -- Enterprise Domain Controllers (S-1-5-9), and -- since Windows
             -- Server 2012 -- the Domain Controllers group (516), which the
             -- default domain-root DACL grants Get-Changes-All.
-            NOT (do2.object_sid LIKE '%%-512' OR do2.object_sid LIKE '%%-519'
-                 OR do2.object_sid = 'S-1-5-32-544' OR do2.object_sid = 'S-1-5-9'
-                 OR do2.object_sid LIKE '%%-516')
+            NOT (c.trustee_sid LIKE '%%-512' OR c.trustee_sid LIKE '%%-519'
+                 OR c.trustee_sid = 'S-1-5-32-544' OR c.trustee_sid = 'S-1-5-9'
+                 OR c.trustee_sid LIKE '%%-516')
             -- Read-only DCs (521) and Enterprise Read-only DCs (498) hold
             -- only Get-Changes by default; flag them only if they can DCSync.
-            AND NOT ((do2.object_sid LIKE '%%-521' OR do2.object_sid LIKE '%%-498')
+            AND NOT ((c.trustee_sid LIKE '%%-521' OR c.trustee_sid LIKE '%%-498')
                      AND NOT c.full_dcsync)
             -- Domain controller computer accounts (writable and read-only).
             AND NOT EXISTS (

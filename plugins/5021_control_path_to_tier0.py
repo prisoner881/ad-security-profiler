@@ -46,14 +46,23 @@ principal definition already report; this plugin adds the chains through
 GPOs, OUs, groups, delegation and gMSA readers. Not modelled: ACLs of
 ordinary users, groups and computers (not collected), LAPS readers, logon
 sessions, local group membership.
+
+[v1.1] Inherit-only ACEs (they apply only to descendant objects, of the
+inherited class when one is set) are edges to those descendants, skipping
+AdminSDHolder-protected objects, which don't inherit -- not control of the
+object that carries them. A "reset password on descendant users" delegation
+on the domain root granted to Domain Users was reported as a critical path
+into the domain root. A replication right counts as DCSync only with both
+DS-Replication-Get-Changes and -Get-Changes-All (or all extended rights); a
+lone Get-Changes grant (common for sync service accounts) is not.
 """
 
 PLUGIN = {
     "plugin_id": 5021,
     "category": "ACLs",
     "name": "Control Path From Broad or Low-Privileged Principals to Tier 0",
-    "version": "1.0",
-    "revision_date": "2026-10-20",
+    "version": "1.1",
+    "revision_date": "2026-10-30",
     "control_id": "ACL-5021",
     "framework_tags": [
         "NIST-800-53-AC-3",
@@ -145,7 +154,11 @@ PLUGIN = {
             FROM group_member_edge e
             WHERE e.client_id = %(client_id)s AND e.valid_to IS NULL
             UNION
-            -- ACL control: trustee -> object
+            -- ACL control: trustee -> object. [v1.1] Only ACEs that apply to the
+            -- object itself; inherit-only ones are edges to its descendants
+            -- (inherited_control, in edge below). A replication right counts as
+            -- DCSync only when the trustee holds both Get-Changes and
+            -- Get-Changes-All on the object (or all extended rights).
             SELECT COALESCE(m.node, 'sid:' || a.trustee_sid), a.object_guid::text,
                    CASE WHEN (a.access_mask & 268435456) <> 0 OR (a.access_mask & 983551) = 983551 THEN 'GenericAll'
                         WHEN (a.access_mask & 262144) <> 0 THEN 'WriteDacl'
@@ -159,7 +172,20 @@ PLUGIN = {
             FROM acl_edge a
             LEFT JOIN sidmap m ON m.sid = a.trustee_sid::text
             WHERE a.client_id = %(client_id)s AND a.valid_to IS NULL AND a.ace_type = 'allow'
+              AND a.inherit_only IS NOT TRUE
               AND a.trustee_sid::text NOT IN ('S-1-5-18', 'S-1-3-0', 'S-1-5-10')
+              AND NOT (lower(COALESCE(a.object_type_guid::text, '')) IN ('1131f6aa-9c07-11d1-f79f-00c04fc2dcd2', '1131f6ad-9c07-11d1-f79f-00c04fc2dcd2')
+                       AND (a.access_mask & (268435456 | 1073741824 | 262144 | 524288)) = 0
+                       AND (a.access_mask & 983551) <> 983551
+                       AND NOT EXISTS (
+                           SELECT 1 FROM acl_edge b
+                           WHERE b.client_id = a.client_id AND b.object_guid = a.object_guid
+                             AND b.trustee_sid = a.trustee_sid AND b.valid_to IS NULL
+                             AND b.ace_type = 'allow' AND b.inherit_only IS NOT TRUE
+                             AND (b.access_mask & 256) <> 0
+                             AND (b.object_type_guid IS NULL
+                                  OR (lower(b.object_type_guid::text) IN ('1131f6aa-9c07-11d1-f79f-00c04fc2dcd2', '1131f6ad-9c07-11d1-f79f-00c04fc2dcd2')
+                                      AND b.object_type_guid <> a.object_type_guid))))
               AND ( (a.access_mask & (268435456 | 1073741824 | 262144 | 524288)) <> 0
                     OR (a.access_mask & 983551) = 983551
                     OR ((a.access_mask & 32) <> 0
@@ -204,8 +230,58 @@ PLUGIN = {
             UNION
             SELECT node FROM target
         ),
+        -- [v1.1] Inherit-only ACEs grant nothing on the object that carries
+        -- them, only on its descendants of the inherited class (NULL = all);
+        -- objects protected by AdminSDHolder (adminCount = 1) don't inherit.
+        -- They used to be read as control of the object itself: a routine
+        -- "reset password of descendant users" delegation on the domain root
+        -- became a critical path into the domain root. Same descendant scope
+        -- and filters as the containment edges.
+        inherited_control AS (
+            SELECT COALESCE(m.node, 'sid:' || a.trustee_sid) AS src, x.node AS dst,
+                   CASE WHEN (a.access_mask & 268435456) <> 0 OR (a.access_mask & 983551) = 983551 THEN 'GenericAll'
+                        WHEN (a.access_mask & 262144) <> 0 THEN 'WriteDacl'
+                        WHEN (a.access_mask & 524288) <> 0 THEN 'WriteOwner'
+                        WHEN (a.access_mask & 1073741824) <> 0 THEN 'GenericWrite'
+                        WHEN (a.access_mask & 32) <> 0 AND a.object_type_guid IS NULL THEN 'WriteProperty (all)'
+                        WHEN (a.access_mask & 32) <> 0 THEN 'AddMember'
+                        WHEN a.object_type_guid IS NULL THEN 'AllExtendedRights'
+                        WHEN lower(a.object_type_guid::text) = '00299570-246d-11d0-a768-00aa006e0529' THEN 'ResetPassword'
+                        ELSE 'DCSync' END AS kind
+            FROM acl_edge a
+            LEFT JOIN sidmap m ON m.sid = a.trustee_sid::text
+            JOIN obj c ON c.object_guid = a.object_guid
+            JOIN obj x ON right(x.dn, length(c.dn) + 1) = ',' || c.dn
+            WHERE a.client_id = %(client_id)s AND a.valid_to IS NULL AND a.ace_type = 'allow'
+              AND a.inherit_only IS TRUE
+              AND a.trustee_sid::text NOT IN ('S-1-5-18', 'S-1-3-0', 'S-1-5-10')
+              AND ( (a.access_mask & (268435456 | 1073741824 | 262144 | 524288)) <> 0
+                    OR (a.access_mask & 983551) = 983551
+                    OR ((a.access_mask & 32) <> 0
+                        AND (a.object_type_guid IS NULL
+                             OR lower(a.object_type_guid::text) = 'bf9679c0-0de6-11d0-a285-00aa003049e2'))
+                    OR ((a.access_mask & 256) <> 0
+                        AND (a.object_type_guid IS NULL
+                             OR lower(a.object_type_guid::text) = '00299570-246d-11d0-a768-00aa006e0529')) )
+              AND x.cls IN ('group', 'computer', 'ou', 'user')
+              AND (a.inherited_object_type_guid IS NULL
+                   OR lower(a.inherited_object_type_guid::text) = CASE x.cls
+                        WHEN 'user' THEN 'bf967aba-0de6-11d0-a285-00aa003049e2'
+                        WHEN 'computer' THEN 'bf967a86-0de6-11d0-a285-00aa003049e2'
+                        WHEN 'group' THEN 'bf967a9c-0de6-11d0-a285-00aa003049e2'
+                        WHEN 'ou' THEN 'bf967aa5-0de6-11d0-a285-00aa003049e2' END)
+              AND (x.cls IN ('group', 'ou')
+                   OR (x.cls = 'computer' AND x.node IN (SELECT node FROM interesting))
+                   OR x.node IN (SELECT node FROM target))
+              AND (x.object_guid NOT IN (SELECT object_guid FROM protected)
+                   OR EXISTS (SELECT 1 FROM ad_computer dc
+                              WHERE dc.client_id = %(client_id)s AND dc.valid_to IS NULL
+                                AND dc.object_guid = x.object_guid AND dc.is_domain_controller))
+        ),
         edge AS (
             SELECT * FROM base_edge
+            UNION
+            SELECT * FROM inherited_control
             UNION
             -- containment: OU / domain -> groups, sub-OUs, interesting computers, Tier 0 users
             SELECT c.node, x.node, 'contains'

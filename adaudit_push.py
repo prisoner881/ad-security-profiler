@@ -26,7 +26,9 @@ WHAT IS PUSHED
     taken from adaudit.py's memory, so a run pushed days late -- or replayed
     after an outage -- is exactly what would have been sent live. Change
     labels are derived by comparing the finding set open at this run with the
-    set open at the previous complete, unfiltered, non-legacy run:
+    set open at the previous complete, unfiltered, non-legacy run that was
+    not skipped or expired -- the last run the API was (or, queued ahead of
+    this one, will be) sent [adaudit.py 1.0.3]:
         open now, not open then         NEW
         open now, same version then     UNCHANGED
         open now, other version then    CHANGED
@@ -463,12 +465,19 @@ def _open_at(cur, client_id, run_id):
 
 def previous_run_id(cur, client_id, evidence_run_id):
     """The run change labels are relative to: the latest earlier run that
-    completed, was unfiltered and is not legacy. Deterministic, whatever has
-    or has not been pushed, so a live push and a replay agree."""
+    completed, was unfiltered, is not legacy and was not skipped or expired
+    -- i.e. one the API holds or receives before this one. [adaudit.py
+    1.0.3] Skipped and expired runs used to count: a finding fixed in a
+    skipped run was REMEDIATED only there, the next pushed run did not carry
+    it, and the API kept it open for good (its plugin still had other
+    findings, so the end-of-run sweep did not close it); findings first seen
+    in a skipped run arrived as UNCHANGED instead of NEW. Skipping a run
+    therefore changes the labels of later runs; a replay after a skip can
+    differ from what was sent live."""
     cur.execute("""
         SELECT max(evidence_run_id) AS prev FROM control_evidence_run
         WHERE client_id = %s AND evidence_run_id < %s AND status = 'complete'
-          AND NOT is_filtered AND push_status <> 'legacy';
+          AND NOT is_filtered AND push_status NOT IN ('legacy', 'skipped', 'expired');
     """, (client_id, evidence_run_id))
     return cur.fetchone()["prev"]
 

@@ -1,24 +1,63 @@
 # Release Notes
 
-## Release 1.0.x updates (2026-10-29)
+## Release 1.0.x updates (2026-10-30)
 
 Fixes and hardening made after release 1.0, from running it against a live
-domain and tenant. No schema change (still v46) and no plugin added or
-removed.
+domain and tenant and from a full code review. One schema migration (v47);
+no plugin added or removed.
 
 ### Components
 
 | Component | Version |
 |---|---|
-| `adprofiler.py` (Active Directory collector) | 1.0.2 |
+| `adprofiler.py` (Active Directory collector) | 1.0.3 |
 | `sysvol_collector.py` (used by `adprofiler.py --sysvol`) | 1.1 |
 | `entra_graph_collector.py` (Entra ID collector) | 1.0.2 |
-| `adaudit.py` (plugin runner and report writer) | 1.0.2 |
+| `adaudit.py` (plugin runner and report writer) | 1.0.3 |
 | `adaudit_push.py` (ingest API push contract) | contract 1.0 |
 | `run_lock.py` (one run at a time; new) | 1.0 |
-| PostgreSQL schema (`schema_init.sql`) | v46 |
+| PostgreSQL schema (`schema_init.sql`) | v47 |
 
 ### Changes
+
+Code review fixes (2026-10-30, adprofiler.py 1.0.3, adaudit.py 1.0.3, schema
+v47):
+
+- **Domains with more than 1,000 deleted objects** could not be collected:
+  the deleted-objects capability check used an unpaged search, which a domain
+  controller refuses past its MaxPageSize, so every run failed (with advice
+  to grant a right the account already had). The check now pages.
+- **Deletions are found whichever domain controller is queried.** The
+  deleted-object watermark (an update sequence number) is local to one DC,
+  but was reused against whatever DC the next run reached, e.g. with
+  `--dc-host` set to the domain name: deletions were missed and the deleted
+  accounts stayed in the findings for good. Each run now records its DC's
+  identity (schema v47); a run against another DC, or a restored one,
+  checks every deleted object. Per-DC USN counters no longer make every
+  object look modified after a DC change. An object changed and deleted
+  within the same run no longer rolls the whole run back.
+- **LDAP referrals are no longer followed.** ldap3 followed them by default
+  and re-sent the bind password, unencrypted, to the referred host.
+- **Grants to Everyone, Authenticated Users and other broad principals are
+  reported** by the ACL and certificate-services checks (5001-5005, 5008,
+  5010, 6006-6008). When the domain had no object for such a principal, its
+  ACEs were dropped, so DCSync, AdminSDHolder, domain-root and ESC4/ESC5
+  grants to Everyone produced no finding.
+- **5021 no longer reports routine delegations as critical attack paths.**
+  Inherit-only ACEs are applied to the descendants they reach instead of
+  the object that carries them, and a lone replication right is no longer
+  called DCSync.
+- **Conditional Access coverage needs an unconditional policy** (10014,
+  10021, 10022, 10024, 10026). A policy narrowed by client app types,
+  locations, platforms, risk levels, a device filter or authentication
+  flows no longer counts; the standard "Block legacy authentication" policy
+  had been taken as MFA coverage for admin portals and excluded users.
+- **Push: findings fixed during a skipped run are now reported as fixed.**
+  Change labels are relative to the last run the platform received, not a
+  skipped or expired one, which had left such findings open on the platform
+  for good.
+
+Earlier 1.0.x changes:
 
 - **Group Policy checks need SYSVOL from the run being evaluated**
   (adaudit.py 1.0.1, adprofiler.py 1.0.1, plugin 4009 v1.5). The Group
@@ -54,11 +93,14 @@ adaudit.py: 0 complete, 1 fatal error, 3 complete but a plugin errored, 4
 findings at or above `--fail-on`, 5 push failed, 75 not started, 130
 interrupted.
 
-### Upgrading from 1.0
+### Upgrading from 1.0 or an earlier 1.0.x
 
-Replace the scripts and `plugins/`, and **add `run_lock.py`** next to them:
-all three scripts import it and fail to start without it. No migration and
-no `--full-rescan`.
+Replace the scripts and `plugins/`, **add `run_lock.py`** next to them (all
+three scripts import it and fail to start without it), and **apply
+`schema_migration_v47.sql`** to the existing database
+(`psql -v ON_ERROR_STOP=1 -f schema_migration_v47.sql`); adprofiler.py 1.0.3
+refuses to run against v46. No `--full-rescan` is needed. The first
+adprofiler.py run afterwards checks every deleted object once.
 
 ## Release 1.0 (2026-10-22)
 

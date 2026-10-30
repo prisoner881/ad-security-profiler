@@ -36,14 +36,22 @@ WriteOwner ACEs) produced one row per ACE with the same object_guid,
 which violated the one-open-finding-per-identity rule and made the whole
 plugin error. access_mask in the detail is now the OR of the trustee's
 dangerous ACE masks; access_masks lists them individually.
+
+[v1.6] A trustee with no directory object -- Everyone, Authenticated
+Users, Anonymous Logon, Users, Network or Interactive when the domain
+has no foreignSecurityPrincipal for it -- was dropped by an inner join,
+so a grant to Everyone produced no finding. Such broad well-known
+principals are now reported (named in the summary, object_guid NULL);
+other object-less SIDs (SYSTEM, Creator Owner, Self, Enterprise Domain
+Controllers) are still left out, and expected holders are matched by SID.
 """
 
 PLUGIN = {
     "plugin_id": 5002,
     "category": "ACLs",
     "name": "Dangerous Rights on AdminSDHolder Held by an Unexpected Principal",
-    "version": "1.5",
-    "revision_date": "2026-10-04",
+    "version": "1.6",
+    "revision_date": "2026-10-30",
     "remediation": (
         "Remove the grant unless it's a deliberate, understood exception "
         "(`dsacls \"CN=AdminSDHolder,CN=System,DC=...\" /R <trustee>`, or "
@@ -143,13 +151,13 @@ PLUGIN = {
         )
         SELECT
             'fail' AS status,
-            do2.object_guid,
+            COALESCE(do2.object_guid, md5('5002:' || %(client_id)s::text || ':' || da.trustee_sid)::uuid) AS object_guid,
             NULL AS stig_severity,
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
             'critical' AS fd_severity,
-            'Principal ' || COALESCE(do2.sam_account_name, da.trustee_sid)
+            'Principal ' || COALESCE(do2.sam_account_name, CASE da.trustee_sid WHEN 'S-1-1-0' THEN 'Everyone' WHEN 'S-1-5-11' THEN 'Authenticated Users' WHEN 'S-1-5-7' THEN 'Anonymous Logon' WHEN 'S-1-5-32-545' THEN 'Users' WHEN 'S-1-5-2' THEN 'Network' WHEN 'S-1-5-4' THEN 'Interactive' END, da.trustee_sid)
                 || ' holds ' || (
                     SELECT string_agg(x, ', ') FROM (VALUES
                         (CASE WHEN da.is_generic_all THEN 'GenericAll' END),
@@ -167,10 +175,17 @@ PLUGIN = {
                 'access_masks', to_jsonb(da.access_masks)
             ) AS detail
         FROM per_trustee da
-        JOIN directory_object do2
+        LEFT JOIN directory_object do2
             ON do2.object_sid = da.trustee_sid AND do2.client_id = %(client_id)s
            AND NOT do2.is_deleted
-        WHERE NOT EXISTS (
+        -- [v1.6] Trustees with no directory object (Everyone, Authenticated Users,
+        -- Anonymous Logon ... when no foreignSecurityPrincipal exists for them) used
+        -- to be dropped by an inner join: a broad grant produced no finding. Kept
+        -- now when the SID is one of those broad well-known principals; other
+        -- object-less SIDs (SYSTEM, Creator Owner, Self, Enterprise Domain
+        -- Controllers ...) stay out, as before. Expected holders are tested by SID.
+        WHERE (do2.object_guid IS NOT NULL OR da.trustee_sid IN ('S-1-1-0', 'S-1-5-11', 'S-1-5-7', 'S-1-5-32-545', 'S-1-5-2', 'S-1-5-4'))
+          AND NOT EXISTS (
             SELECT 1 FROM expected_holders eh WHERE eh.object_guid = do2.object_guid
         )
     """,

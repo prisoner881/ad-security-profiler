@@ -9,6 +9,33 @@ the script's own docstring now keeps a one-line summary per entry, this
 file keeps the complete detail (root causes, what was verified, why a
 decision was made a particular way) for anyone who wants it.
 
+    1.0.3 - Schema v47. Fixes from the code review:
+            - The "view_deleted_objects" capability probe paged its search
+              of CN=Deleted Objects. Unpaged, a DC answers sizeLimitExceeded
+              past MaxPageSize (1000) tombstones, so every run on such a
+              domain failed, advising a right the account already had.
+            - The deleted-object USN watermark is tied to the DC that
+              produced it: each run stores the DC's invocationId (read from
+              its NTDS Settings object, RootDSE dsServiceName) and DNS name
+              in sync_run (dc_invocation_id, dc_dns_hostname, schema v47).
+              When the previous succeeded run used another (or an unknown)
+              invocationId, the deletion check scans every deleted object
+              instead of uSNChanged >= the old watermark, which on a
+              lower-numbered DC found nothing: deleted accounts kept open
+              rows and stayed in the findings. uSNChanged / uSNCreated (per
+              DC) no longer count as changes (DC_LOCAL_ATTRS), so a DC change
+              no longer versions every object.
+            - An object confirmed live in this run and deleted later in it
+              is left for the next run, instead of closing the version this
+              run just wrote at the same timestamp (CHECK valid_to >
+              valid_from), which rolled back the whole run.
+            - ldap3.Connection(auto_referrals=False): ldap3 chased referrals
+              by default, binding to the referred host with the collector's
+              credentials over plain ldap://. A referral now reads as absent
+              on this DC, as the code already assumed.
+            The first 1.0.3 run after the migration checks every deleted
+            object once (no stored invocationId yet). No --full-rescan.
+
     1.0.2 - One run at a time. adprofiler.py, entra_graph_collector.py and
             adaudit.py now share a PostgreSQL advisory lock (new module
             run_lock.py), taken right after the PostgreSQL settings are read

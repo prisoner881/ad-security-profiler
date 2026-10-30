@@ -43,14 +43,23 @@ treated like Application Administrator: it manages agent identities and
 blueprints, including their credentials, and until April 2026 could also
 take over ordinary service principals (Silverfort); Microsoft labels it
 privileged.
+
+[v1.2] A Conditional Access policy counts only when no condition narrows
+it: client app types all (or unset), all locations with none excluded, all
+platforms with none excluded, no user / sign-in / service-principal / insider
+risk level, no authentication-flow condition (a device filter is how a blocking policy
+requires a managed device, so it is allowed here). Before, any all-users
+policy counted whatever its other conditions -- e.g. the standard "Block legacy authentication"
+policy (client apps Exchange ActiveSync / other, Block) was taken as
+covering every sign-in.
 """
 
 PLUGIN = {
     "plugin_id": 10021,
     "category": "Hybrid Identity",
     "name": "Privileged Access Not Restricted to Managed Devices",
-    "version": "1.1",
-    "revision_date": "2026-10-22",
+    "version": "1.2",
+    "revision_date": "2026-10-30",
     "control_id": "HYBRID-10021",
     "framework_tags": [
         "CISA-SCUBA-MS.AAD.3.7",
@@ -121,6 +130,25 @@ PLUGIN = {
                    COALESCE(p->>'display_name', p->>'id') COLLATE "C" AS name,
                    p->>'state' AS state,
                    COALESCE(jsonb_typeof(p->'conditions') = 'object', FALSE) AS evaluable,
+                   -- [CA conditions] unconditional: no client-app, location, platform,
+                   -- risk, device-filter or authentication-flow condition narrows it
+                   ((jsonb_typeof(p->'conditions'->'clientAppTypes') IS DISTINCT FROM 'array'
+                     OR jsonb_array_length(p->'conditions'->'clientAppTypes') = 0
+                     OR p->'conditions'->'clientAppTypes' ? 'all')
+                    AND (jsonb_typeof(p->'conditions'->'locations') IS DISTINCT FROM 'object'
+                         OR (COALESCE(p->'conditions'->'locations'->'includeLocations', '["All"]'::jsonb) ? 'All'
+                             AND CASE WHEN jsonb_typeof(p->'conditions'->'locations'->'excludeLocations') = 'array'
+                                      THEN jsonb_array_length(p->'conditions'->'locations'->'excludeLocations') ELSE 0 END = 0))
+                    AND (jsonb_typeof(p->'conditions'->'platforms') IS DISTINCT FROM 'object'
+                         OR (COALESCE(p->'conditions'->'platforms'->'includePlatforms', '["all"]'::jsonb) ? 'all'
+                             AND CASE WHEN jsonb_typeof(p->'conditions'->'platforms'->'excludePlatforms') = 'array'
+                                      THEN jsonb_array_length(p->'conditions'->'platforms'->'excludePlatforms') ELSE 0 END = 0))
+                    AND NOT EXISTS (SELECT 1 FROM unnest(ARRAY['userRiskLevels', 'signInRiskLevels',
+                                                               'servicePrincipalRiskLevels']) AS k
+                                     WHERE jsonb_typeof(p->'conditions'->k) = 'array'
+                                       AND jsonb_array_length(p->'conditions'->k) > 0)
+                    AND COALESCE(p->'conditions'->>'insiderRiskLevels', '') = ''
+                    AND COALESCE(p->'conditions'->'authenticationFlows'->>'transferMethods', '') = '') AS unconditional,
                    CASE WHEN jsonb_typeof(p->'grant_controls'->'builtInControls') = 'array'
                         THEN p->'grant_controls'->'builtInControls' ELSE '[]'::jsonb END AS builtin,
                    upper(COALESCE(p->'grant_controls'->>'operator', 'OR')) AS operator,
@@ -164,7 +192,7 @@ PLUGIN = {
               FROM pol p
               JOIN tier0 t ON (p.inc_users ? 'All' OR p.inc_roles ? t.role_template_id)
                           AND NOT p.ex_roles ? t.role_template_id
-             WHERE p.state = 'enabled' AND p.evaluable AND p.all_apps AND p.device_control = 'required'
+             WHERE p.state = 'enabled' AND p.evaluable AND p.all_apps AND p.device_control = 'required' AND p.unconditional
         ),
         state AS (
             SELECT po.client_id,
