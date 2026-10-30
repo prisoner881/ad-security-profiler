@@ -2,9 +2,10 @@
 
 This file lists the people responsible for **ad-security-profiler** and explains how the project is maintained. It covers:
 
-- `adprofiler.py`, the Active Directory collector
+- `adprofiler.py`, the Active Directory collector, with `sysvol_collector.py` (Group Policy content)
 - `entra_graph_collector.py`, the Entra ID collector
-- `adaudit.py`, the plugin runner and report writer
+- `adaudit.py`, the plugin runner and report writer, with `adaudit_push.py` (push to the FortifyData API)
+- `run_lock.py`, the run lock shared by the three scripts
 - the finding plugins in `plugins/`
 - the PostgreSQL schema (`schema_init.sql` and the `schema_migration_vNN.sql` files)
 
@@ -20,12 +21,13 @@ Each area lists the files it covers. Any change to an area needs approval from o
 
 | Area | Files | Maintainers |
 |---|---|---|
-| AD collector | `adprofiler.py`, `changelog.txt` | @prisoner881 |
+| AD collector | `adprofiler.py`, `sysvol_collector.py`, `changelog.txt` | @prisoner881 |
 | Entra ID collector | `entra_graph_collector.py` | @prisoner881 |
-| Plugin runner and reporting | `adaudit.py` | @prisoner881 |
+| Plugin runner and reporting | `adaudit.py`, `adaudit_push.py` | @prisoner881 |
+| Run lock | `run_lock.py` | @prisoner881 |
 | Finding and inventory plugins | `plugins/`, `COMPLIANCE_TAGS.md` | @prisoner881 |
 | Database schema | `schema_init.sql`, `schema_migration_v*.sql` | @prisoner881 |
-| Documentation | `SETUP.md`, `MAINTAINERS.md` | @prisoner881 |
+| Documentation | `SETUP.md`, `RELEASE_NOTES.md`, `MAINTAINERS.md` | @prisoner881 |
 
 ## Maintainer responsibilities
 

@@ -4,9 +4,9 @@ These steps take a brand-new Ubuntu 26 LTS machine to a working state
 where the three scripts can be run interactively, in sequence, against
 your live Active Directory and Entra ID environment.
 
-This guide covers release 1.0 (`adprofiler.py` 1.0.0,
-`entra_graph_collector.py` 1.0.0, `adaudit.py` 1.0.0, schema v46). See
-`RELEASE_NOTES.md` for what the release contains and how to upgrade to it.
+This guide covers release 1.0 and its 1.0.x updates (schema v46).
+`RELEASE_NOTES.md` lists the current version of each script, what changed
+and how to upgrade.
 
 ## 1. Install Python and the venv module
 
@@ -53,6 +53,7 @@ adprofiler/
     run_lock.py
     requirements.txt
     schema_init.sql
+    RELEASE_NOTES.md
     plugins/
         1001_....py
         1002_....py
@@ -323,7 +324,8 @@ before), and additionally writes a timestamped Excel workbook:
   counts. Which controls each check maps to is listed in
   `COMPLIANCE_TAGS.md`.
 - Separate inventory tabs (User Inventory, Computer Inventory, Group
-  Inventory) with the full, unfiltered data those plugins produce.
+  Inventory, AD Subnet Inventory) with the full, unfiltered data those
+  plugins produce.
 
 To check only what a given framework covers, add `--framework` with its
 name or tag prefix (for example `--framework PCI-DSS-4.0 "SOC 2"`).
@@ -332,8 +334,30 @@ name or tag prefix (for example `--framework PCI-DSS-4.0 "SOC 2"`).
 every plugin ran; `3` means it finished but at least one plugin failed
 to load or errored (the end of the output lists which -- the rest of
 the results are still valid); `1` means a fatal error such as no
-database connection. Add `--fail-on fail` (or `--fail-on warn`) to
-also get exit status `4` when there are open findings at that level.
+database connection; `75` means it did not start because another run
+holds the run lock (see Troubleshooting). Add `--fail-on fail` (or
+`--fail-on warn`) to also get exit status `4` when there are open
+findings at that level.
+
+**Running the scripts unattended (a scheduler or supervising process):**
+run them one after another -- `adprofiler.py`, then
+`entra_graph_collector.py`, then `adaudit.py` -- and only start the next
+one when the previous one exited with status `0`. Any other exit status
+means that step did not complete, and its log file says why:
+
+| Script | 0 | 1 | 75 | 130 |
+|---|---|---|---|---|
+| `adprofiler.py` | collected | failed; nothing committed | not started: run lock held | interrupted; rolled back |
+| `entra_graph_collector.py` | collected | failed (the log says whether any Entra table was already refreshed) | not started: run lock held | interrupted |
+
+Running `adaudit.py` after a failed collection would evaluate the previous
+collection's data again. A collector that exits `0` may still have skipped
+optional data (SYSVOL not readable, an unlicensed or throttled Entra
+source); `adaudit.py` reports the affected checks as NOT ASSESSED. The
+scripts set no overall time limit, because a large directory can take a
+long time; every network request has its own timeout and retries, so a
+dead domain controller or Graph endpoint ends in a non-zero exit rather
+than a hang.
 
 **Optional -- push the results to FortifyData:**
 
@@ -382,6 +406,15 @@ python3 adaudit.py --pg-host <host> --pg-user <user> --pg-dbname <db> \
   history.
 - If the platform keeps rejecting one run, `--push-skip <run id>` (the
   id is in the error message) lets the later runs go.
+- To drop every queued run instead (for example a test database whose
+  history should never reach the platform), mark them all skipped while
+  no script is running:
+  `UPDATE ad_intel.control_evidence_run SET push_status = 'skipped',
+  last_push_error = 'skipped by hand' WHERE push_status = 'pending';`
+  Local findings and history are unchanged. The next pushed run labels
+  its findings relative to the previous local run, so findings the
+  platform has never seen arrive as UNCHANGED rather than NEW; for a clean
+  start, use a new database instead.
 
 ## 8. Reviewing results together
 
@@ -414,9 +447,16 @@ troubleshooting if anything looked wrong during collection.
   `--pg-host`/`--pg-port` are reachable from this machine (e.g.
   `nc -zv <host> <port>`), and that the database/user actually exist
   on that server.
-- **`adprofiler.py` fails to bind to the domain controller**: confirm
-  the bind account's password is correct, and try without `--ssl`
-  first if LDAPS isn't confirmed to be configured on that DC.
+- **`adprofiler.py` fails to bind to the domain controller**: the
+  message after "LDAP bind failed:" says why.
+  - `invalid server address`: the `--dc-host` name does not resolve in
+    DNS from this machine (`getent hosts <dc-host>` returns nothing);
+    the password was never tried. Fix DNS or use the DC's IP address
+    (not with `--sysvol-kerberos`, which needs the DC's FQDN).
+  - `invalidCredentials` with `data 52e`: wrong password; `775`: account
+    locked out; `532`: password expired; `533`: account disabled.
+  - Otherwise, try without `--ssl` if LDAPS isn't confirmed to be
+    configured on that DC.
 - **`adprofiler.py` reports "Database schema is behind" (or "ahead,"
   or "predates schema version tracking")**: this means the database's
   schema doesn't match what this version of the script expects --
