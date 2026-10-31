@@ -9,6 +9,25 @@ the script's own docstring now keeps a one-line summary per entry, this
 file keeps the complete detail (root causes, what was verified, why a
 decision was made a particular way) for anyone who wants it.
 
+    1.0.5 - Schema v49. Low-severity fixes from the code review:
+            - The partition functions run with TimeZone = UTC: a monthly
+              partition's bounds came from a DATE cast to timestamptz in the
+              caller's session zone, so sessions in different zones made
+              partitions that overlapped (CREATE failed, run aborted) or left
+              a gap. A new partition reuses an existing neighbour's bound, and
+              the v49 migration rebuilds empty future partitions.
+            - reconcile_acl_edge_inheritance() also compares the inherited
+              flag, so an ACE that turned explicit or inherited is versioned.
+            - resolve_gmsa_password_readers() looked up the gMSAs' own SIDs
+              to decide whether trustees were collected objects, so the
+              "unresolved" count in the log was nearly everything.
+            - Log file opened as UTF-8.
+            - --ca-cert PEM_FILE (with --ssl): ldap3.Tls(validate=
+              CERT_REQUIRED) with that CA file; ldap3 checks the host name.
+              Without it the certificate is not checked, and a warning says
+              so.
+            - Expects schema v49.
+
     1.0.4 - Schema v48. Medium-severity fixes from the code review:
             - User, computer and group description stored with
               _first_value() (text), not as the array literal psycopg2 made

@@ -28,17 +28,22 @@ Classification of the command (first token, quotes removed):
   * UNC path on \\<domain>\SYSVOL or \\<domain>\NETLOGON  -> info (inventory)
 
 Data: ad_display_specifier.admin_context_menu (JSON array of the attribute's
-values), ad_domain.dns_root.
+values), ad_domain.dns_root and netbios_name, and the domain controllers'
+names.
 
 [v1.2] dead reference link replaced; no query change.
+
+[v1.3] A program on SYSVOL or NETLOGON reached through the domain's NetBIOS
+name or a domain controller's name (\\CORP\SYSVOL\..., \\dc01\NETLOGON\...)
+counts as SYSVOL, like the DNS name; it was rated as an outside UNC path.
 """
 
 PLUGIN = {
     "plugin_id": 5020,
     "category": "ACLs",
     "name": "Display Specifier Admin Context Menu Runs a Program Outside SYSVOL",
-    "version": "1.2",
-    "revision_date": "2026-10-21",
+    "version": "1.3",
+    "revision_date": "2026-10-30",
     "control_id": "ACL-5020",
     "framework_tags": [
         "NIST-800-53-CM-6",
@@ -81,11 +86,23 @@ PLUGIN = {
     ),
     "base_severity": "high",
     "query": r"""
-        WITH dom AS (
-            SELECT lower(m.dns_root) AS dns_root
-            FROM ad_domain m
-            WHERE m.client_id = %(client_id)s AND m.valid_to IS NULL
-            ORDER BY m.object_guid LIMIT 1
+        WITH
+        -- [v1.3] names that reach this domain's SYSVOL: the DNS name, the
+        -- NetBIOS name and each domain controller (FQDN or short name)
+        dom_host AS (
+            SELECT lower(m.dns_root) AS h FROM ad_domain m
+            WHERE m.client_id = %(client_id)s AND m.valid_to IS NULL AND m.dns_root IS NOT NULL
+            UNION
+            SELECT lower(m.netbios_name) FROM ad_domain m
+            WHERE m.client_id = %(client_id)s AND m.valid_to IS NULL AND m.netbios_name IS NOT NULL
+            UNION
+            SELECT lower(c.dns_hostname) FROM ad_computer c
+            WHERE c.client_id = %(client_id)s AND c.valid_to IS NULL AND c.is_domain_controller
+              AND c.dns_hostname IS NOT NULL
+            UNION
+            SELECT lower(rtrim(c.sam_account_name, '$')) FROM ad_computer c
+            WHERE c.client_id = %(client_id)s AND c.valid_to IS NULL AND c.is_domain_controller
+              AND c.sam_account_name IS NOT NULL
         ),
         entry AS (
             SELECT d.object_guid, d.schema_cn, o.dn_current, e.value AS raw,
@@ -114,8 +131,9 @@ PLUGIN = {
         classified AS (
             SELECT p.*,
                    CASE WHEN p.target ~ '^\\\\' THEN
-                            CASE WHEN p.target LIKE '\\\\' || (SELECT dns_root FROM dom) || '\\sysvol\\%%'
-                                   OR p.target LIKE '\\\\' || (SELECT dns_root FROM dom) || '\\netlogon\\%%'
+                            CASE WHEN split_part(substr(p.target, 3), '\', 2) IN ('sysvol', 'netlogon')
+                                      AND split_part(substr(p.target, 3), '\', 3) <> ''
+                                      AND split_part(substr(p.target, 3), '\', 1) IN (SELECT h FROM dom_host)
                                  THEN 'sysvol' ELSE 'unc' END
                         WHEN p.target ~ '^https?://' THEN 'url'
                         ELSE 'local' END AS location

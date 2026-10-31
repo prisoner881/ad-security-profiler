@@ -52,13 +52,20 @@ requires a managed device, so it is allowed here). Before, any all-users
 policy counted whatever its other conditions -- e.g. the standard "Block legacy authentication"
 policy (client apps Exchange ActiveSync / other, Block) was taken as
 covering every sign-in.
+
+[v1.3] A blocking policy's device filter counts only when it selects the
+unmanaged devices: mode "include" with a rule such as device.isCompliant -ne
+True (or a trustType -ne / -notin test), or mode "exclude" with
+device.isCompliant -eq True (or trustType -eq / -in), and no other device
+attribute in the rule. Any filter that mentioned isCompliant or trustType
+counted, including one that blocked only compliant devices.
 """
 
 PLUGIN = {
     "plugin_id": 10021,
     "category": "Hybrid Identity",
     "name": "Privileged Access Not Restricted to Managed Devices",
-    "version": "1.2",
+    "version": "1.3",
     "revision_date": "2026-10-30",
     "control_id": "HYBRID-10021",
     "framework_tags": [
@@ -157,7 +164,9 @@ PLUGIN = {
                            THEN jsonb_array_length(p->'grant_controls'->'customAuthenticationFactors') ELSE 0 END
                     + CASE WHEN jsonb_typeof(p->'grant_controls'->'termsOfUse') = 'array'
                            THEN jsonb_array_length(p->'grant_controls'->'termsOfUse') ELSE 0 END) AS other_controls,
-                   COALESCE(p->'conditions'->'devices'->'deviceFilter'->>'rule', '') AS device_rule,
+                   lower(regexp_replace(COALESCE(p->'conditions'->'devices'->'deviceFilter'->>'rule', ''),
+                                        '[[:space:]]+', ' ', 'g')) AS device_rule,
+                   lower(COALESCE(p->'conditions'->'devices'->'deviceFilter'->>'mode', '')) AS device_mode,
                    CASE WHEN jsonb_typeof(p->'conditions'->'users'->'includeUsers') = 'array'
                         THEN p->'conditions'->'users'->'includeUsers' ELSE '[]'::jsonb END AS inc_users,
                    CASE WHEN jsonb_typeof(p->'conditions'->'users'->'includeRoles') = 'array'
@@ -179,9 +188,18 @@ PLUGIN = {
                                    AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text(r.builtin) c
                                                     WHERE c NOT IN ('compliantDevice', 'domainJoinedDevice'))))
                      THEN 'required'
+                     -- [v1.3] a block whose device filter selects the unmanaged
+                     -- devices: mode include with a "not compliant / not joined"
+                     -- rule, or mode exclude with a "compliant / joined" rule,
+                     -- testing nothing but those two attributes
                      WHEN r.builtin ? 'block'
-                          AND (position('device.iscompliant' IN lower(r.device_rule)) > 0
-                               OR position('device.trusttype' IN lower(r.device_rule)) > 0)
+                          AND r.device_rule !~ 'device[.](?!iscompliant|trusttype)'
+                          AND ((r.device_mode = 'include'
+                                AND (r.device_rule ~ 'device[.]iscompliant -(ne "?true"?|eq "?false"?)'
+                                     OR r.device_rule ~ 'device[.]trusttype -(ne|notin) '))
+                               OR (r.device_mode = 'exclude'
+                                   AND (r.device_rule ~ 'device[.]iscompliant -(eq "?true"?|ne "?false"?)'
+                                        OR r.device_rule ~ 'device[.]trusttype -(eq|in) ')))
                      THEN 'required'
                      WHEN r.builtin ?| ARRAY['compliantDevice', 'domainJoinedDevice'] THEN 'optional'
                    END AS device_control

@@ -48,14 +48,18 @@ treated like Application Administrator: it manages agent identities and
 blueprints, including their credentials, and until April 2026 could also
 take over ordinary service principals (Silverfort); Microsoft labels it
 privileged.
+
+[v1.2] Ages are measured from the time of the AD collection being evaluated
+(the sync_run), not from when adaudit.py runs, so evaluating the same data later gives
+the same result.
 """
 
 PLUGIN = {
     "plugin_id": 10110,
     "category": "Hybrid Identity",
     "name": "Privileged Entra ID Account with a Weak On-Premises Posture",
-    "version": "1.1",
-    "revision_date": "2026-10-22",
+    "version": "1.2",
+    "revision_date": "2026-10-30",
     "control_id": "HYBRID-10110",
     "framework_tags": [
         "CISA-SCUBA-MS.AAD.7.3",
@@ -165,7 +169,7 @@ PLUGIN = {
                               OR (COALESCE(u.user_account_control, 0) & 65536) <> 0
                             THEN 'password never expires' END,
                        CASE WHEN u.pwd_last_set > TIMESTAMPTZ '1601-01-02 00:00:00+00'
-                             AND u.pwd_last_set < now() - interval '365 days'
+                             AND u.pwd_last_set < (SELECT COALESCE(max(sr.completed_at), now()) FROM sync_run sr WHERE sr.run_id = %(run_id)s) - interval '365 days'
                             THEN 'password older than one year' END,
                        CASE WHEN (COALESCE(u.user_account_control, 0) & 524288) <> 0
                               OR EXISTS (SELECT 1 FROM delegation_edge de
@@ -212,7 +216,7 @@ PLUGIN = {
                 'user_account_control', w.user_account_control,
                 'pwd_last_set', w.pwd_last_set,
                 'password_age_days', CASE WHEN w.pwd_last_set > TIMESTAMPTZ '1601-01-02 00:00:00+00'
-                                          THEN EXTRACT(DAY FROM now() - w.pwd_last_set)::int END,
+                                          THEN EXTRACT(DAY FROM (SELECT COALESCE(max(sr.completed_at), now()) FROM sync_run sr WHERE sr.run_id = %(run_id)s) - w.pwd_last_set)::int END,
                 'admin_count', w.admin_count,
                 'related_plugins', jsonb_build_array(1001, 1002, 1009, 1010, 1013, 1036, 10018),
                 'scuba_policy', 'MS.AAD.7.3'

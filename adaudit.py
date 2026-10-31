@@ -2,7 +2,7 @@
 """
 adaudit.py -- AD Security & Compliance Plugin Runner
 ======================================================
-VERSION: 1.0.4
+VERSION: 1.0.5
 
 Companion to adprofiler.py. Where adprofiler.py collects AD data,
 adaudit.py analyzes it: discovers every plugin file in plugins/, runs each
@@ -25,6 +25,11 @@ DESIGN:
       as: (status, object_guid, stig_severity, stig_reference,
       tool_severity, tool_reference, fd_severity, summary, detail).
       Zero rows returned = clean pass, nothing to report.
+    - [v1.0.5] A finding whose STIG or tool reference changed gets a new
+      version (it kept the reference it was first recorded with). Push: a
+      finding that was fixed and came back is sent with the date it came
+      back as detected_at, not the date it was first ever seen. Needs schema
+      v49 (plugin 11027).
     - [v1.0.4] The open findings a NOT ASSESSED plugin keeps (they are
       pushed as unchanged) count like any other open finding: they are
       listed under the plugin in the console report and the workbook, make
@@ -294,7 +299,7 @@ import psycopg2.extras
 import adaudit_push
 import run_lock  # [v1.0.2] one run at a time, see run_lock.py
 
-VERSION = "1.0.4"
+VERSION = "1.0.5"
 
 # [test-candidate-branch] Always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
@@ -654,8 +659,9 @@ def connect_postgres():
 # SYSVOL script commands (plugins 1052, 4038, 4039, 9040-9042), v45 the
 # computer creator SID, DC SYSVOL subscriptions and users' Java attributes
 # (plugins 2044-2046, 4021, 11001), v48 ad_gpo_sysvol.first_read_run_id
-# (plugin 11021; v47 changed no plugin input).
-REQUIRED_SCHEMA_VERSION = 48
+# (plugin 11021; v47 changed no plugin input), v49
+# entra_change_baseline.previous_run_at (plugin 11027).
+REQUIRED_SCHEMA_VERSION = 49
 
 # [v0.9.0] Data sources a client may not have collected: (table/view names a
 # plugin query mentions, probe returning TRUE when the client has the data,
@@ -1058,6 +1064,10 @@ def sync_evidence(pg_cur, evidence_run_id, control_test_id, client_id, rows, plu
             or existing["stig_severity"] != row["stig_severity"]
             or existing["tool_severity"] != row["tool_severity"]
             or existing["summary"] != row["summary"]
+            # [v1.0.5] a new STIG or tool reference is a change too (it was
+            # left at the value of the first version)
+            or existing.get("stig_reference") != row.get("stig_reference")
+            or existing.get("tool_reference") != row.get("tool_reference")
         )
         if not content_changed:
             findings.append(finding_dict(row, "unchanged"))

@@ -82,7 +82,6 @@ DRY RUN
 import gzip
 import hashlib
 import json
-import math
 import random
 import time
 import uuid
@@ -590,8 +589,12 @@ def build_findings(conn, client_id, evidence_run_id, meta):
                          f.evidence_run_id_valid_to DESC, f.evidence_fact_id DESC;
             """, {"c": client_id, "p": prev, "r": evidence_run_id})
             closed = {(r["control_test_id"], r["identity_guid"]): r for r in cur.fetchall()}
+        # detected_at: the start of the finding's current stretch -- a finding
+        # that was fixed and came back starts again at version 1 (it was sent
+        # with the date it was first ever seen).
         cur.execute("""
-            SELECT control_test_id, identity_guid, min(valid_from) AS first_seen
+            SELECT control_test_id, identity_guid,
+                   COALESCE(max(valid_from) FILTER (WHERE version_id = 1), min(valid_from)) AS first_seen
             FROM control_evidence_fact
             WHERE client_id = %s AND evidence_run_id_valid_from <= %s
             GROUP BY control_test_id, identity_guid;

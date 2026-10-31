@@ -23,13 +23,18 @@ name in the summary is NULL-safe.
 [v1.4] Windows Server 2008 is matched as "server ... 2008", so the
 "Windows Server® 2008 ..." spelling (with the registered sign, as 2008 RTM
 hosts report it) counts as unsupported; it was missed.
+
+[v1.5] "Dormant" (no logon for 90 days) is measured from the time of the
+collection being evaluated, not from when adaudit.py runs: re-evaluating the
+same collection later could add "dormant" to the summary and record a
+change that did not happen in the directory.
 """
 
 PLUGIN = {
     "plugin_id": 2028,
     "category": "Computer Accounts",
     "name": "Domain Root or AdminSDHolder Owned by an Unsupported or Dormant Computer",
-    "version": "1.4",
+    "version": "1.5",
     "revision_date": "2026-10-30",
     "remediation": (
         "Take ownership back to a recognized default holder immediately "
@@ -137,7 +142,7 @@ PLUGIN = {
                               OR owner.operating_system ILIKE '%%windows xp%%' OR owner.operating_system ILIKE '%%windows vista%%'
                               OR owner.operating_system ILIKE '%%windows 2000%%' OR owner.operating_system ILIKE '%%windows nt%%'
                               THEN 'unsupported OS (' || owner.operating_system || ')' END),
-                        (CASE WHEN owner.last_logon_timestamp IS NULL OR owner.last_logon_timestamp < now() - interval '90 days'
+                        (CASE WHEN owner.last_logon_timestamp IS NULL OR owner.last_logon_timestamp < (SELECT COALESCE(max(sr.completed_at), now()) FROM sync_run sr WHERE sr.run_id = %(run_id)s) - interval '90 days'
                               THEN 'dormant' END)
                     ) AS v(x) WHERE x IS NOT NULL) AS summary,
             jsonb_build_object(
@@ -157,7 +162,7 @@ PLUGIN = {
                 OR owner.operating_system ILIKE '%%windows 7%%' OR owner.operating_system ILIKE '%%windows 8%%'
                 OR owner.operating_system ILIKE '%%windows xp%%' OR owner.operating_system ILIKE '%%windows vista%%'
                 OR owner.operating_system ILIKE '%%windows 2000%%' OR owner.operating_system ILIKE '%%windows nt%%'
-                OR owner.last_logon_timestamp IS NULL OR owner.last_logon_timestamp < now() - interval '90 days'
+                OR owner.last_logon_timestamp IS NULL OR owner.last_logon_timestamp < (SELECT COALESCE(max(sr.completed_at), now()) FROM sync_run sr WHERE sr.run_id = %(run_id)s) - interval '90 days'
               )
     """,
 }

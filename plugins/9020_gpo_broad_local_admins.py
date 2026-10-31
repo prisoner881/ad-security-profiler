@@ -30,14 +30,18 @@ link (it applies somewhere); low (status warn) when it is not linked or
 all links are disabled -- not effective now, but one link away. Site links
 and WMI filters are not evaluated. One row per GPO. Zero rows unless
 SYSVOL has been collected (adprofiler.py --sysvol).
+
+[v1.1] Settings in a half of the GPO that is disabled (GPO status
+"Computer configuration settings disabled" or "User configuration settings
+disabled", the GPO's flags attribute) are left out: they are not applied.
 """
 
 PLUGIN = {
     "plugin_id": 9020,
     "category": "Organizational Units",
     "name": "Group Policy Adds Broad Principals to Local Administrators",
-    "version": "1.0",
-    "revision_date": "2026-10-04",
+    "version": "1.1",
+    "revision_date": "2026-10-30",
     "control_id": "GPO-9020",
     "framework_tags": [
         "NIST-800-53-AC-2(7)", "NIST-800-53-AC-6(5)", "NIST-800-53-AC-6(2)",
@@ -101,6 +105,11 @@ PLUGIN = {
               AND (upper(p.details_json::jsonb ->> 'group_sid') = 'S-1-5-32-544'
                    OR lower(p.details_json::jsonb ->> 'group_name') LIKE 'administrators%%')
               AND upper(COALESCE(m.value ->> 'action', '')) = 'ADD'
+              -- [v1.1] the GPO's settings of this scope are not disabled
+              AND NOT EXISTS (SELECT 1 FROM ad_gpo gf
+                              WHERE gf.client_id = %(client_id)s AND gf.object_guid = p.gpo_guid
+                                AND gf.valid_to IS NULL
+                                AND (COALESCE(gf.gpo_flags, 0) & CASE WHEN p.scope = 'user' THEN 1 ELSE 2 END) <> 0)
         ),
         rg_entry AS (
             -- Restricted Groups: Administrators__Members = <list>
@@ -115,6 +124,11 @@ PLUGIN = {
               AND lower(left(s.setting_key, length(s.setting_key) - 9))
                   IN ('*s-1-5-32-544', 'administrators', 'builtin' || chr(92) || 'administrators')
               AND btrim(x) <> ''
+              -- [v1.1] the GPO's settings of this scope are not disabled
+              AND NOT EXISTS (SELECT 1 FROM ad_gpo gf
+                              WHERE gf.client_id = %(client_id)s AND gf.object_guid = s.gpo_guid
+                                AND gf.valid_to IS NULL
+                                AND (COALESCE(gf.gpo_flags, 0) & CASE WHEN s.scope = 'user' THEN 1 ELSE 2 END) <> 0)
             UNION ALL
             -- Restricted Groups: <principal>__Memberof = <list containing Administrators>
             SELECT s.gpo_guid, s.scope, left(s.setting_key, length(s.setting_key) - 10), 'memberof'
@@ -127,6 +141,11 @@ PLUGIN = {
               AND EXISTS (SELECT 1 FROM unnest(string_to_array(COALESCE(s.setting_value, ''), ',')) AS y
                           WHERE lower(btrim(y)) IN ('*s-1-5-32-544', 'administrators',
                                                     'builtin' || chr(92) || 'administrators'))
+              -- [v1.1] the GPO's settings of this scope are not disabled
+              AND NOT EXISTS (SELECT 1 FROM ad_gpo gf
+                              WHERE gf.client_id = %(client_id)s AND gf.object_guid = s.gpo_guid
+                                AND gf.valid_to IS NULL
+                                AND (COALESCE(gf.gpo_flags, 0) & CASE WHEN s.scope = 'user' THEN 1 ELSE 2 END) <> 0)
         ),
         candidate AS (
             SELECT gm.gpo_guid, gm.scope,

@@ -1962,6 +1962,7 @@ CREATE VIEW ad_intel.v_effective_group_membership AS
     min(depth) AS min_depth,
     bool_or((depth = 1)) AS is_direct
    FROM membership_closure
+  WHERE (member_guid <> group_guid)
   GROUP BY group_guid, member_guid, client_id;
 
 
@@ -1969,7 +1970,7 @@ CREATE VIEW ad_intel.v_effective_group_membership AS
 -- Name: VIEW v_effective_group_membership; Type: COMMENT; Schema: ad_intel; Owner: -
 --
 
-COMMENT ON VIEW ad_intel.v_effective_group_membership IS 'Transitive closure over group_member_edge -- "is member_guid a member of group_guid, directly or through any chain of nested groups". min_depth=1 means direct membership. Recomputed on every query (not materialized); for a large, deeply-nested directory this may be worth converting to a materialized view refreshed after each collection run if query latency becomes a concern.';
+COMMENT ON VIEW ad_intel.v_effective_group_membership IS 'Transitive closure over group_member_edge -- "is member_guid a member of group_guid, directly or through any chain of nested groups". min_depth=1 means direct membership. A group is never listed as a member of itself, even when nesting forms a cycle (schema v49). Recomputed on every query (not materialized); for a large, deeply-nested directory this may be worth converting to a materialized view refreshed after each collection run if query latency becomes a concern.';
 
 
 --
@@ -4401,19 +4402,28 @@ COMMENT ON TABLE ad_intel.partition_maintenance_log IS
 
 -- Return type changes (void -> boolean): drop and recreate.
 DROP FUNCTION IF EXISTS ad_intel.create_monthly_partition(text, date);
-CREATE FUNCTION ad_intel.create_monthly_partition(p_table text, p_month date)
+CREATE OR REPLACE FUNCTION ad_intel.create_monthly_partition(p_table text, p_month date)
     RETURNS boolean
     LANGUAGE plpgsql
     SECURITY DEFINER
     SET search_path = ad_intel, pg_temp
+    SET TimeZone = 'UTC'
     AS $$
 -- Creates the monthly partition of p_table (a table registered in
 -- partitioned_table_registry) for the month containing p_month. Returns TRUE
 -- if it was created, FALSE if it already existed.
+-- [v49] The bounds are UTC month boundaries whatever the caller's TimeZone
+-- setting (a date cast to timestamptz used the session's zone, so sessions
+-- in different zones made partitions that overlapped -- the CREATE failed and
+-- the run aborted -- or left a gap). Where the previous or next month's
+-- partition already exists, its bound is reused, so partitions made under
+-- another zone before v49 still meet exactly.
 DECLARE
     v_start      DATE := date_trunc('month', p_month);
-    v_end        DATE := v_start + INTERVAL '1 month';
+    v_from       TIMESTAMPTZ := v_start::timestamp AT TIME ZONE 'UTC';
+    v_to         TIMESTAMPTZ := (v_start + INTERVAL '1 month')::timestamp AT TIME ZONE 'UTC';
     v_part       TEXT := format('%s_%s', p_table, to_char(v_start, 'YYYY_MM'));
+    v_bound      TEXT;
     v_high_churn BOOLEAN;
 BEGIN
     SELECT high_churn INTO v_high_churn
@@ -4424,9 +4434,22 @@ BEGIN
     IF to_regclass(format('ad_intel.%I', v_part)) IS NOT NULL THEN
         RETURN false;
     END IF;
+    SELECT pg_get_expr(c.relpartbound, c.oid) INTO v_bound
+    FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'ad_intel'
+    WHERE c.relname = format('%s_%s', p_table, to_char(v_start - INTERVAL '1 month', 'YYYY_MM'));
+    IF v_bound ~ 'TO \(''[^'']+''\)' THEN
+        v_from := substring(v_bound FROM 'TO \(''([^'']+)''\)')::timestamptz;
+    END IF;
+    v_bound := NULL;
+    SELECT pg_get_expr(c.relpartbound, c.oid) INTO v_bound
+    FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'ad_intel'
+    WHERE c.relname = format('%s_%s', p_table, to_char(v_start + INTERVAL '1 month', 'YYYY_MM'));
+    IF v_bound ~ 'FROM \(''[^'']+''\)' THEN
+        v_to := substring(v_bound FROM 'FROM \(''([^'']+)''\)')::timestamptz;
+    END IF;
     EXECUTE format(
         'CREATE TABLE ad_intel.%I PARTITION OF ad_intel.%I FOR VALUES FROM (%L) TO (%L)',
-        v_part, p_table, v_start, v_end
+        v_part, p_table, v_from, v_to
     );
     IF v_high_churn THEN
         EXECUTE format(
@@ -4439,14 +4462,16 @@ $$;
 
 -- The return type changes (void -> integer), which CREATE OR REPLACE cannot do.
 DROP FUNCTION IF EXISTS ad_intel.ensure_partitions_for_horizon(integer);
-CREATE FUNCTION ad_intel.ensure_partitions_for_horizon(p_months_ahead integer DEFAULT 2)
+CREATE OR REPLACE FUNCTION ad_intel.ensure_partitions_for_horizon(p_months_ahead integer DEFAULT 2)
     RETURNS integer
     LANGUAGE plpgsql
     SECURITY DEFINER
     SET search_path = ad_intel, pg_temp
+    SET TimeZone = 'UTC'
     AS $$
 -- Creates every registered table's partitions for the current month and the
 -- next p_months_ahead months (0..24). Returns how many were created.
+-- [v49] Months are UTC months, whatever the caller's TimeZone.
 DECLARE
     v_table   TEXT;
     v_month   DATE;
@@ -4502,18 +4527,19 @@ $$;
 -- Same signature as before (callers and any scheduled job keep working), new
 -- behaviour: only EMPTY partitions are dropped.
 DROP FUNCTION IF EXISTS ad_intel.drop_partitions_older_than(text, integer);
-CREATE FUNCTION ad_intel.drop_partitions_older_than(p_table text, p_retention_months integer DEFAULT 12)
+CREATE OR REPLACE FUNCTION ad_intel.drop_partitions_older_than(p_table text, p_retention_months integer DEFAULT 12)
     RETURNS text[]
     LANGUAGE plpgsql
     SECURITY DEFINER
     SET search_path = ad_intel, pg_temp
+    SET TimeZone = 'UTC'
     AS $_$
 -- Drops monthly partitions of p_table older than p_retention_months that hold
 -- NO rows. A partition still holding any row -- in particular a current
 -- (open) row of something unchanged since that month -- is kept: dropping it
 -- would delete live state. Closed rows are removed by purge_closed_history(),
 -- after which old partitions empty out and are dropped here. Returns the
--- names of the partitions dropped.
+-- names of the partitions dropped. [v49] The cutoff month is a UTC month.
 DECLARE
     v_cutoff  DATE := (date_trunc('month', now()) - make_interval(months => p_retention_months))::date;
     v_rec     RECORD;
@@ -4600,9 +4626,10 @@ CREATE OR REPLACE FUNCTION ad_intel.missing_current_partitions()
     LANGUAGE sql
     STABLE
     SET search_path = ad_intel, pg_temp
+    SET TimeZone = 'UTC'
     AS $$
 -- Registered tables with no partition for the current month: a collection run
--- would fail on them.
+-- would fail on them. [v49] The current UTC month, as the partitions are made.
     SELECT COALESCE(array_agg(r.table_name ORDER BY r.table_name), '{}')
     FROM ad_intel.partitioned_table_registry r
     WHERE to_regclass(format('ad_intel.%I', r.table_name || '_' || to_char(now(), 'YYYY_MM'))) IS NULL;
@@ -5698,6 +5725,21 @@ COMMENT ON COLUMN ad_intel.ad_gpo_sysvol.first_read_run_id IS
 
 
 -- ============================================================================
+-- v49 ADDITIONS -- see schema_migration_v49.sql. (The partition functions
+-- create_monthly_partition, ensure_partitions_for_horizon,
+-- drop_partitions_older_than and missing_current_partitions now work in UTC,
+-- and v_effective_group_membership leaves out self-membership; both changes
+-- are applied in place above.)
+-- ============================================================================
+
+ALTER TABLE ad_intel.entra_change_baseline
+    ADD COLUMN IF NOT EXISTS previous_run_at timestamptz;
+COMMENT ON COLUMN ad_intel.entra_change_baseline.previous_run_at IS
+    'last_run_at before the latest update: the previous successful history update of this entity '
+    'type (NULL until two updates by entra_graph_collector.py 1.0.4+). (schema v49)';
+
+
+-- ============================================================================
 -- v31 ADDITIONS -- schema version tracking.
 -- ============================================================================
 
@@ -5711,7 +5753,7 @@ CREATE TABLE schema_migration_history (
 -- pretense of having stepped through intermediate versions that were
 -- never actually separately applied to this database.
 INSERT INTO schema_migration_history (version_number, description) VALUES
-    (48, 'Fresh install via schema_init.sql, consolidated through v48');
+    (49, 'Fresh install via schema_init.sql, consolidated through v49');
 
 -- ============================================================================
 -- PARTITIONED TABLE REGISTRY + INITIAL PARTITION CREATION

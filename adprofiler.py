@@ -4,7 +4,7 @@
  adprofiler.py -- Active Directory Security & Compliance Profiler (Collector)
 ================================================================================
 
-VERSION: 1.0.4
+VERSION: 1.0.5
 
 PURPOSE:
     Connects to an on-premise Active Directory Domain Controller via LDAP,
@@ -37,6 +37,8 @@ INPUT FORMAT (command line):
                          appearing in shell history or `ps` output).
         --port           LDAP port. Default: 389 (or 636 if --ssl is set).
         --ssl            Use LDAPS (TLS) instead of plaintext LDAP.
+        --ca-cert        [v1.0.5] With --ssl, verify the DC's certificate
+                         against this PEM CA file (and its host name).
         --base-dn        Override the search base. Default: auto-discovered
                          from the DC's RootDSE (defaultNamingContext).
         --page-size      LDAP paged-search page size. Default: 1000.
@@ -129,6 +131,7 @@ import json
 import base64
 import re
 import random
+import ssl
 import time
 from cryptography import x509
 from cryptography.x509.oid import NameOID
@@ -176,7 +179,7 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
-VERSION = "1.0.4"
+VERSION = "1.0.5"
 
 # [v0.7.7] The oldest collector version whose stored derived fields
 # (parsed / typed columns computed from raw attributes) are current. A
@@ -1281,10 +1284,12 @@ def reconcile_acl_edge_inheritance(pg_cur, client_id, run_id, run_timestamp, des
       - open row whose recorded values differ from this run's: closed,
         so sync_edges() reopens it with the new values (a real change,
         versioned like any other).
+    [v1.0.5] The inherited flag is compared too: an ACE that turned from
+    explicit to inherited (or back) kept the flag it was first seen with.
     Returns (backfilled, changed)."""
     pg_cur.execute(
         "SELECT edge_id, object_guid, trustee_sid, ace_type, access_mask, object_type_guid, "
-        "       inherit_only, inherited_object_type_guid "
+        "       inherit_only, inherited_object_type_guid, inherited "
         "FROM acl_edge WHERE client_id = %s AND valid_to IS NULL",
         (client_id,),
     )
@@ -1303,7 +1308,8 @@ def reconcile_acl_edge_inheritance(pg_cur, client_id, run_id, run_timestamp, des
             )
             backfilled += 1
         elif (row[6] != payload["inherit_only"]
-              or row[7] != payload["inherited_object_type_guid"]):
+              or row[7] != payload["inherited_object_type_guid"]
+              or row[8] != payload["inherited"]):
             close_edge_by_id(pg_cur, "acl_edge", edge_id, run_id, run_timestamp)
             changed += 1
     return backfilled, changed
@@ -1581,10 +1587,19 @@ def diff_attributes(old_full, new_full):
     return changed
 
 
-def connect_ldap(host, port, use_ssl, username, password):
+def connect_ldap(host, port, use_ssl, username, password, ca_cert=None):
+    """[v1.0.5] ca_cert (--ca-cert): with --ssl, the DC's certificate must
+    chain to a CA in that PEM file and name host; without it the
+    certificate is not checked (as before), and a warning says so."""
     log_info(f"Connecting to {host}:{port} ({'LDAPS' if use_ssl else 'LDAP'})...")
+    tls = None
+    if use_ssl and ca_cert:
+        tls = ldap3.Tls(validate=ssl.CERT_REQUIRED, ca_certs_file=ca_cert)
+    elif use_ssl:
+        log_warn("LDAPS certificate is not verified (no --ca-cert): the connection is encrypted "
+                 "but the domain controller's identity is not checked.")
     try:
-        server = ldap3.Server(host, port=port, use_ssl=use_ssl, get_info=ldap3.ALL)
+        server = ldap3.Server(host, port=port, use_ssl=use_ssl, get_info=ldap3.ALL, tls=tls)
         # [v1.0.3] auto_referrals=False: ldap3 follows referrals by default
         # and binds to the referred host with these credentials, over plain
         # ldap:// whatever --ssl says -- a cleartext bind password sent to
@@ -2182,7 +2197,7 @@ REQUIRED_IDENTITY_COLUMNS = {
 # the structural check remains the backstop for a schema altered
 # outside the approved migration files, where the version number could
 # claim to be current while the actual structure doesn't match it.
-EXPECTED_SCHEMA_VERSION = 48  # [v1.0.4] v48: ad_gpo_sysvol.first_read_run_id (v47: sync_run.dc_invocation_id / dc_dns_hostname)
+EXPECTED_SCHEMA_VERSION = 49  # [v1.0.5] v49: partition functions in UTC (v48: ad_gpo_sysvol.first_read_run_id)
 
 
 def check_schema_version(pg_conn):
@@ -4365,15 +4380,7 @@ def resolve_gmsa_password_readers(pg_cur, client_id, run_id, computer_entries, s
     """
     valid_from = run_timestamp
     desired = {}
-    unresolved_trustees = 0
     gmsa_count = 0
-
-    sids = [full.get("objectSid") for _, full in computer_entries if full.get("objectSid")]
-    pg_cur.execute(
-        "SELECT object_sid, object_guid FROM directory_object WHERE client_id = %s AND object_sid = ANY(%s);",
-        (client_id, sids),
-    )
-    sid_to_guid = dict(pg_cur.fetchall())
 
     for object_guid, full in computer_entries:
         raw_membership_b64 = full.get("msDS-GroupMSAMembership")
@@ -4383,13 +4390,21 @@ def resolve_gmsa_password_readers(pg_cur, client_id, run_id, computer_entries, s
         raw_membership_sd = base64.b64decode(raw_membership_b64)
         _, membership_aces, _ = parse_security_descriptor(raw_membership_sd)
         for ace in membership_aces:
-            trustee_guid = sid_to_guid.get(ace["trustee_sid"])
             desired[(object_guid, ace["trustee_sid"])] = {
                 "access_mask": ace["access_mask"],
                 "ace_type": ace["ace_type"],
             }
-            if trustee_guid is None:
-                unresolved_trustees += 1
+
+    # [v1.0.5] Resolved against the trustees' SIDs (the gMSAs' own SIDs were
+    # looked up, so nearly every trustee was counted as unresolved). Only
+    # the log line uses it.
+    trustee_sids = sorted({sid for _, sid in desired})
+    pg_cur.execute(
+        "SELECT object_sid FROM directory_object WHERE client_id = %s AND object_sid = ANY(%s);",
+        (client_id, trustee_sids),
+    )
+    known_sids = {row[0] for row in pg_cur.fetchall()}
+    unresolved_trustees = sum(1 for _, sid in desired if sid not in known_sids)
 
     opened, closed = sync_edges(
         pg_cur, "gmsa_password_reader_edge", client_id, run_id, valid_from,
@@ -5306,6 +5321,10 @@ def parse_args():
                          help="LDAP port. Default: 389, or 636 if --ssl is set.")
     parser.add_argument("--ssl", action="store_true",
                          help="Use LDAPS (TLS) instead of plaintext LDAP.")
+    parser.add_argument("--ca-cert", default=None, metavar="PEM_FILE",
+                         help="[v1.0.5] With --ssl: verify the domain controller's certificate "
+                              "against the CA certificate(s) in this PEM file, and that it names "
+                              "--dc-host. Without it the certificate is not checked.")
     parser.add_argument("--base-dn", default=None,
                          help="Override search base. Default: auto-discovered.")
     parser.add_argument("--page-size", type=int, default=1000,
@@ -5353,6 +5372,10 @@ def parse_args():
         parser.error("the following arguments are required: --dc-host, --username")
     if not args.version and (not args.pg_host or not args.pg_user):
         parser.error("the following arguments are required: --pg-host, --pg-user")
+    if args.ca_cert and not args.ssl:
+        parser.error("--ca-cert needs --ssl (it verifies the LDAPS certificate)")
+    if args.ca_cert and not os.path.isfile(args.ca_cert):
+        parser.error(f"--ca-cert: no such file: {args.ca_cert}")
 
     return args
 
@@ -5369,7 +5392,7 @@ def main():
     # file gets flushed and closed, and the real stdout restored, no
     # matter how main() below exits.
     log_filename = f"adprofiler-results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-    log_fh = open(log_filename, "w")
+    log_fh = open(log_filename, "w", encoding="utf-8")  # [v1.0.5] not the locale encoding (Windows)
     real_stdout = sys.stdout
     sys.stdout = _TeeStream(real_stdout, log_fh)
 
@@ -5435,7 +5458,8 @@ def main():
     exit_code = 0
 
     try:
-        ldap_conn = connect_ldap(args.dc_host, port, args.ssl, args.username, password)
+        ldap_conn = connect_ldap(args.dc_host, port, args.ssl, args.username, password,
+                                 ca_cert=args.ca_cert)
         if ldap_conn is None:
             log_error("Cannot proceed without a successful LDAP bind. Exiting.")
             raise CollectorAbort("LDAP bind failed")

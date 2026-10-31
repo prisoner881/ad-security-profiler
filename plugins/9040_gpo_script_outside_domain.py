@@ -29,14 +29,19 @@ scripts don't run until it is linked. One row per GPO (object_guid = the
 GPO) listing each such script. Status 'fail' at medium. Requires SYSVOL
 collection (adprofiler.py --sysvol); a GPO collected by sysvol_collector
 before 1.1 has no script rows.
+
+[v1.2] Scripts in a part of the GPO that is disabled (GPO status "Computer
+configuration settings disabled" for startup/shutdown scripts, "User
+configuration settings disabled" for logon/logoff scripts) are left out:
+they never run.
 """
 
 PLUGIN = {
     "plugin_id": 9040,
     "category": "Organizational Units",
     "name": "Group Policy Script Runs From Outside the Domain or a User-Writable Location",
-    "version": "1.1",
-    "revision_date": "2026-10-21",
+    "version": "1.2",
+    "revision_date": "2026-10-30",
     "control_id": "GPO-9040",
     "framework_tags": [
         "NIST-800-53-CM-6",
@@ -112,6 +117,11 @@ PLUGIN = {
             WHERE e.client_id = %(client_id)s AND e.valid_to IS NULL AND e.source = 'scripts'
               AND (SELECT ok FROM sysvol)
               AND btrim(COALESCE(e.setting_value, ''), ' "') <> ''
+              -- [v1.2] the GPO's settings of this scope are not disabled
+              AND NOT EXISTS (SELECT 1 FROM ad_gpo gf
+                              WHERE gf.client_id = %(client_id)s AND gf.object_guid = e.gpo_guid
+                                AND gf.valid_to IS NULL
+                                AND (COALESCE(gf.gpo_flags, 0) & CASE WHEN e.scope = 'user' THEN 1 ELSE 2 END) <> 0)
         ),
         placed AS (
             SELECT s.*, h.host,

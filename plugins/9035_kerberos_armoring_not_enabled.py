@@ -5,7 +5,9 @@ higher, computers whose effective Group Policy does not enable Kerberos
 armoring:
   * domain controllers: "KDC support for claims, compound authentication and
     Kerberos armoring" (HKLM\Software\Microsoft\Windows\CurrentVersion\
-    Policies\System\KDC\Parameters\EnableCbacAndArmor = 1, 2 or 3);
+    Policies\System\KDC\Parameters\EnableCbacAndArmor = 1 with
+    CbacAndArmorLevel = 1, 2 or 3 -- Supported, Always provide claims, Fail
+    unarmored authentication requests);
   * other computers: "Kerberos client support for claims, compound
     authentication and Kerberos armoring" (...\Kerberos\Parameters\
     EnableCbacAndArmor = 1).
@@ -27,6 +29,11 @@ AzureAD account), which Microsoft documents as functioning like a read-only
 domain controller but which is not a server: it has no host, logons, Group
 Policy or SYSVOL. Plugin 1006 reports the age of its key. Requires schema
 v46.
+
+[v1.3] On domain controllers the armoring level is read from
+CbacAndArmorLevel. EnableCbacAndArmor only says the KDC policy is enabled
+(1), so a policy enabled with the level "Not supported" (0) counted as
+armoring; a policy written without a level still counts as Supported.
 """
 
 # ---------------------------------------------------------------------------
@@ -127,8 +134,8 @@ COMPUTER_GPO_SQL = r"""        gpo_som AS (
 PLUGIN = {   'plugin_id': 9035,
     'category': 'Organizational Units',
     'name': 'Kerberos Armoring (FAST) Not Enabled by Group Policy',
-    'version': '1.2',
-    'revision_date': '2026-10-22',
+    'version': '1.3',
+    'revision_date': '2026-10-30',
     'control_id': 'GPO-9035',
     'framework_tags': [   'NIST-800-53-IA-2(8)',
                           'NIST-800-53-CM-6',
@@ -178,7 +185,7 @@ PLUGIN = {   'plugin_id': 9035,
             GROUP BY e.computer_guid
         ),
         st AS (
-            SELECT p.computer_guid, p.computer_name, p.is_dc, p.container_dn, COALESCE((CASE WHEN p.is_dc THEN COALESCE(trim((pv.v ->> lower('Software\Microsoft\Windows\CurrentVersion\Policies\System\KDC\Parameters\EnableCbacAndArmor'))), '') ~ '^0*[123]$' ELSE COALESCE(trim((pv.v ->> lower('Software\Microsoft\Windows\CurrentVersion\Policies\System\Kerberos\Parameters\EnableCbacAndArmor'))), '') ~ '^0*1$' END), false) AS ok
+            SELECT p.computer_guid, p.computer_name, p.is_dc, p.container_dn, COALESCE((CASE WHEN p.is_dc THEN (COALESCE(trim((pv.v ->> lower('Software\Microsoft\Windows\CurrentVersion\Policies\System\KDC\Parameters\EnableCbacAndArmor'))), '') ~ '^0*1$' AND COALESCE(trim((pv.v ->> lower('Software\Microsoft\Windows\CurrentVersion\Policies\System\KDC\Parameters\CbacAndArmorLevel'))), '1') ~ '^0*[123]$') ELSE COALESCE(trim((pv.v ->> lower('Software\Microsoft\Windows\CurrentVersion\Policies\System\Kerberos\Parameters\EnableCbacAndArmor'))), '') ~ '^0*1$' END), false) AS ok
             FROM gpo_comp p
             LEFT JOIN pv ON pv.computer_guid = p.computer_guid
             WHERE (SELECT ok FROM sysvol) AND (COALESCE((SELECT functional_level FROM dom), 0) >= 5)
@@ -223,5 +230,5 @@ PLUGIN = {   'plugin_id': 9035,
         CROSS JOIN dom d
         GROUP BY d.object_guid, d.dns_root
         HAVING count(*) FILTER (WHERE NOT s.ok) > 0
-    """.replace('@COMPGPO@', COMPUTER_GPO_SQL.strip()).replace('@SETTINGS@', "s.source = 'registry' AND s.section = 'HKLM' AND lower(s.setting_key) IN (lower('Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System\\KDC\\Parameters\\EnableCbacAndArmor'), lower('Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System\\Kerberos\\Parameters\\EnableCbacAndArmor'))"),
+    """.replace('@COMPGPO@', COMPUTER_GPO_SQL.strip()).replace('@SETTINGS@', "s.source = 'registry' AND s.section = 'HKLM' AND lower(s.setting_key) IN (lower('Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System\\KDC\\Parameters\\EnableCbacAndArmor'), lower('Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System\\KDC\\Parameters\\CbacAndArmorLevel'), lower('Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System\\Kerberos\\Parameters\\EnableCbacAndArmor'))"),
 }

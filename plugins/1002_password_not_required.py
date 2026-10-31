@@ -32,14 +32,18 @@ severity, by design).
 
 [v1.7] references added (Microsoft, MITRE ATT&CK, PingCastle where a rule matches);
 no query change.
+
+[v1.8] The disabled built-in DefaultAccount (RID 503, created disabled with
+PASSWD_NOTREQD on Windows Server 2016+) is excluded like the disabled Guest;
+enabled, either is still reported.
 """
 
 PLUGIN = {
     "plugin_id": 1002,
     "category": "User Accounts",
     "name": "User Account Does Not Require a Password",
-    "version": "1.7",
-    "revision_date": "2026-10-21",
+    "version": "1.8",
+    "revision_date": "2026-10-30",
     "remediation": (
     'Remove the PASSWD_NOTREQD flag (`Set-ADAccountControl -PasswordNotRequired '
     '$false` or the equivalent ADUC checkbox), then immediately force a '
@@ -160,10 +164,11 @@ PLUGIN = {
           AND (u.user_account_control & 2048) = 0
           -- [v1.6] The disabled built-in Guest (RID 501, default UAC 0x222)
           -- is default configuration; an enabled Guest is still reported.
+          -- [v1.8] Likewise the disabled DefaultAccount (RID 503).
           AND NOT (NOT COALESCE(u.is_enabled, false) AND EXISTS (
                 SELECT 1 FROM directory_object o
                 WHERE o.object_guid = u.object_guid
                   AND o.client_id = u.client_id
-                  AND o.object_sid LIKE '%%-501'))
+                  AND (o.object_sid LIKE '%%-501' OR o.object_sid LIKE '%%-503')))
     """,
 }

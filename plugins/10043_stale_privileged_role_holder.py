@@ -39,14 +39,18 @@ treated like Application Administrator: it manages agent identities and
 blueprints, including their credentials, and until April 2026 could also
 take over ordinary service principals (Silverfort); Microsoft labels it
 privileged.
+
+[v1.2] Ages are measured from the time of the Entra collection being evaluated
+(entra_user.collected_at), not from when adaudit.py runs, so evaluating the same data later gives
+the same result.
 """
 
 PLUGIN = {
     "plugin_id": 10043,
     "category": "Hybrid Identity",
     "name": "Stale Privileged Entra ID Role Holder",
-    "version": "1.1",
-    "revision_date": "2026-10-22",
+    "version": "1.2",
+    "revision_date": "2026-10-30",
     "control_id": "HYBRID-10043",
     "requires_sources": ["sign_in_activity"],
     "framework_tags": [
@@ -181,8 +185,8 @@ PLUGIN = {
         stale AS (
             SELECT u.*
               FROM users u
-             WHERE u.last_activity < now() - interval '45 days'
-                OR (u.last_activity IS NULL AND u.created_at < now() - interval '45 days')
+             WHERE u.last_activity < (SELECT COALESCE(max(cu.collected_at), now()) FROM entra_user cu WHERE cu.client_id = %(client_id)s) - interval '45 days'
+                OR (u.last_activity IS NULL AND u.created_at < (SELECT COALESCE(max(cu.collected_at), now()) FROM entra_user cu WHERE cu.client_id = %(client_id)s) - interval '45 days')
         )
         SELECT
             'fail' AS status,
@@ -204,7 +208,7 @@ PLUGIN = {
                 'privileged_roles', to_jsonb(s.roles),
                 'created_at', s.created_at,
                 'last_activity_at', s.last_activity,
-                'days_since_last_activity', floor(extract(epoch FROM now() - s.last_activity) / 86400),
+                'days_since_last_activity', floor(extract(epoch FROM (SELECT COALESCE(max(cu.collected_at), now()) FROM entra_user cu WHERE cu.client_id = %(client_id)s) - s.last_activity) / 86400),
                 'last_successful_sign_in_at', s.last_successful_sign_in_at,
                 'last_sign_in_at', s.last_sign_in_at,
                 'last_non_interactive_sign_in_at', s.last_non_interactive_sign_in_at,

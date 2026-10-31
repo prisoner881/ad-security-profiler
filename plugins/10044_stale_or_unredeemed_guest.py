@@ -29,14 +29,18 @@ reported.
 
 Severity: low (warn), one row per guest (identity = Entra object id).
 Summaries state the threshold, not the age.
+
+[v1.1] Ages are measured from the time of the Entra collection being evaluated
+(entra_user.collected_at), not from when adaudit.py runs, so evaluating the same data later gives
+the same result.
 """
 
 PLUGIN = {
     "plugin_id": 10044,
     "category": "Hybrid Identity",
     "name": "Stale or Never-Redeemed Guest Account",
-    "version": "1.0",
-    "revision_date": "2026-10-05",
+    "version": "1.1",
+    "revision_date": "2026-10-30",
     "control_id": "HYBRID-10044",
     "framework_tags": [
         "NIST-800-53-AC-2(3)",
@@ -97,13 +101,13 @@ PLUGIN = {
         flagged AS (
             SELECT g.*,
                    CASE WHEN g.external_user_state = 'PendingAcceptance'
-                             AND g.state_since < now() - interval '30 days'
+                             AND g.state_since < (SELECT COALESCE(max(cu.collected_at), now()) FROM entra_user cu WHERE cu.client_id = %(client_id)s) - interval '30 days'
                         THEN 'pending'
                         WHEN g.external_user_state = 'Accepted'
                              AND g.sign_in_ok
-                             AND (g.last_activity < now() - interval '90 days'
+                             AND (g.last_activity < (SELECT COALESCE(max(cu.collected_at), now()) FROM entra_user cu WHERE cu.client_id = %(client_id)s) - interval '90 days'
                                   OR (g.last_activity IS NULL
-                                      AND g.state_since < now() - interval '90 days'))
+                                      AND g.state_since < (SELECT COALESCE(max(cu.collected_at), now()) FROM entra_user cu WHERE cu.client_id = %(client_id)s) - interval '90 days'))
                         THEN 'stale'
                    END AS kind
               FROM guests g
@@ -131,7 +135,7 @@ PLUGIN = {
                 'external_user_state_changed_at', f.external_user_state_changed_at,
                 'created_at', f.created_at,
                 'last_activity_at', f.last_activity,
-                'days_since_last_activity', floor(extract(epoch FROM now() - f.last_activity) / 86400),
+                'days_since_last_activity', floor(extract(epoch FROM (SELECT COALESCE(max(cu.collected_at), now()) FROM entra_user cu WHERE cu.client_id = %(client_id)s) - f.last_activity) / 86400),
                 'sign_in_activity_checked', f.sign_in_ok,
                 'threshold_days', CASE WHEN f.kind = 'pending' THEN 30 ELSE 90 END
             ) AS detail

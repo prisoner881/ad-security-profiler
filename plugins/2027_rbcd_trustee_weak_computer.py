@@ -31,13 +31,18 @@ longer matches Windows 10 Enterprise LTSC and now includes Windows
 [v1.6] Windows Server 2008 is matched as "server ... 2008", so the
 "Windows Server® 2008 ..." spelling (with the registered sign, as 2008 RTM
 hosts report it) counts as unsupported; it was missed.
+
+[v1.7] "Dormant" (no logon for 90 days) is measured from the time of the
+collection being evaluated, not from when adaudit.py runs: re-evaluating the
+same collection later could add "dormant" to the summary and record a
+change that did not happen in the directory.
 """
 
 PLUGIN = {
     "plugin_id": 2027,
     "category": "Computer Accounts",
     "name": "RBCD Trustee Computer Is Itself Unsupported or Dormant",
-    "version": "1.6",
+    "version": "1.7",
     "revision_date": "2026-10-30",
     "remediation": (
         "Prioritize over an ordinary RBCD finding (plugin 2022) -- this "
@@ -149,7 +154,7 @@ PLUGIN = {
                               OR trustee.operating_system ILIKE '%%windows xp%%' OR trustee.operating_system ILIKE '%%windows vista%%'
                               OR trustee.operating_system ILIKE '%%windows 2000%%' OR trustee.operating_system ILIKE '%%windows nt%%'
                               THEN 'running an unsupported OS (' || trustee.operating_system || ')' END),
-                        (CASE WHEN trustee.last_logon_timestamp IS NULL OR trustee.last_logon_timestamp < now() - interval '90 days'
+                        (CASE WHEN trustee.last_logon_timestamp IS NULL OR trustee.last_logon_timestamp < (SELECT COALESCE(max(sr.completed_at), now()) FROM sync_run sr WHERE sr.run_id = %(run_id)s) - interval '90 days'
                               THEN 'dormant' END)
                     ) AS v(x) WHERE x IS NOT NULL)
                 || (CASE WHEN trustee.is_enabled IS FALSE THEN ' (account disabled)' ELSE '' END) AS summary,
@@ -173,7 +178,7 @@ PLUGIN = {
                 OR trustee.operating_system ILIKE '%%windows 7%%' OR trustee.operating_system ILIKE '%%windows 8%%'
                 OR trustee.operating_system ILIKE '%%windows xp%%' OR trustee.operating_system ILIKE '%%windows vista%%'
                 OR trustee.operating_system ILIKE '%%windows 2000%%' OR trustee.operating_system ILIKE '%%windows nt%%'
-                OR trustee.last_logon_timestamp IS NULL OR trustee.last_logon_timestamp < now() - interval '90 days'
+                OR trustee.last_logon_timestamp IS NULL OR trustee.last_logon_timestamp < (SELECT COALESCE(max(sr.completed_at), now()) FROM sync_run sr WHERE sr.run_id = %(run_id)s) - interval '90 days'
               )
     """,
 }

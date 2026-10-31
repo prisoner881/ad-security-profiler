@@ -32,13 +32,20 @@ sensitive in the previous collection (entra_change_history entity_type
 'sensitive_group', entra_graph_collector.py 1.0.3): owners are read only for
 sensitive groups, so when a group became sensitive its existing owners were
 reported as added.
+
+[v1.2] "Created after the previous owner snapshot" now uses the time of the
+previous Entra collection (entra_change_baseline.previous_run_at, schema v49,
+entra_graph_collector.py 1.0.4). It used the last time any owner changed,
+which can be long before the previous collection, so a new owner of an
+application created weeks earlier could be graded medium as the initial
+owner of a new application.
 """
 
 PLUGIN = {
     "plugin_id": 11027,
     "category": "Change Detection",
     "name": "New Owner on an Application, Service Principal or Sensitive Group",
-    "version": "1.1",
+    "version": "1.2",
     "revision_date": "2026-10-30",
     "control_id": "CHANGE-11027",
     "requires_sources": ["app_owners", "groups"],
@@ -81,11 +88,14 @@ PLUGIN = {
     "query": """
         WITH b AS (
             SELECT bl.client_id, bl.last_run_at,
-                   (SELECT max(GREATEST(h.valid_from, COALESCE(h.valid_to, h.valid_from)))
-                    FROM entra_change_history h
-                    WHERE h.client_id = bl.client_id AND h.entity_type = 'owner'
-                      AND h.valid_from < bl.last_run_at
-                      AND COALESCE(h.valid_to, h.valid_from) < bl.last_run_at) AS prev_seen_at
+                   -- [v1.2] the previous collection (schema v49); until the
+                   -- collector has recorded it, the latest earlier owner change
+                   COALESCE(bl.previous_run_at,
+                            (SELECT max(GREATEST(h.valid_from, COALESCE(h.valid_to, h.valid_from)))
+                             FROM entra_change_history h
+                             WHERE h.client_id = bl.client_id AND h.entity_type = 'owner'
+                               AND h.valid_from < bl.last_run_at
+                               AND COALESCE(h.valid_to, h.valid_from) < bl.last_run_at)) AS prev_seen_at
             FROM entra_change_baseline bl
             WHERE bl.client_id = %(client_id)s AND bl.entity_type = 'owner'
               AND bl.first_run_at < bl.last_run_at
