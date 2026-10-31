@@ -4,7 +4,7 @@
  adprofiler.py -- Active Directory Security & Compliance Profiler (Collector)
 ================================================================================
 
-VERSION: 1.0.5
+VERSION: 1.0.6
 
 PURPOSE:
     Connects to an on-premise Active Directory Domain Controller via LDAP,
@@ -179,7 +179,7 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
-VERSION = "1.0.5"
+VERSION = "1.0.6"
 
 # [v0.7.7] The oldest collector version whose stored derived fields
 # (parsed / typed columns computed from raw attributes) are current. A
@@ -1621,19 +1621,30 @@ def connect_ldap(host, port, use_ssl, username, password, ca_cert=None):
     return conn
 
 
+def _rootdse_value(other, name):
+    """[v1.0.6] First value of a RootDSE attribute. ldap3 gives a list, or
+    -- once the server schema is loaded and marks the attribute
+    single-valued, as AD's schema does for dnsHostName -- a plain string,
+    whose [0] is its first character (the DC was logged as "D")."""
+    value = other.get(name)
+    if isinstance(value, (list, tuple)):
+        return value[0] if value else None
+    return value
+
+
 def get_rootdse_info(conn, base_dn_override=None):
     info = conn.server.info
     if info is None:
         raise RuntimeError("Could not read RootDSE from the target server.")
 
     other = info.other or {}
-    default_nc = (other.get("defaultNamingContext") or [None])[0]
-    config_nc = (other.get("configurationNamingContext") or [None])[0]
-    highest_usn = (other.get("highestCommittedUSN") or [None])[0]
-    domain_functionality_raw = (other.get("domainFunctionality") or [None])[0]
+    default_nc = _rootdse_value(other, "defaultNamingContext")
+    config_nc = _rootdse_value(other, "configurationNamingContext")
+    highest_usn = _rootdse_value(other, "highestCommittedUSN")
+    domain_functionality_raw = _rootdse_value(other, "domainFunctionality")
     # [v0.6.0] Forest root domain DN -- for ForestDnsZones and the forest
     # root's backups. Differs from defaultNamingContext in a child domain.
-    forest_root_dn = (other.get("rootDomainNamingContext") or [None])[0]
+    forest_root_dn = _rootdse_value(other, "rootDomainNamingContext")
 
     base_dn = base_dn_override or default_nc
     if not base_dn:
@@ -1673,8 +1684,8 @@ def read_dc_identity(conn):
     object, which holds invocationId. invocation_id is None when it can't
     be read; the deletion check then scans every deleted object."""
     other = (conn.server.info.other if conn.server.info else None) or {}
-    dns_hostname = (other.get("dnsHostName") or [None])[0]
-    service_dn = (other.get("dsServiceName") or [None])[0]
+    dns_hostname = _rootdse_value(other, "dnsHostName")
+    service_dn = _rootdse_value(other, "dsServiceName")
     invocation_id = None
     if service_dn:
         try:
