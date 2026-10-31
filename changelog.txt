@@ -9,6 +9,19 @@ the script's own docstring now keeps a one-line summary per entry, this
 file keeps the complete detail (root causes, what was verified, why a
 decision was made a particular way) for anyone who wants it.
 
+    1.0.6 - RootDSE values go through _rootdse_value(), which takes a list's
+            first item or a plain string as is. With the server schema loaded
+            (get_info=ALL), ldap3 formats attributes the schema marks
+            single-valued as strings; AD's schema marks dnsHostName so, and
+            (value or [None])[0] gave its first character: "Domain controller
+            D" in the log and "D" in sync_run.dc_dns_hostname. The other
+            RootDSE values read this way (defaultNamingContext,
+            configurationNamingContext, highestCommittedUSN,
+            domainFunctionality, rootDomainNamingContext, dsServiceName) are
+            not in the AD schema and arrived as lists; they now go through the
+            same helper. invocationId, which the watermark check compares, was
+            read correctly. Schema v49, unchanged.
+
     1.0.5 - Schema v49. Low-severity fixes from the code review:
             - The partition functions run with TimeZone = UTC: a monthly
               partition's bounds came from a DATE cast to timestamptz in the

@@ -10,7 +10,7 @@ v48, v49); no plugin added or removed.
 
 | Component | Version |
 |---|---|
-| `adprofiler.py` (Active Directory collector) | 1.0.5 |
+| `adprofiler.py` (Active Directory collector) | 1.0.6 |
 | `sysvol_collector.py` (used by `adprofiler.py --sysvol`) | 1.2 |
 | `entra_graph_collector.py` (Entra ID collector) | 1.0.4 |
 | `adaudit.py` (plugin runner and report writer) | 1.0.5 |
@@ -19,6 +19,13 @@ v48, v49); no plugin added or removed.
 | PostgreSQL schema (`schema_init.sql`) | v49 |
 
 ### Changes
+
+adprofiler.py 1.0.6 (2026-10-31): the domain controller's host name is read
+correctly. ldap3 returns dnsHostName as a plain string once the AD schema is
+loaded, and its first character was taken, so the log said "Domain
+controller D" and sync_run.dc_dns_hostname held "D". The deleted-object
+watermark, which compares the DC's invocationId, was not affected. No
+schema change.
 
 Code review fixes, low severity (2026-10-30, adprofiler.py 1.0.5,
 entra_graph_collector.py 1.0.4, adaudit.py 1.0.5, run_lock.py 1.1, schema
