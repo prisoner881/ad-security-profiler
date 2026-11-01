@@ -25,8 +25,9 @@ Suppressed on the first collection; findings stay open until the next
 Entra collection.
 
 Severity high when a weak method was enabled or consent / access opened:
-  * auth methods: Sms, Voice or Email changed to state 'enabled', or
-    policyMigrationState changed away from 'migrationComplete';
+  * auth methods: Sms, Voice or Email changed to state 'enabled',
+    policyMigrationState changed away from 'migrationComplete', or [v1.2]
+    an external authentication method added enabled or changed to enabled;
   * authorization policy: a ManagePermissionGrantsForSelf.* policy added to
     permissionGrantPoliciesAssigned (user consent opened), allowedToCreateApps
     turned on, allowInvitesFrom changed to 'everyone', or guestUserRoleId
@@ -45,14 +46,23 @@ methods v1.0 does not, and without this every tenant would get a medium
 'changed' finding on the first run after the upgrade. A policy whose only
 differences are such new keys gives no row. New high-severity loosenings:
 allowedToUseSSPR or allowUserConsentForRiskyApps changed from false to true.
+
+[v1.2] An external authentication method (a third-party MFA provider; its
+method id is a GUID, where built-in methods have names) that was added
+enabled, or changed to enabled, is a high-severity loosening. Before, a
+method id the previous version did not contain was treated as newly
+collected (v1.1) and not reported at all, so adding a provider went
+unnoticed -- the step the TrustSink technique (Varonis, September 2026)
+depends on: a rogue provider collects the password of every covered user
+at sign-in. Plugins 10049 and 10122 describe the current providers.
 """
 
 PLUGIN = {
     "plugin_id": 11026,
     "category": "Change Detection",
     "name": "Tenant Authorization, Authentication-Methods or Cross-Tenant Policy Changed",
-    "version": "1.1",
-    "revision_date": "2026-10-22",
+    "version": "1.2",
+    "revision_date": "2026-11-01",
     "control_id": "CHANGE-11026",
     "requires_sources": ["auth_methods_policy", "cross_tenant_policy", "admin_consent_request_policy"],
     "framework_tags": [
@@ -79,7 +89,8 @@ PLUGIN = {
         "Reports changes to the authorization policy, authentication methods policy, "
         "cross-tenant access default policy and admin consent request policy since the "
         "previous Entra collection. High when SMS, voice or email OTP was enabled, the "
-        "authentication-methods migration was rolled back, user consent was opened, users "
+        "authentication-methods migration was rolled back, an external MFA provider was added "
+        "or enabled, user consent was opened, users "
         "were allowed to register apps, anyone may invite guests, or guests got member-level "
         "access; medium for other changes. Suppressed on the first Entra collection."
     ),
@@ -90,7 +101,9 @@ PLUGIN = {
         "disable SMS/Voice/Email OTP (SCuBA MS.AAD.3.5), set the migration to Migration "
         "Complete (MS.AAD.3.4), restrict user consent and app registration to administrators "
         "(MS.AAD.5.1 / 5.2), keep guest access restricted (MS.AAD.8.1) and guest invitation to "
-        "Guest Inviters (MS.AAD.8.2)."
+        "Guest Inviters (MS.AAD.8.2). An external MFA provider nobody expected means the "
+        "tenant is compromised: remove the method and its application first, then reset the "
+        "passwords of the users it covered (plugin 10122)."
     ),
     "base_severity": "medium",
     "query": """
@@ -152,6 +165,20 @@ PLUGIN = {
                                  AND (c.new_c->>'policyMigrationState') IS DISTINCT FROM 'migrationComplete'
                             THEN 'policyMigrationState rolled back to '
                                  || COALESCE(c.new_c->>'policyMigrationState', 'unset') END,
+                       -- [v1.2] an external authentication method (GUID id) added
+                       -- enabled or switched to enabled: a new MFA provider (TrustSink)
+                       CASE WHEN c.entity_key = 'auth_methods_policy' THEN
+                           (SELECT string_agg('external authentication method ' || m.key
+                                              || CASE WHEN jsonb_typeof(c.old_c) = 'object' AND c.old_c ? m.key
+                                                      THEN ' enabled' ELSE ' added' END,
+                                              ', ' ORDER BY m.key)
+                            FROM jsonb_each(CASE WHEN jsonb_typeof(c.new_c) = 'object'
+                                                 THEN c.new_c ELSE '{}'::jsonb END) m
+                            WHERE m.key ~* '^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$'
+                              AND jsonb_typeof(m.value) = 'object'
+                              AND lower(COALESCE(m.value->>'state', '')) = 'enabled'
+                              AND lower(COALESCE(c.old_c #>> ARRAY[m.key, 'state'], '')) <> 'enabled')
+                       END,
                        -- Authorization policy
                        CASE WHEN c.entity_key = 'authorization_policy'
                                  AND EXISTS (

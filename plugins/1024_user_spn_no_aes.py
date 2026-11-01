@@ -38,14 +38,30 @@ account leaves a protected group (plugin 1025 reports such stale
 markers), so it escalated former admins to 'high'; admin_count is now
 reported in detail instead. Dropped the gMSA remediation note: gMSAs are
 collected as computer objects and are outside this user-scoped check.
+
+[v1.7] CVE-2026-20833 (January 2026): from the April 2026 update domain
+controllers issue AES-only service tickets for an account whose
+msDS-SupportedEncryptionTypes is not set (or 0), and the July 2026 update
+removed the rollback. Such accounts are therefore no longer reported --
+they were the bulk of this plugin's findings and no longer get RC4 --
+unless the domain controllers' Group Policy sets the KDC's
+DefaultDomainSupportedEncTypes with RC4 (plugin 9043), which brings RC4
+back for all of them (then medium, high when privileged, as before). An
+account whose msDS-SupportedEncryptionTypes is explicitly set without
+AES is what remains exposed -- Microsoft: explicit RC4 keeps the service
+exposed to CVE-2026-20833 -- and is now high whether or not privileged.
+Without SYSVOL read by the evaluated run the Group Policy check is
+skipped (sysvol_optional: the plugin still runs) and unset accounts are not
+reported. An account without an AES key at all is reported by plugin 1045.
+detail adds attribute_set and kdc_default_rc4_gpos.
 """
 
 PLUGIN = {
     "plugin_id": 1024,
     "category": "User Accounts",
     "name": "SPN-Bearing User Account Does Not Support AES Kerberos Encryption",
-    "version": "1.6",
-    "revision_date": "2026-10-04",
+    "version": "1.7",
+    "revision_date": "2026-11-01",
     "remediation": (
         "Enable AES128 and/or AES256 support on this account (Account "
         "tab in ADUC: \"This account supports Kerberos AES 128/256 bit "
@@ -78,12 +94,15 @@ PLUGIN = {
         "HIPAA-164.312(e)(1)",
         "DISA-STIG",
         "MITRE-ATTCK-T1558.003",
+        "CVE-2026-20833",
     ],
     "references": [
         {"title": "Microsoft: Network security -- Configure encryption types allowed for Kerberos",
          "url": "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/network-security-configure-encryption-types-allowed-for-kerberos"},
         {"title": "Microsoft [MS-KILE]: msDS-SupportedEncryptionTypes bit flags",
          "url": "https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-kile/6cfc7b50-11ed-4b4d-846d-6f08f0812919"},
+        {"title": "Microsoft: How to manage Kerberos KDC usage of RC4 for service account ticket issuance changes related to CVE-2026-20833",
+         "url": "https://support.microsoft.com/en-us/topic/how-to-manage-kerberos-kdc-usage-of-rc4-for-service-account-ticket-issuance-changes-related-to-cve-2026-20833-1ebcda33-720a-4da8-93c1-b0496e1910dc"},
         {"title": "PingCastle: Old authentication protocols rules -- S-AesNotEnabled",
          "url": "https://pingcastle.com/PingCastleFiles/ad_hc_rules_list.html"},
     ],
@@ -100,10 +119,16 @@ PLUGIN = {
         "msDS-SupportedEncryptionTypes for the target of a TGS-REQ, so "
         "a regular user account without an SPN is never the target of "
         "that operation and its encryption-type setting has no effect "
-        "on Kerberos behavior at all."
+        "on Kerberos behavior at all. Since the CVE-2026-20833 enforcement "
+        "(April 2026; rollback removed July 2026) the KDC uses AES for "
+        "accounts where the attribute is not set, so only accounts set "
+        "explicitly without AES are reported (high), plus unset accounts "
+        "when Group Policy puts RC4 back into the KDC default (medium, high "
+        "when privileged)."
     ),
     "base_severity": "medium",
-    "query": """
+    "sysvol_optional": True,
+    "query": r"""
         WITH privileged_check AS (
             -- [v1.4] "Privileged" is the shared Tier 0 definition in
             -- v_privileged_principal (schema v34): membership, direct or
@@ -119,6 +144,32 @@ PLUGIN = {
             FROM v_privileged_principal
             WHERE client_id = %(client_id)s
             GROUP BY object_guid
+        ),
+        -- [v1.7] Since the CVE-2026-20833 enforcement (April 2026, rollback
+        -- removed July 2026) the KDC issues AES-only service tickets for an
+        -- account without msDS-SupportedEncryptionTypes -- unless Group
+        -- Policy sets DefaultDomainSupportedEncTypes with RC4 on the DCs
+        -- (plugin 9043). Read only when the evaluated run read SYSVOL.
+        sysvol AS (
+            SELECT EXISTS (SELECT 1 FROM sysvol_collection_status s
+                           WHERE s.client_id = %(client_id)s AND s.run_id = %(run_id)s
+                             AND (s.status = 'ok' OR (s.status = 'partial' AND s.gpos_read > 0)))
+                   AS collected
+        ),
+        kdc_rc4 AS (
+            SELECT string_agg(DISTINCT COALESCE(g.display_name, e.winning_gpo_guid::text), ', ') AS gpos
+            FROM v_dc_effective_gpo_setting e
+            CROSS JOIN sysvol sv
+            LEFT JOIN ad_gpo g
+              ON g.client_id = e.client_id AND g.object_guid = e.winning_gpo_guid AND g.valid_to IS NULL
+            WHERE sv.collected
+              AND e.client_id = %(client_id)s AND e.source = 'registry' AND e.section = 'HKLM'
+              AND lower(e.setting_key) = lower('System\CurrentControlSet\Services\KDC\DefaultDomainSupportedEncTypes')
+              AND e.value_type IS DISTINCT FROM 'DELETE'
+              AND (CASE WHEN e.setting_value ~ '^\s*[0-9]{1,10}\s*$' THEN trim(e.setting_value)::bigint
+                        WHEN e.setting_value ~* '^\s*0x[0-9a-f]{1,8}\s*$'
+                             THEN ('x' || lpad(substr(trim(e.setting_value), 3), 8, '0'))::bit(32)::bigint
+                   END & 4) <> 0
         )
         SELECT
             'warn' AS status,
@@ -127,20 +178,33 @@ PLUGIN = {
             NULL AS stig_reference,
             NULL AS tool_severity,
             NULL AS tool_reference,
-            CASE WHEN pc.object_guid IS NOT NULL THEN 'high' ELSE 'medium' END AS fd_severity,
+            CASE WHEN COALESCE(u.supported_encryption_types, 0) <> 0 OR pc.object_guid IS NOT NULL
+                 THEN 'high' ELSE 'medium' END AS fd_severity,
             (CASE WHEN pc.object_guid IS NOT NULL THEN 'Privileged ' ELSE '' END)
                 || 'User Account ' || COALESCE(u.user_principal_name, u.sam_account_name)
-                || ' has an SPN but does not support AES Kerberos encryption' AS summary,
+                || ' has an SPN but does not support AES Kerberos encryption'
+                || CASE WHEN COALESCE(u.supported_encryption_types, 0) <> 0
+                        THEN ': msDS-SupportedEncryptionTypes is explicitly ' || u.supported_encryption_types
+                             || ' (no AES), so its service tickets use '
+                             || CASE WHEN (u.supported_encryption_types & 4) = 0
+                                          AND (u.supported_encryption_types & 3) <> 0 THEN 'DES' ELSE 'RC4' END
+                             || ' despite the CVE-2026-20833 hardening'
+                        ELSE ': msDS-SupportedEncryptionTypes is not set and Group Policy puts RC4 back into '
+                             || 'the KDC default (DefaultDomainSupportedEncTypes, GPO ' || k.gpos
+                             || '), so its service tickets use RC4' END AS summary,
             jsonb_build_object(
                 'sam_account_name', u.sam_account_name,
                 'user_principal_name', u.user_principal_name,
                 'supported_encryption_types', u.supported_encryption_types,
+                'attribute_set', COALESCE(u.supported_encryption_types, 0) <> 0,
+                'kdc_default_rc4_gpos', k.gpos,
                 'service_principal_names', u.service_principal_names,
                 'pwd_last_set', u.pwd_last_set,
                 'admin_count', u.admin_count,
                 'privilege_sources', pc.privilege_sources
             ) AS detail
         FROM ad_user u
+        CROSS JOIN kdc_rc4 k
         LEFT JOIN privileged_check pc ON pc.object_guid = u.object_guid
         WHERE u.valid_to IS NULL
           AND u.client_id = %(client_id)s
@@ -148,5 +212,8 @@ PLUGIN = {
           AND u.service_principal_names IS NOT NULL
           AND array_length(u.service_principal_names, 1) > 0
           AND (COALESCE(u.supported_encryption_types, 0) & 24) = 0
+          -- [v1.7] unset (or 0) uses AES since the RC4 enforcement, unless
+          -- Group Policy re-enables RC4 in the KDC default
+          AND (COALESCE(u.supported_encryption_types, 0) <> 0 OR k.gpos IS NOT NULL)
     """,
 }
