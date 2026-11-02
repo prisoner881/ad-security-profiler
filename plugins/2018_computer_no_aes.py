@@ -28,14 +28,28 @@ still issues RC4 tickets for such accounts), but the summary and detail
 now say so explicitly (attribute_set = false) instead of presenting it
 as an explicit RC4-only configuration -- typical for Linux/Samba hosts,
 NAS appliances and cluster objects that never write the attribute.
+
+[v1.4] The v1.3 note above is out of date: from the April 2026 update
+(CVE-2026-20833; the July 2026 update removed the rollback) domain
+controllers treat an account whose msDS-SupportedEncryptionTypes is not
+set (or 0) as AES only (DefaultDomainSupportedEncTypes 0x18). Such
+accounts are therefore no longer reported, unless the domain controllers'
+Group Policy sets DefaultDomainSupportedEncTypes with RC4 (plugin 9043),
+which brings RC4 back for all of them (then as before: medium for a DC,
+low otherwise). Accounts explicitly set without AES are reported as
+before. Without SYSVOL read by the evaluated run the Group Policy check is
+skipped (sysvol_optional: the plugin still runs) and unset accounts are not
+reported. A device whose keytab has no AES key now fails Kerberos instead
+of falling back to RC4; it shows in the DC's System log (KDCSVC events
+201-209), not in the directory. detail adds kdc_default_rc4_gpos.
 """
 
 PLUGIN = {
     "plugin_id": 2018,
     "category": "Computer Accounts",
     "name": "Computer Account Does Not Support AES Kerberos Encryption",
-    "version": "1.3",
-    "revision_date": "2026-10-04",
+    "version": "1.4",
+    "revision_date": "2026-11-01",
     "remediation": (
         "Set msDS-SupportedEncryptionTypes to include AES128/AES256 "
         "(bits 0x8/0x10) -- typically automatic for modern, "
@@ -45,8 +59,10 @@ PLUGIN = {
         "`Set-ADComputer -KerberosEncryptionType AES128,AES256` if not "
         "already resolved by the OS itself on next password rotation. "
         "Where the attribute is not set at all (non-Windows joins, NAS "
-        "appliances), set it explicitly once the device's keytab has AES "
-        "keys, or the KDC default (DefaultDomainSupportedEncTypes) applies."
+        "appliances), the KDC default applies: AES only since the "
+        "CVE-2026-20833 enforcement, unless Group Policy sets "
+        "DefaultDomainSupportedEncTypes with RC4 (plugin 9043) -- remove "
+        "that setting once the devices' keytabs have AES keys."
     ),
     "control_id": "KERB-202",
     "framework_tags": [
@@ -58,10 +74,13 @@ PLUGIN = {
         "SOC2-CC6.1",
         "HIPAA-164.312(e)(1)",
         "MITRE-ATTCK-T1558",
+        "CVE-2026-20833",
     ],
     "references": [
         {"title": "Microsoft: Network security -- Configure encryption types allowed for Kerberos",
          "url": "https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/network-security-configure-encryption-types-allowed-for-kerberos"},
+        {"title": "Microsoft: How to manage Kerberos KDC usage of RC4 for service account ticket issuance changes related to CVE-2026-20833",
+         "url": "https://support.microsoft.com/en-us/topic/how-to-manage-kerberos-kdc-usage-of-rc4-for-service-account-ticket-issuance-changes-related-to-cve-2026-20833-1ebcda33-720a-4da8-93c1-b0496e1910dc"},
     ],
     "description": (
         "msDS-SupportedEncryptionTypes bits 0x8/0x10, same citation "
@@ -74,10 +93,41 @@ PLUGIN = {
         "for environments working toward eliminating RC4 ahead of "
         "Microsoft's own deprecation timeline, not an immediate "
         "crackable-credential concern the way the user-account version "
-        "of this check is."
+        "of this check is. Since the CVE-2026-20833 enforcement (April "
+        "2026) the KDC uses AES for accounts where the attribute is not "
+        "set, so those are reported only when Group Policy puts RC4 back "
+        "into the KDC default."
     ),
     "base_severity": "low",
-    "query": """
+    "sysvol_optional": True,
+    "query": r"""
+        WITH
+        -- [v1.4] Since the CVE-2026-20833 enforcement (April 2026, rollback
+        -- removed July 2026) the KDC issues AES-only service tickets for an
+        -- account without msDS-SupportedEncryptionTypes -- unless Group
+        -- Policy sets DefaultDomainSupportedEncTypes with RC4 on the DCs
+        -- (plugin 9043). Read only when the evaluated run read SYSVOL.
+        sysvol AS (
+            SELECT EXISTS (SELECT 1 FROM sysvol_collection_status s
+                           WHERE s.client_id = %(client_id)s AND s.run_id = %(run_id)s
+                             AND (s.status = 'ok' OR (s.status = 'partial' AND s.gpos_read > 0)))
+                   AS collected
+        ),
+        kdc_rc4 AS (
+            SELECT string_agg(DISTINCT COALESCE(g.display_name, e.winning_gpo_guid::text), ', ') AS gpos
+            FROM v_dc_effective_gpo_setting e
+            CROSS JOIN sysvol sv
+            LEFT JOIN ad_gpo g
+              ON g.client_id = e.client_id AND g.object_guid = e.winning_gpo_guid AND g.valid_to IS NULL
+            WHERE sv.collected
+              AND e.client_id = %(client_id)s AND e.source = 'registry' AND e.section = 'HKLM'
+              AND lower(e.setting_key) = lower('System\CurrentControlSet\Services\KDC\DefaultDomainSupportedEncTypes')
+              AND e.value_type IS DISTINCT FROM 'DELETE'
+              AND (CASE WHEN e.setting_value ~ '^\s*[0-9]{1,10}\s*$' THEN trim(e.setting_value)::bigint
+                        WHEN e.setting_value ~* '^\s*0x[0-9a-f]{1,8}\s*$'
+                             THEN ('x' || lpad(substr(trim(e.setting_value), 3), 8, '0'))::bit(32)::bigint
+                   END & 4) <> 0
+        )
         SELECT
             'warn' AS status,
             c.object_guid,
@@ -92,19 +142,22 @@ PLUGIN = {
                   ELSE 'Computer Account ' END)
                 || COALESCE(c.sam_account_name, c.object_guid::text)
                 || ' does not support AES Kerberos encryption'
-                || CASE WHEN c.supported_encryption_types IS NULL
-                        THEN ' (msDS-SupportedEncryptionTypes not set; KDC default applies)'
+                || CASE WHEN COALESCE(c.supported_encryption_types, 0) = 0
+                        THEN ' (msDS-SupportedEncryptionTypes not set, and Group Policy puts RC4 back into the '
+                             || 'KDC default: DefaultDomainSupportedEncTypes, GPO ' || k.gpos || ')'
                         ELSE '' END AS summary,
             jsonb_build_object(
                 'sam_account_name', c.sam_account_name,
                 'supported_encryption_types', c.supported_encryption_types,
-                'attribute_set', c.supported_encryption_types IS NOT NULL,
+                'attribute_set', COALESCE(c.supported_encryption_types, 0) <> 0,
+                'kdc_default_rc4_gpos', k.gpos,
                 'is_domain_controller', c.is_domain_controller,
                 'is_read_only_dc', c.is_read_only_dc,
                 'is_gmsa', gm.is_gmsa,
                 'operating_system', c.operating_system
             ) AS detail
         FROM ad_computer c
+        CROSS JOIN kdc_rc4 k
         LEFT JOIN LATERAL (
             SELECT bool_or(dov.attributes_full->>'msDS-GroupMSAMembership' IS NOT NULL) IS TRUE AS is_gmsa
             FROM directory_object_version dov
@@ -116,5 +169,8 @@ PLUGIN = {
           AND c.client_id = %(client_id)s
           AND c.is_enabled
           AND (COALESCE(c.supported_encryption_types, 0) & 24) = 0
+          -- [v1.4] unset (or 0) uses AES since the RC4 enforcement, unless
+          -- Group Policy re-enables RC4 in the KDC default
+          AND (COALESCE(c.supported_encryption_types, 0) <> 0 OR k.gpos IS NOT NULL)
     """,
 }

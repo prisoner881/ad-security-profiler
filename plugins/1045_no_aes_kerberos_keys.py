@@ -12,10 +12,15 @@ any -- no matter what msDS-SupportedEncryptionTypes says. Such accounts:
     use the NT hash as key (overpass-the-hash);
   * break when RC4 is removed. The November 2022 Kerberos hardening for
     CVE-2022-37966 (KB5021131) made AES the default session-key type for
-    accounts without msDS-SupportedEncryptionTypes, and Microsoft's
-    deprecation of RC4 in Windows Kerberos (domain controllers defaulting
-    to AES-only during 2026) means RC4-only accounts stop authenticating
-    unless RC4 is re-enabled for them.
+    accounts without msDS-SupportedEncryptionTypes, and the CVE-2026-20833
+    hardening went further: from the April 2026 update domain controllers
+    issue service tickets for such accounts with AES only
+    (DefaultDomainSupportedEncTypes 0x18), and the July 2026 update removed
+    the rollback. A service account (one with an SPN) that has no AES key
+    and no msDS-SupportedEncryptionTypes can no longer be issued service
+    tickets at all; one whose msDS-SupportedEncryptionTypes explicitly
+    allows RC4 keeps working, but only with RC4 (exposed to
+    CVE-2026-20833).
 
 Detection uses PingCastle's proxy for "when the domain started generating
 AES keys" (rule S-AesNotEnabled): the whenCreated of the domain's
@@ -49,25 +54,36 @@ Excluded / skipped:
 Severity: medium; high if the account has an SPN (service tickets for it
 are RC4 and roastable; krbtgt carries kadmin/changepw) or is a current
 Tier 0 principal (v_privileged_principal).
+
+[v1.1] Brought up to date with the CVE-2026-20833 enforcement (April 2026,
+rollback removed July 2026): for an account with an SPN the summary now
+says which way it is affected -- msDS-SupportedEncryptionTypes explicitly
+allows RC4 (0x4): it still gets service tickets, RC4 only; otherwise
+service tickets for it fail since the enforcement unless RC4 is re-enabled
+for it (an outage, not only a weakness). detail adds
+service_ticket_state ('rc4_explicitly_allowed', 'fails_since_rc4_enforcement'
+or NULL for accounts without an SPN). Filter and severity are unchanged.
 """
 
 PLUGIN = {
     "plugin_id": 1045,
     "category": "User Accounts",
     "name": "Account Has No AES Kerberos Keys (Password Predates AES Key Generation)",
-    "version": "1.0",
-    "revision_date": "2026-10-04",
+    "version": "1.1",
+    "revision_date": "2026-11-01",
     "control_id": "KERB-1045",
     "framework_tags": [
         "NIST-800-53-SC-13", "NIST-CSF-2.0-PR.DS-02", "PCI-DSS-4.0-12.3.3",
         "CIS-CSC-8-3.10", "ISO-27001-2022-A.8.24", "SOC2-CC6.1",
-        "CVE-2022-37966", "MITRE-ATTCK-T1558.003",
+        "CVE-2022-37966", "CVE-2026-20833", "MITRE-ATTCK-T1558.003",
     ],
     "references": [
         {"title": "KB5021131: How to manage the Kerberos protocol changes related to CVE-2022-37966",
          "url": "https://support.microsoft.com/en-us/topic/kb5021131-how-to-manage-the-kerberos-protocol-changes-related-to-cve-2022-37966-fd837ac3-cdec-4e76-a6ec-86e67501407d"},
         {"title": "MSRC: CVE-2022-37966 Windows Kerberos RC4-HMAC Elevation of Privilege Vulnerability",
          "url": "https://msrc.microsoft.com/update-guide/vulnerability/CVE-2022-37966"},
+        {"title": "Microsoft: How to manage Kerberos KDC usage of RC4 for service account ticket issuance changes related to CVE-2026-20833",
+         "url": "https://support.microsoft.com/en-us/topic/how-to-manage-kerberos-kdc-usage-of-rc4-for-service-account-ticket-issuance-changes-related-to-cve-2026-20833-1ebcda33-720a-4da8-93c1-b0496e1910dc"},
         {"title": "NVD: CVE-2022-37966",
          "url": "https://nvd.nist.gov/vuln/detail/CVE-2022-37966"},
         {"title": "Microsoft: Network security - Configure encryption types allowed for Kerberos",
@@ -83,9 +99,12 @@ PLUGIN = {
         "the creation of the Read-only Domain Controllers group, or the "
         "domain never reached the 2008 functional level). The account has "
         "only an RC4 (NT hash) key: its tickets are RC4 and cheap to crack "
-        "offline, and it will fail to authenticate once RC4 is disabled, as "
-        "Microsoft's RC4 deprecation and the CVE-2022-37966 (KB5021131) "
-        "hardening move domain controllers to AES-only."
+        "offline, and it fails to authenticate once RC4 is disabled. Since the "
+        "CVE-2026-20833 enforcement (April 2026; rollback removed July 2026) "
+        "domain controllers issue AES-only service tickets for accounts "
+        "without msDS-SupportedEncryptionTypes, so a service account in this "
+        "state either cannot be issued service tickets at all or keeps "
+        "working only because RC4 is explicitly allowed for it."
     ),
     "remediation": (
         "Reset the password of each listed account (for krbtgt, use the "
@@ -180,7 +199,15 @@ PLUGIN = {
                              || to_char(c.aes_since AT TIME ZONE 'UTC', 'YYYY-MM-DD') || ')'
                         ELSE 'the domain has never reached the Windows Server 2008 '
                              || 'functional level (no Read-only Domain Controllers group)'
-                   END AS summary,
+                   END
+                || CASE WHEN cardinality(c.service_principal_names) > 0 AND NOT c.is_krbtgt
+                        THEN CASE WHEN (COALESCE(c.supported_encryption_types, 0) & 4) <> 0
+                                  THEN '; RC4 is explicitly allowed for it, so its service tickets are '
+                                       || 'RC4 only (CVE-2026-20833)'
+                                  ELSE '; service tickets for it fail since the CVE-2026-20833 RC4 '
+                                       || 'enforcement (April/July 2026) unless RC4 is re-enabled'
+                             END
+                        ELSE '' END AS summary,
             jsonb_build_object(
                 'sam_account_name', c.sam_account_name,
                 'user_principal_name', c.user_principal_name,
@@ -191,6 +218,10 @@ PLUGIN = {
                 'rodc_group_present', c.has_rodc_group,
                 'supported_encryption_types', c.supported_encryption_types,
                 'service_principal_names', to_jsonb(c.service_principal_names),
+                'service_ticket_state', CASE WHEN cardinality(c.service_principal_names) > 0 AND NOT c.is_krbtgt
+                                             THEN CASE WHEN (COALESCE(c.supported_encryption_types, 0) & 4) <> 0
+                                                       THEN 'rc4_explicitly_allowed'
+                                                       ELSE 'fails_since_rc4_enforcement' END END,
                 'tier0', t.object_guid IS NOT NULL,
                 'privilege_sources', t.privilege_sources
             ) AS detail

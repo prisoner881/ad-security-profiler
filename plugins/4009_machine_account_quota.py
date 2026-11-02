@@ -42,14 +42,23 @@ one GPO read), not when any earlier run did: a run without --sysvol keeps
 the old Group Policy data, which is no longer used here. sysvol_optional:
 this plugin assesses without SYSVOL, so adaudit.py 1.0.1 does not show it
 as NOT ASSESSED when SYSVOL was not read.
+
+[v1.6] The Microsoft Entra Kerberos server object (CN=AzureADKerberos in the
+Domain Controllers OU) is left out of the "a DC with no GPO setting"
+test: AD flags it as a read-only DC, but it has no Group Policy, so in
+every tenant with Entra Kerberos the assignment always read as
+'not_configured' (medium) even where "Add workstations to domain" was
+restricted. References and description add CertiGhost (CVE-2026-54121,
+July 2026): the quota is how an ordinary user gets the computer account
+that attack needs (plugin 6015).
 """
 
 PLUGIN = {
     "plugin_id": 4009,
     "category": "Domain",
     "name": "Machine Account Quota Allows Unprivileged Users to Join Computers to the Domain",
-    "version": "1.5",
-    "revision_date": "2026-10-29",
+    "version": "1.6",
+    "revision_date": "2026-11-01",
     "remediation": (
         "Set ms-DS-MachineAccountQuota to 0 "
         "(`Set-ADDomain -Identity <domain> -Replace "
@@ -77,10 +86,13 @@ PLUGIN = {
         "HIPAA-164.312(c)(1)",
         "MITRE-ATTCK-T1136.002",
         "CISA-AA26-237A",
+        "CVE-2026-54121",
     ],
     "references": [
         {"title": "Microsoft: ms-DS-MachineAccountQuota attribute",
          "url": "https://learn.microsoft.com/en-us/windows/win32/adschema/a-ms-ds-machineaccountquota"},
+        {"title": "CertiGhost (CVE-2026-54121): a low-privileged user impersonates a domain controller via AD CS",
+         "url": "https://asbawy.github.io/logs/certighost-cve-2026-54121"},
     ],
     "description": (
         "ms-DS-MachineAccountQuota defaults to 10 when unset in AD -- "
@@ -91,7 +103,10 @@ PLUGIN = {
         "they fully control using only regular domain user credentials "
         "(no real computer hardware needed), then use those accounts "
         "for authentication, relay-based attacks, and further lateral "
-        "movement. Worth noting for completeness: during research for "
+        "movement -- including CertiGhost (CVE-2026-54121, July 2026), "
+        "where a self-made computer account is enough to obtain a domain "
+        "controller certificate from an unpatched CA (plugin 6015). "
+        "Worth noting for completeness: during research for "
         "this plugin, a direct contradiction was found across sources "
         "about what a value of 0 actually means. Resolved based on the "
         "weight of evidence -- six independent sources including "
@@ -161,6 +176,7 @@ PLUGIN = {
                              OR EXISTS (SELECT 1 FROM ad_computer c
                                          WHERE c.client_id = %(client_id)s AND c.valid_to IS NULL
                                            AND c.is_domain_controller IS TRUE
+                                           AND NOT is_entra_kerberos_server(c.sam_account_name, c.krbtgt_link)
                                            AND NOT EXISTS (SELECT 1 FROM eff e WHERE e.dc_guid = c.object_guid))
                              THEN 'not_configured'
                         WHEN EXISTS (SELECT 1 FROM principals p WHERE p.broad) THEN 'broad'

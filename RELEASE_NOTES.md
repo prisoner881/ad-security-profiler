@@ -1,5 +1,57 @@
 # Release Notes
 
+## Plugin update (2026-11-01): security bulletin review
+
+From a review of the January-October 2026 Microsoft security updates and
+other published research on Active Directory and Entra ID, against the
+plugin set. Each new check reads data the collectors already store. No
+script or schema change.
+
+### New plugins
+
+| Plugin | Checks |
+|---|---|
+| 6015 Enterprise CA Exposed to CertiGhost (CVE-2026-54121) Preconditions | An Enterprise CA publishes a client-authentication template whose subject is built from the requester's DNS name (such as Machine) that Domain Computers or another broad group can enroll in. High when an ordinary user can also come by a computer account (MachineAccountQuota, or computers owned outside Tier 0). The CA's patch level and EditFlags are not visible, so it asks for them to be confirmed. |
+| 5022 AD FS Is Deployed -- Confirm the July and October 2026 AD FS Updates | An AD FS farm (DKM container and keys) is in the domain, or Entra ID federates domains to an AD FS endpoint hosted elsewhere. July 2026 fixed an exploited elevation of privilege (CVE-2026-56155); October 2026 fixed two Critical spoofing flaws (CVE-2026-108131, CVE-2026-96222). Names the AD FS servers through the farm's gMSA. |
+| 9043 RC4 or DES Re-Enabled for Kerberos on Domain Controllers by Group Policy | The DCs' Group Policy sets the KDC's `DefaultDomainSupportedEncTypes` with RC4 or DES (undoes the CVE-2026-20833 hardening for every account), or "Configure encryption types allowed for Kerberos" allows DES or RC4 on the DC. Needs SYSVOL. |
+| 9044 Domain Controllers Allow Vulnerable Netlogon Secure Channels (ZeroLogon Exception) | The DCs' Group Policy sets `VulnerableChannelAllowList`, re-opening ZeroLogon (CVE-2020-1472) for the accounts it allows; critical when that includes domain controllers. Needs SYSVOL. |
+| 10122 External MFA Provider Backed by an Untrusted Application (TrustSink) | An enabled external authentication method is backed by an application registered in the tenant itself, by an application with no service principal, or by a third-party application without a verified publisher -- the pattern of the TrustSink technique (Varonis, September 2026), where a rogue provider collects users' passwords at sign-in. |
+
+### Changed plugins
+
+- **1024 v1.7, 2018 v1.4 (RC4 accounts):** since the CVE-2026-20833
+  enforcement (April 2026; rollback removed July 2026) domain controllers
+  issue AES-only service tickets for accounts whose
+  `msDS-SupportedEncryptionTypes` is not set. Those accounts are no longer
+  reported unless Group Policy puts RC4 back into the KDC default (as 9043
+  reads it). This removes most of their findings -- on a typical domain,
+  2018 reported every NAS, Linux host and cluster object. Accounts set
+  explicitly without AES are still reported; 1024 rates them high (the
+  remaining RC4 exposure). Both now run without SYSVOL (the Group Policy
+  check is then skipped).
+- **1045 v1.1 (no AES keys):** text brought up to the July 2026
+  enforcement; for a service account the summary says whether its service
+  tickets now fail or still work only because RC4 is explicitly allowed.
+- **11026 v1.2 (tenant policy changed):** an external authentication method
+  added enabled, or switched to enabled, is now high. Before, a newly added
+  method was treated as a newly collected field and not reported at all.
+- **4009 v1.6 (MachineAccountQuota):** the Microsoft Entra Kerberos server
+  object no longer makes "Add workstations to domain" read as not configured
+  (medium) in tenants that use Entra Kerberos; CertiGhost added to the
+  explanation and references.
+
+### Coverage
+
+390 active plugins (386 finding checks, 4 inventory reports) plus 5 retired
+stubs.
+
+### Upgrading
+
+Replace `plugins/`. No migration, no collection change; schema v49 as
+before. Findings of 1024 and 2018 for accounts without
+`msDS-SupportedEncryptionTypes` close as remediated at the next adaudit run
+(unless Group Policy re-enables RC4 in the KDC default).
+
 ## Release 1.0.x updates (2026-10-30)
 
 Fixes and hardening made after release 1.0, from running it against a live
