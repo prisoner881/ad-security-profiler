@@ -20,14 +20,14 @@ log_dir = "/var/log/fortifydata-collector"      # collector_daemon.log (rotated 
 [platform]
 # "local": the run configuration comes from [schedule], [ad] and [entra] below.
 # "fortifydata": the lease, the run configuration and the health reports go
-#   through the platform (PROVISIONAL endpoints, see docs/DAEMON.md).
+#   through the platform's collector API (see docs/DAEMON.md).
 mode = "local"
 # The activation key from the FortifyData portal. Required in "fortifydata"
 # mode; in "local" mode it turns on the push of results. Or set
 # FD_ACTIVATION_KEY / FD_ACTIVATION_KEY_FILE instead.
 # activation_key_file = "/run/secrets/fd_activation_key"
 # push = true                     # default: on when an activation key is configured
-# api_url = "https://api.test.fortifydata.com"   # or test / us / eu; default: the key's environment
+# api_url = "https://api.test.fortifydata.com"   # or prod / eu / test; default: the key's environment
 # ca_bundle = "/etc/ssl/certs/corporate-proxy-ca.pem"   # behind a TLS-inspecting proxy
 # renew_interval = 120            # lease renewal, seconds
 # health_interval = 300           # health report, seconds

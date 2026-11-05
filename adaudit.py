@@ -2,7 +2,7 @@
 """
 adaudit.py -- AD Security & Compliance Plugin Runner
 ======================================================
-VERSION: 1.0.10
+VERSION: 1.0.11
 
 Companion to adprofiler.py. Where adprofiler.py collects AD data,
 adaudit.py analyzes it: discovers every plugin file in plugins/, runs each
@@ -25,6 +25,13 @@ DESIGN:
       as: (status, object_guid, stig_severity, stig_reference,
       tool_severity, tool_reference, fd_severity, summary, detail).
       Zero rows returned = clean pass, nothing to report.
+    - [v1.0.11] The activation key's environment ("e") is the platform's
+      environment name, as the platform developer confirmed: only prod (US
+      production; "us" is never issued), eu and test have a usable API
+      server. A key without "e" is refused (no server is guessed); for any
+      other environment, or a bare license key, the API URL must be given
+      (--api-url / FD_API_URL), else it is refused. --api-url takes prod /
+      eu / test as shortcuts (was test / us / eu).
     - [v1.0.10] The schema migration files up to v50 were removed; the
       message for a database older than REQUIRED_SCHEMA_VERSION says to run
       schema_setup.py, or to create a new, empty database. No other change.
@@ -354,7 +361,7 @@ import adaudit_push
 import run_lock  # [v1.0.2] one run at a time, see run_lock.py
 import secret_input  # [v1.0.6] secrets from the environment, a file or a prompt
 
-VERSION = "1.0.10"
+VERSION = "1.0.11"
 
 # [test-candidate-branch] Always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
@@ -1792,7 +1799,7 @@ def resolve_push_config(args, parser):
     def check_url(url):
         if not (url.startswith("https://")
                 or re.match(r"http://(localhost|127\.0\.0\.1)(:\d+)?(/|$)", url)):
-            parser.error("the API URL must be https:// (or test / us / eu); plain http is only "
+            parser.error("the API URL must be https:// (or prod / eu / test); plain http is only "
                          "accepted for localhost, for testing against a local mock")
 
     common = {"dry_run_dir": args.push_dry_run, "gzip": not args.no_gzip,
@@ -1817,11 +1824,13 @@ def resolve_push_config(args, parser):
         if company is not None and company != lic.company_id:
             parser.error(f"--api-company-id / FD_COMPANY_ID ({company}) does not match the "
                          f"activation key's company ({lic.company_id}); omit it")
-        url = url_override or adaudit_push.API_SERVERS[lic.environment_or_default]
+        try:
+            url = lic.api_url(url_override)
+        except adaudit_push.LicenseKeyError as exc:
+            parser.error(f"{exc} (--api-url or FD_API_URL)")
         check_url(url)
         log(f"Push: activation key for company {lic.company_id}, environment "
-            f"{lic.environment_or_default}"
-            + ("" if lic.environment else " (default)")
+            f"{lic.environment or 'none (bare license key)'}"
             + f" -> {url}"
             + (" (overridden by --api-url / FD_API_URL)" if url_override else "")
             + f"; key from the {secret_input.describe_source(source, '--activation-key', 'FD_ACTIVATION_KEY')}.")
@@ -1983,7 +1992,7 @@ def main():
                            "as JSON instead of sending it. Push state is not changed; no API "
                            "credentials are needed.")
     push.add_argument("--api-url", default=None,
-                      help="API base URL, or test / us / eu (env FD_API_URL).")
+                      help="API base URL, or prod / eu / test (env FD_API_URL).")
     push.add_argument("--api-company-id", type=int, default=None,
                       help="FortifyData company id the API key is scoped to (env FD_COMPANY_ID).")
     push.add_argument("--api-key", default=None,

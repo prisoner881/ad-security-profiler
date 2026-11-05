@@ -605,8 +605,8 @@ python3 collector_daemon.py --config collector.toml          # the daemon
 In local mode (the default) the AD and Entra settings and the schedule are
 in `collector.toml`. Each secret is a file named there
 (`password_file`, `client_secret_file`) or an environment variable, never
-inline. The FortifyData mode, where the platform supplies them, depends on
-platform endpoints that are not specified yet. See `DAEMON.md` for the
+inline. In FortifyData mode the platform supplies them, with the health
+check, from what the client enters in the portal. See `DAEMON.md` for the
 design, every setting, the health report and how to run it under systemd.
 
 **In containers** (the intended way for a client installation): the

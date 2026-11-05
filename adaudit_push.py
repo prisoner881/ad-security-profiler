@@ -61,13 +61,20 @@ AUTHENTICATION [adaudit.py 1.0.8]
     <8-digit company id>.<b64 "AD_AUDIT_COLLECTOR">.<b64 "AD_AUDIT">.<b64
     agent UUID>; it is sent unchanged as "Authorization: LicenseKey <key>",
     the company id in the request paths comes from it (zero padding
-    removed), and "e" picks the API server from API_SERVERS (absent: the
-    default environment, DEFAULT_ENVIRONMENT). parse_activation_key() checks
-    the shape, the integration and collector types and the agent UUID, so a
-    wrong key is reported before anything is sent. Both base64 alphabets
-    (standard and URL-safe), with or without padding, are accepted; a bare
-    license key (the "k" value alone) is accepted too and uses the default
-    environment. The older per-company API key ("Authorization: ApiKey") is
+    removed), and "e" picks the API server from API_SERVERS.
+    parse_activation_key() checks the shape, the integration and collector
+    types and the agent UUID, so a wrong key is reported before anything is
+    sent. Both base64 alphabets (standard and URL-safe), with or without
+    padding, are accepted (the platform issues standard, padded base64).
+
+    [adaudit.py 1.0.11] "e" is the platform's environment (its server
+    profile), confirmed by the platform developer: only prod (US production
+    -- never "us"), eu and test have an API server a collector can use. Any
+    other "e" (the platform's internal environments have no usable public
+    API host), and a bare license key (the "k" value alone, which names no
+    environment), need the API URL given explicitly, else they are refused.
+    An activation key without "e" is a configuration error: no server is
+    guessed. The older per-company API key ("Authorization: ApiKey") is
     still accepted until the platform stops taking it.
 
     A 401 means the key is unknown or malformed, or the AD audit
@@ -120,15 +127,12 @@ import psycopg2.extras
 CONTRACT_VERSION = "1.0"
 
 API_SERVERS = {
-    "test": "https://api.test.fortifydata.com",
-    "us": "https://api.fortifydata.com",
+    "prod": "https://api.fortifydata.com",
     "eu": "https://api.eu.fortifydata.com",
+    "test": "https://api.test.fortifydata.com",
 }
 
-# [adaudit.py 1.0.8] The activation key (see AUTHENTICATION above).
-# An absent "e" means this environment. Document 01 does not name it; "us"
-# is the assumption pending confirmation from the platform developer.
-DEFAULT_ENVIRONMENT = "us"
+
 LICENSE_INTEGRATION_KEY = "AD_AUDIT_COLLECTOR"
 LICENSE_COLLECTOR_TYPE = "AD_AUDIT"
 # A key is a few hundred characters; anything far larger is not a key.
@@ -184,7 +188,7 @@ class LicenseKeyError(ValueError):
 
 class License:
     """A parsed license: the key to send, its company id, agent UUID and the
-    environment name ("e", or None when the activation key has none)."""
+    environment name ("e"; None for a bare license key)."""
 
     def __init__(self, license_key, company_id, agent_id, environment):
         self.license_key = license_key
@@ -192,9 +196,21 @@ class License:
         self.agent_id = agent_id
         self.environment = environment
 
-    @property
-    def environment_or_default(self):
-        return self.environment or DEFAULT_ENVIRONMENT
+    def api_url(self, override=None):
+        """The API server: the override, else the environment's. Raises
+        LicenseKeyError when neither is known (a bare license key, or an
+        internal environment)."""
+        if override:
+            return override
+        if self.environment is None:
+            raise LicenseKeyError("a bare license key names no environment: give the API URL "
+                                  "explicitly")
+        if self.environment not in API_SERVERS:
+            raise LicenseKeyError(f"the activation key is for the \"{self.environment}\" "
+                                  f"environment, which has no API server a collector can use "
+                                  f"(only {', '.join(API_SERVERS)}): give the API URL "
+                                  f"explicitly, or copy the key again from the portal")
+        return API_SERVERS[self.environment]
 
     def __repr__(self):  # never show the key itself
         return (f"License(company_id={self.company_id}, agent_id={self.agent_id}, "
@@ -280,9 +296,11 @@ def parse_activation_key(text):
     if environment is not None and not isinstance(environment, str):
         raise LicenseKeyError("the activation key's environment (\"e\") is not text")
     environment = (environment or "").strip().lower() or None
-    if environment is not None and environment not in API_SERVERS:
-        raise LicenseKeyError(f"the activation key names environment \"{environment[:40]}\"; "
-                              f"known: {', '.join(sorted(API_SERVERS))}")
+    if environment is None:
+        # [1.0.11] The platform always sets it; no server is guessed.
+        raise LicenseKeyError("the activation key names no environment (\"e\")")
+    if not re.fullmatch(r"[a-z0-9_-]{1,40}", environment):
+        raise LicenseKeyError("the activation key's environment (\"e\") is not a name")
     lic.environment = environment
     return lic
 
