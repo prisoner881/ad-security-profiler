@@ -18,7 +18,7 @@ set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIR="${1:-/opt/fortifydata-collector}"
-IMAGE_DEFAULT="fortifydata-ad-collector:1.1.0"
+IMAGE_DEFAULT="fortifydata/collector-ad:v1.2.0"
 
 umask 077
 
@@ -92,8 +92,10 @@ cat <<EOF
 Installation directory: $DIR (collector runs as uid $OWNER_UID)
 
 Next:
-  1. Load the image (if you received it as a file):
-       docker load -i fortifydata-ad-collector-<version>.tar.gz
+  1. Get the image from Docker Hub:
+       cd $DIR && docker compose pull collector
+     or, if you received it as a file:
+       docker load -i collector-ad-<version>.tar.gz
   2. Edit $DIR/config/collector.toml (schedule, [ad], optional [entra]).
   3. Write the secrets, one per file, on the first line:
        $DIR/secrets/ad_bind_password     the AD bind account's password

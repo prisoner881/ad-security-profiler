@@ -46,7 +46,7 @@ SIGTERM/SIGINT → stop the running step → release the lease → exit 0
 
 | Step | Command (the daemon adds `--pg-*` and `--log-dir`) | Exit status → what the daemon does |
 |---|---|---|
-| 1 | `schema_setup.py --rescan-file …`: creates the schema, or applies the migrations above the database's version | `0` next step; `1` run failed, nothing else runs (database problem) |
+| 1 | `schema_setup.py --rescan-file … --backup-dir …`: creates the schema, or backs the database up and applies the migrations above its version | `0` next step; `1` run failed, nothing else runs (database problem) |
 | 2 | `adprofiler.py --dc-host … --username … [--ssl] [--port] [--ca-cert] [--sysvol …]` | `0` next step; `1` collection failed (see below) |
 | 3 | `entra_graph_collector.py --tenant-id … --app-id … --domain-fqdn …` or `--client-id …`; only when Entra is configured | `0` next step; `1` the AD data is still evaluated, with the Entra checks not assessed (see below) |
 | 4 | `adaudit.py --report-dir … --no-excel [--push] [--skip-entra]` | `0` ok; `3` ok with a warning (the evaluation is incomplete; adaudit.py reports this before a failed push, so the daemon checks for runs still waiting and schedules the push retry); `5` evaluated but the push failed, so `--push-only` is retried every hour; `1` run failed |
@@ -74,6 +74,14 @@ objects need one `adprofiler.py --full-rescan`. `schema_setup.py` then
 creates `<state_dir>/full_rescan_needed`, and the next AD collection runs
 with `--full-rescan`. The file is removed once that collection succeeds:
 one rescan, however many such migrations were applied at once.
+
+**Backup before a migration.** When the database exists and has
+migrations to apply, `schema_setup.py` first dumps it with `pg_dump
+--format=custom` to `<state_dir>/backups/adprofiler-v<from>-before-v<to>-<UTC
+time>.dump` (mode `0600`; the password reaches `pg_dump` only through its
+environment). A failed backup means no migration is applied and the run
+fails. The newest 3 are kept. Restoring one is described in `CONTAINER.md`,
+section 5.
 
 **Integrity check.** After every successful AD collection the daemon runs
 the database's `check_scd2_integrity()` (schema v50). It finds any object
@@ -205,12 +213,15 @@ memory only and passes them to the scripts through pipes (section 4).
 | A `404` from the health check (no collector, or deleted) | Reports itself `collector_decommissioned`, runs no scan, keeps polling |
 | Anything else (`CONFIGURED`, `HEALTHY`, `OUTDATED`, …) | Runs normally |
 
-**Updates.** When `targetVersion` is newer than the running version, the
+**Updates.** When `targetVersion` differs from the running version, the
 daemon logs it once, with `autoUpgrade` and `imageName`, and reports it in
 its health and status (`platform.update_available`). Installing the new
-image is the updater's job, which is still to be built. Our health report's
-top-level `version` is the image version; the platform compares it with
-`targetVersion` to show a collector as `OUTDATED`.
+image is the Collector Manager's job. Our health report's top-level
+`version` is the image version (the `COLLECTOR_VERSION` given when the
+image was built, e.g. `1.2.0` or `1.2.0-dev.17`, without a `v`; outside an
+image, the daemon's own version); the platform compares it with
+`targetVersion` to show a collector as `OUTDATED`. A `v` in front of
+`targetVersion` is ignored in that comparison.
 
 **Schedule offset.** Each installation starts its scheduled runs a random 0
 to 30 minutes after the time set in the portal. The offset is chosen once,
@@ -439,8 +450,9 @@ specification (documents 04 and 05), alongside the ingest API.
   "403 without reason = waiting for approval" rule is removed from the
   push), activation key reissue, and installation approval under
   licensing.
-- **The updater:** acting on `targetVersion` and `autoUpgrade` (pulling
-  and switching the image, with a backup and rollback) is still to be
-  built.
+- **The Collector Manager** acts on `targetVersion` and `autoUpgrade`:
+  it pulls and switches the image. How it runs the containers, and how it
+  rolls back with the pre-migration backup (`CONTAINER.md`, section 5), is
+  being agreed with its author.
 - **Several AD domains per database.** Deferred; the Entra step then needs
   `ad.domain_fqdn`.

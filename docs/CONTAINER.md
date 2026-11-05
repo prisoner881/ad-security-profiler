@@ -4,7 +4,7 @@ The collector ships as two containers, run with docker compose:
 
 | Container | What it is |
 |---|---|
-| `collector` | `collector_daemon.py` with the scripts and plugins (image built from `Dockerfile`) |
+| `collector` | `collector_daemon.py` with the scripts and plugins: the image `fortifydata/collector-ad`, built from `Dockerfile` |
 | `postgres` | PostgreSQL 17 (the official image), the collector's database |
 
 The daemon itself (schedule, steps, retries, health, logs) is described in
@@ -53,16 +53,35 @@ day-to-day operation.
   writes `data/logs/collector_daemon.log` (rotated daily) and each script's
   log file in `data/logs/scripts`, both kept 30 days.
 
-## 2. Building the image
+## 2. The image
 
-From the repository root:
+The image is published on Docker Hub as `fortifydata/collector-ad`, for
+`linux/amd64` and `linux/arm64` (one multi-platform tag; Docker pulls the
+host's architecture). Its tags:
+
+| Tag | What it is |
+|---|---|
+| `vX.Y.Z` | a release, e.g. `v1.2.0`. Install and pin these. |
+| `latest` | the newest release |
+| `vX.Y.Z-dev.N` | a development build of the version being prepared, N the CI run number |
+| `develop` | the newest development build |
+
+The version the image reports to the platform (and in
+`collector_daemon.py --version`) is its tag without the `v`: `1.2.0`, or
+`1.2.0-dev.17`. It comes from the `COLLECTOR_VERSION` build argument. Releases
+are built and pushed by CI (`.github/workflows/collector-image.yml`, see
+`MAINTAINERS.md`), never by hand.
+
+To build one locally, from the repository root:
 
 ```
-docker build -t fortifydata-ad-collector:1.1.0 .
-docker save fortifydata-ad-collector:1.1.0 | gzip > fortifydata-ad-collector-1.1.0.tar.gz
+docker build --build-arg COLLECTOR_VERSION=1.2.0 -t fortifydata/collector-ad:v1.2.0 .
+docker save fortifydata/collector-ad:v1.2.0 | gzip > collector-ad-1.2.0.tar.gz
 ```
 
-- **Size:** the image is about 320 MB, about 75 MB compressed.
+- **Size:** the image is about 400 MB, about 85 MB compressed. It includes
+  the PostgreSQL 17 client tools (`pg_dump`, `pg_restore`, `psql`), for the
+  backup taken before a schema migration (section 5).
 - **Base images:** the official `python:3.13-slim-trixie` and
   `postgres:17-trixie`. When Docker Hub rate-limits anonymous pulls, use a
   mirror of the same official image:
@@ -94,14 +113,17 @@ On a Linux host with Docker Engine and the compose plugin:
        secrets/ad_bind_password   empty -- fill in
        secrets/entra_app_secret   empty -- fill in if [entra] is used
        secrets/fd_activation_key  empty -- fill in to push results
-       data/state/                instance id, status.json, state.json, reports
+       data/state/                instance id, status.json, state.json, reports,
+                                  backups/ (database backups taken before a migration)
        data/logs/                 collector_daemon.log, scripts/
    ```
 
-2. **Load the image**, if you received it as a file:
+2. **Get the image.** In the installation directory, `docker compose pull`
+   fetches it from Docker Hub. On a host without access to Docker Hub, load
+   it from a file instead:
 
    ```
-   docker load -i fortifydata-ad-collector-1.1.0.tar.gz
+   docker load -i collector-ad-1.2.0.tar.gz
    ```
 
 3. **Prepare the accounts.** The client's administrators set up the AD
@@ -170,7 +192,7 @@ then comes from the portal, with the health check:
 | Change the configuration | Edit `config/collector.toml` (local mode: picked up before the next run; a failed run is retried at once). Daemon settings ([daemon], [platform], [database]) need `docker compose restart collector`. |
 | Change a secret | Rewrite the file in `secrets/`. AD and Entra secrets are re-read before every run. A new activation key needs `docker compose restart collector`. |
 | Back up the database | `docker compose exec -T postgres sh -c 'PGPASSWORD="$(head -n1 /run/secrets/pg_password)" pg_dump -h 127.0.0.1 -U adprofiler -Fc adprofiler' > adprofiler-$(date +%F).dump` |
-| Back up the rest | `config/`, `secrets/` and `data/state/` |
+| Back up the rest | `config/`, `secrets/` and `data/state/` (which holds the pre-migration backups in `backups/`) |
 
 **The database password** is set when the database is first created.
 Changing `secrets/pg_password` afterwards does not change it. To change it,
@@ -182,19 +204,48 @@ the database volume, so leave it out to keep the data.
 
 ## 5. Upgrading
 
-1. Load or build the new image.
-2. Run the new `docker/install.sh` on the installation directory. It
+In FortifyData deployments the Collector Manager does this. By hand:
+
+1. Run the new `docker/install.sh` on the installation directory. It
    replaces `compose.yaml`, keeping the old one as `compose.yaml.previous`,
    and changes nothing else.
-3. Set `COLLECTOR_IMAGE` in `.env` to the new tag.
-4. Run `docker compose up -d`.
+2. Set `COLLECTOR_IMAGE` in `.env` to the new tag, e.g.
+   `fortifydata/collector-ad:v1.3.0`.
+3. Run `docker compose pull collector` (or `docker load` the file), then
+   `docker compose up -d`.
 
 The daemon brings the database up to the new image's schema at the start of
 its next run: `schema_setup.py` applies every migration in the image's
 `migrations/` folder above the database's version, in order. Skipped updates
 need no special handling, because the newer image carries all the migrations
 in between. When a migration needs a full rescan, the next collection does
-it. A database older than v50 (test installations from before the baseline)
+it.
+
+**The backup before a migration.** Before it applies any migration to an
+existing database, `schema_setup.py` dumps the database with `pg_dump` to
+`data/state/backups/adprofiler-v<from>-before-v<to>-<UTC time>.dump`
+(custom format, mode `0600`). If the backup fails, no migration is applied
+and the run fails, so the database is never migrated without one. The
+newest 3 backups are kept. A run with no migration to apply takes none.
+
+**Going back to the previous version.** A newer schema is not guaranteed to
+work with an older image, so restore the backup along with the image:
+
+```
+docker compose stop collector
+ls data/state/backups/                          # pick the newest .dump
+docker compose run --rm --no-deps -T --entrypoint sh collector -c '
+  export PGPASSWORD="$(head -n1 /run/secrets/pg_password)"
+  export PGOPTIONS="-c client_min_messages=warning"
+  psql -h postgres -U adprofiler -d adprofiler -v ON_ERROR_STOP=1 \
+       -c "DROP SCHEMA ad_intel CASCADE"
+  pg_restore -h postgres -U adprofiler -d adprofiler --no-owner --exit-on-error \
+       /var/lib/fortifydata-collector/backups/<file>.dump'
+```
+
+Then set `COLLECTOR_IMAGE` in `.env` back to the previous tag and run
+`docker compose up -d`. The data collected since the backup is lost; the
+next run collects afresh. A database older than v50 (test installations from before the baseline)
 cannot be upgraded: `docker compose down -v` deletes the database volume,
 then `docker compose up -d` creates it afresh.
 
@@ -206,8 +257,13 @@ and restore and is not automated.
 
 These were tested with Docker Engine 29 and compose v5, on cgroup v1:
 
-- **Build:** the image builds, and the daemon reports its versions inside
-  it.
+- **Build:** the image builds for `linux/amd64` and `linux/arm64` (the
+  latter under QEMU emulation), and the daemon reports its versions inside
+  it, with the version given at build time.
+- **Backup before a migration:** a failing `pg_dump` stops the migration
+  (the database stays at its version); a working one writes the backup and
+  then migrates; restoring it as above brings back the previous version and
+  its data; only the newest backups are kept.
 - **Install script:** fresh, run again (nothing overwritten), as root (uid
   10001) and as an ordinary user (that user's uid).
 - **Configuration check:**
