@@ -577,8 +577,11 @@ in `collector.toml`. Each secret is a file named there
 (`password_file`, `client_secret_file`) or an environment variable, never
 inline. The FortifyData mode, where the platform supplies them, depends on
 platform endpoints that are not specified yet. See `DAEMON.md` for the
-design, every setting, the health report and how to run it under systemd or
-in a container.
+design, every setting, the health report and how to run it under systemd.
+
+**In containers** (the intended way for a client installation): the
+collector image and a PostgreSQL 17 container under docker compose, set up
+by `docker/install.sh`. See `CONTAINER.md`.
 
 ## Troubleshooting
 

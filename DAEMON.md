@@ -322,17 +322,9 @@ RestartSec=60
 TimeoutStopSec=300
 ```
 
-**Container.** The packaging is still to do. Notes for it:
-- Run the daemon as the container's main process. Use `init: true`, or
-  tini, so that orphaned processes are reaped.
-- Put `state_dir` and `log_dir` on volumes.
-- Provide secrets as files under `/run/secrets`.
-- Set `stop_grace_period: 5m`.
-- Healthcheck: `--healthcheck`.
-- Make sure time zone data is present: install the `tzdata` package from
-  `requirements.txt`, or the OS package.
-- Run PostgreSQL 17 in its own container. Its password is generated at
-  installation and never sent to the platform.
+**Container.** See `CONTAINER.md`: the image (`Dockerfile`), docker compose
+with a PostgreSQL 17 container (`docker/compose.yaml`), the installation
+script and day-to-day operation.
 
 ## 9. Testing done
 

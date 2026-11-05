@@ -10,6 +10,7 @@ This file lists the people responsible for **ad-security-profiler** and explains
 - the finding plugins in `plugins/`
 - the PostgreSQL schema (`schema_init.sql` and the `schema_migration_vNN.sql` files), with `schema_setup.py`, which applies them unattended
 - `collector_daemon.py`, the unattended daemon that runs the scripts daily, with `platform_client.py` (the FortifyData platform side)
+- the container packaging (`Dockerfile`, `docker/`)
 
 ## Current maintainers
 
@@ -30,7 +31,8 @@ Each area lists the files it covers. Any change to an area needs approval from o
 | Finding and inventory plugins | `plugins/`, `COMPLIANCE_TAGS.md` | @prisoner881 |
 | Database schema | `schema_init.sql`, `schema_migration_v*.sql`, `schema_setup.py` | @prisoner881 |
 | Collector daemon | `collector_daemon.py`, `platform_client.py`, `collector_daemon.example.toml`, `DAEMON.md` | @prisoner881 |
-| Documentation | `SETUP.md`, `RELEASE_NOTES.md`, `MAINTAINERS.md`, `DAEMON.md` | @prisoner881 |
+| Container packaging | `Dockerfile`, `.dockerignore`, `docker/`, `CONTAINER.md` | @prisoner881 |
+| Documentation | `SETUP.md`, `RELEASE_NOTES.md`, `MAINTAINERS.md`, `DAEMON.md`, `CONTAINER.md` | @prisoner881 |
 
 ## Maintainer responsibilities
 
@@ -80,6 +82,7 @@ Maintainers check pull requests against these conventions.
   - Secrets are never stored. That includes passwords, LAPS and gMSA passwords, KDS root keys and the AD FS DKM key.
   - Secrets the scripts need are read through `secret_input.py` (option, environment variable, `_FILE`, prompt) and are never logged.
   - `collector_daemon.py` passes secrets to the scripts only through pipes (`<VAR>_FILE=/dev/fd/N`), never as options or environment values. A script's exit status is the daemon's only signal, so a new exit status, or a new secret, needs a matching change in the daemon.
+  - The image version appears in `Dockerfile` (`VERSION`), `docker/compose.yaml` and `docker/install.sh` (the default image tag), and `CONTAINER.md`; raise them together with `collector_daemon.py`'s `VERSION`. A new top-level file the scripts need must also be added to the `COPY` lines in `Dockerfile`.
   - New optional reads must not stop a run when they fail.
 
 ## Reporting security issues
