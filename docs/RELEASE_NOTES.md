@@ -6,6 +6,27 @@ Changes on the `development` branch, which collects the work towards
 running the scripts unattended under a supervising process (scheduled runs
 in a container). They are not in `release` yet.
 
+### Schema baseline and `migrations/` (2026-11-05)
+
+`schema_setup.py` 1.2, collector_daemon.py 1.0.4 (image 1.0.4). Schema
+unchanged (v50).
+
+- **The schema is now a frozen baseline plus a migration chain.**
+  - `schema_init.sql` is the v50 baseline and is never edited again.
+  - Every later change is one file in the new `migrations/` folder:
+    `schema_migration_v51.sql`, `v52`, and so on. It is empty for now.
+- **`schema_setup.py` plays the chain back:**
+  - a new database gets the baseline, then every migration in order;
+  - an existing database (v50 or later) gets every migration above its
+    version, so a client who skipped updates (v50 to v55) is brought up in
+    one run;
+  - it refuses a gap in the chain, a database older than v50, and a
+    migration file outside `migrations/`.
+- **Full rescans:** a migration that needs one says so in its header. The
+  daemon then runs the next collection with `--full-rescan`, once.
+- The rules for writing a migration are in `MAINTAINERS.md` ("Schema
+  changes").
+
 ### Schema migration files removed (2026-11-05)
 
 `schema_setup.py` 1.1, adprofiler.py 1.0.10, adaudit.py 1.0.10,

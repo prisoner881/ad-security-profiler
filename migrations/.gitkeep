@@ -1,0 +1,3 @@
+# Schema migrations from v51 on: migrations/schema_migration_vNN.sql, one per
+# version, no gap. Rules: docs/MAINTAINERS.md ("Schema changes"). This file
+# only keeps the folder in git while it has no migration yet.

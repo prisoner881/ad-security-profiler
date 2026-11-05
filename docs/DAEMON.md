@@ -49,7 +49,7 @@ SIGTERM/SIGINT → stop the running step → release the lease → exit 0
 
 | Step | Command (the daemon adds `--pg-*` and `--log-dir`) | Exit status → what the daemon does |
 |---|---|---|
-| 1 | `schema_setup.py` | `0` next step; `1` run failed, nothing else runs (database problem) |
+| 1 | `schema_setup.py --rescan-file …`: creates the schema, or applies the migrations above the database's version | `0` next step; `1` run failed, nothing else runs (database problem) |
 | 2 | `adprofiler.py --dc-host … --username … [--ssl] [--port] [--ca-cert] [--sysvol …]` | `0` next step; `1` collection failed (see below) |
 | 3 | `entra_graph_collector.py --tenant-id … --app-id … --domain-fqdn …` or `--client-id …`; only when Entra is configured | `0` next step; `1` the AD data is still evaluated, with the Entra checks not assessed (see below) |
 | 4 | `adaudit.py --report-dir … --no-excel [--push] [--skip-entra]` | `0` ok; `3` ok with a warning (the evaluation is incomplete; adaudit.py reports this before a failed push, so the daemon checks for runs still waiting and schedules the push retry); `5` evaluated but the push failed, so `--push-only` is retried every hour; `1` run failed |
@@ -71,6 +71,12 @@ collection, would be evaluated as if it were current. The run ends
 `warning`, with the Entra error in its note. `--skip-entra` is also passed
 when Entra is not configured, so Entra data left from an earlier
 configuration is never evaluated as current.
+
+**Full rescan after a migration.** A migration can declare that existing
+objects need one `adprofiler.py --full-rescan`. `schema_setup.py` then
+creates `<state_dir>/full_rescan_needed`, and the next AD collection runs
+with `--full-rescan`. The file is removed once that collection succeeds:
+one rescan, however many such migrations were applied at once.
 
 **Integrity check.** After every successful AD collection the daemon runs
 the database's `check_scd2_integrity()` (schema v50). It finds any object
