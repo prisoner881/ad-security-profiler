@@ -9,6 +9,7 @@ This file lists the people responsible for **ad-security-profiler** and explains
 - `secret_input.py`, how the three scripts read passwords and secrets
 - the finding plugins in `plugins/`
 - the PostgreSQL schema (`schema_init.sql` and the `schema_migration_vNN.sql` files), with `schema_setup.py`, which applies them unattended
+- `collector_daemon.py`, the unattended daemon that runs the scripts daily, with `platform_client.py` (the FortifyData platform side)
 
 ## Current maintainers
 
@@ -28,7 +29,8 @@ Each area lists the files it covers. Any change to an area needs approval from o
 | Run lock and secret input | `run_lock.py`, `secret_input.py` | @prisoner881 |
 | Finding and inventory plugins | `plugins/`, `COMPLIANCE_TAGS.md` | @prisoner881 |
 | Database schema | `schema_init.sql`, `schema_migration_v*.sql`, `schema_setup.py` | @prisoner881 |
-| Documentation | `SETUP.md`, `RELEASE_NOTES.md`, `MAINTAINERS.md` | @prisoner881 |
+| Collector daemon | `collector_daemon.py`, `platform_client.py`, `collector_daemon.example.toml`, `DAEMON.md` | @prisoner881 |
+| Documentation | `SETUP.md`, `RELEASE_NOTES.md`, `MAINTAINERS.md`, `DAEMON.md` | @prisoner881 |
 
 ## Maintainer responsibilities
 
@@ -77,6 +79,7 @@ Maintainers check pull requests against these conventions.
   - Collectors only read; they never write to Active Directory or Entra ID.
   - Secrets are never stored. That includes passwords, LAPS and gMSA passwords, KDS root keys and the AD FS DKM key.
   - Secrets the scripts need are read through `secret_input.py` (option, environment variable, `_FILE`, prompt) and are never logged.
+  - `collector_daemon.py` passes secrets to the scripts only through pipes (`<VAR>_FILE=/dev/fd/N`), never as options or environment values. A script's exit status is the daemon's only signal, so a new exit status, or a new secret, needs a matching change in the daemon.
   - New optional reads must not stop a run when they fail.
 
 ## Reporting security issues

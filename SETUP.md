@@ -38,6 +38,9 @@ USB drive, secure file transfer, etc.):
   from the environment, a file or a prompt)
 - `schema_setup.py` (optional: creates or upgrades the database schema
   without `psql`, see section 5)
+- `collector_daemon.py`, `platform_client.py` and
+  `collector_daemon.example.toml` (optional: run everything unattended,
+  see section 9 and `DAEMON.md`)
 - `requirements.txt`
 - `schema_init.sql`
 - `RELEASE_NOTES.md`
@@ -57,6 +60,9 @@ adprofiler/
     run_lock.py
     secret_input.py
     schema_setup.py
+    collector_daemon.py           (optional, section 9)
+    platform_client.py            (optional, section 9)
+    collector_daemon.example.toml (optional, section 9)
     requirements.txt
     schema_init.sql
     RELEASE_NOTES.md
@@ -550,6 +556,29 @@ Once all three steps are complete, you'll have (in `~/adprofiler`):
 Send these back for review -- the Excel workbook is the main thing
 worth going through together; the two log files are there mainly for
 troubleshooting if anything looked wrong during collection.
+
+## 9. Running unattended: collector_daemon.py
+
+Sections 5 to 8 run the scripts by hand. `collector_daemon.py` runs them
+for you, every day, with no terminal: schema setup, AD collection, Entra
+collection, evaluation and (with an activation key) the push. It keeps
+running between runs, reports its health every 5 minutes, and logs
+everything. It needs Python 3.11 or later.
+
+```
+cp collector_daemon.example.toml collector.toml     # then edit it
+python3 collector_daemon.py --config collector.toml --check-config
+python3 collector_daemon.py --config collector.toml --once   # one run now
+python3 collector_daemon.py --config collector.toml          # the daemon
+```
+
+In local mode (the default) the AD and Entra settings and the schedule are
+in `collector.toml`. Each secret is a file named there
+(`password_file`, `client_secret_file`) or an environment variable, never
+inline. The FortifyData mode, where the platform supplies them, depends on
+platform endpoints that are not specified yet. See `DAEMON.md` for the
+design, every setting, the health report and how to run it under systemd or
+in a container.
 
 ## Troubleshooting
 
