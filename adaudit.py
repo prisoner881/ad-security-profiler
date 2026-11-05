@@ -2,7 +2,7 @@
 """
 adaudit.py -- AD Security & Compliance Plugin Runner
 ======================================================
-VERSION: 1.0.6
+VERSION: 1.0.7
 
 Companion to adprofiler.py. Where adprofiler.py collects AD data,
 adaudit.py analyzes it: discovers every plugin file in plugins/, runs each
@@ -25,6 +25,17 @@ DESIGN:
       as: (status, object_guid, stig_severity, stig_reference,
       tool_severity, tool_reference, fd_severity, summary, detail).
       Zero rows returned = clean pass, nothing to report.
+    - [v1.0.7] For running under a scheduler or container daemon: SIGTERM
+      (`docker stop`, systemd, a supervising process) is handled like
+      Ctrl-C -- the evaluation run is marked aborted and never pushed,
+      exit 130; it used to kill the process and leave the run 'running'.
+      A signal that arrives during a database query takes effect when the
+      query returns. --log-dir DIR also writes the console output to
+      DIR/adaudit-results_<timestamp>.log; --report-dir DIR says where the
+      Excel workbook goes; --no-excel skips the workbook (the console
+      report, the findings history and the push are unchanged) -- an
+      unattended run whose results are pushed has no reader for it, and it
+      is the slowest step on a large directory.
     - [v1.0.6] Secrets without a terminal (secret_input.py). The
       PostgreSQL password is taken from --pg-password, else PGPASSWORD,
       else the file named by PGPASSWORD_FILE (first line; a mounted Docker
@@ -266,6 +277,7 @@ USAGE:
                                                  # evaluate, then push unpushed runs
     python3 adaudit.py --push-only               # push the backlog, evaluate nothing
     python3 adaudit.py --push --push-dry-run out/  # write the payloads, send nothing
+    python3 adaudit.py --push --no-excel --log-dir /data/logs  # unattended: log file, no workbook
 
 EXIT STATUS ([v0.7.3]; always 0 before):
     0   Run completed and every selected plugin ran.
@@ -290,15 +302,17 @@ EXIT STATUS ([v0.7.3]; always 0 before):
     75  [v1.0.2] Not started: another adprofiler.py, entra_graph_collector.py
         or adaudit.py run holds the run lock (run_lock.py). Nothing was
         done; the logged message names the holder and how to clear it.
-    130 Interrupted (Ctrl-C).
+    130 Interrupted (Ctrl-C, or [v1.0.7] SIGTERM).
     Precedence when several apply: 3, then 5, then 4 -- an incomplete run
     can't vouch for its findings either way.
 """
 
 import sys
 import argparse
+import atexit
 import getpass
 import importlib.util
+import signal
 import re
 from pathlib import Path
 from datetime import datetime, timezone
@@ -312,7 +326,7 @@ import adaudit_push
 import run_lock  # [v1.0.2] one run at a time, see run_lock.py
 import secret_input  # [v1.0.6] secrets from the environment, a file or a prompt
 
-VERSION = "1.0.6"
+VERSION = "1.0.7"
 
 # [test-candidate-branch] Always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
@@ -438,6 +452,45 @@ def unknown_framework_tags(plugins):
 def log(msg):
     ts = datetime.now().strftime("%H:%M:%S")
     print(f"[{ts}] {msg}")
+
+
+class _TeeStream:
+    """[v1.0.7] Writes to the console and to the --log-dir log file."""
+
+    def __init__(self, console_stream, log_fh):
+        self._console = console_stream
+        self._log_fh = log_fh
+
+    def write(self, data):
+        self._console.write(data)
+        self._log_fh.write(data)
+
+    def flush(self):
+        self._console.flush()
+        self._log_fh.flush()
+
+    def isatty(self):
+        return self._console.isatty()
+
+
+# [v1.0.7] Which signal interrupted the run, for the log.
+INTERRUPTED_BY = "Ctrl-C"
+
+
+def handle_sigterm(signum, frame):
+    """[v1.0.7] SIGTERM -- what `docker stop`, systemd and a supervising process
+    send -- is handled like Ctrl-C: the evaluation run is marked aborted
+    (never pushed), exit 130. It used to kill the process outright and leave
+    the run 'running'. A repeated SIGTERM is ignored so the cleanup can
+    finish."""
+    global INTERRUPTED_BY
+    INTERRUPTED_BY = "SIGTERM"
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    log("[WARN] Termination signal (SIGTERM) received. Stopping...")
+    raise KeyboardInterrupt
+
+
+signal.signal(signal.SIGTERM, handle_sigterm)
 
 
 # ============================================================================
@@ -1771,6 +1824,17 @@ def main():
                          help="Exit with status 4 if any current (not remediated) finding "
                               "is at or above this level: 'fail' = FAIL only, 'warn' = WARN "
                               "or FAIL. Default: findings don't affect the exit status.")
+    parser.add_argument("--log-dir", type=Path, default=None, metavar="DIR",
+                         help="[v1.0.7] Also write everything shown on screen to "
+                              "DIR/adaudit-results_<timestamp>.log (created if missing). "
+                              "Default: no log file.")
+    parser.add_argument("--report-dir", type=Path, default=Path("."), metavar="DIR",
+                         help="[v1.0.7] Directory for the Excel workbook "
+                              "(adaudit-findings_<timestamp>.xlsx); created if missing. "
+                              "Default: the current directory.")
+    parser.add_argument("--no-excel", action="store_true",
+                         help="[v1.0.7] Do not write the Excel workbook (the console "
+                              "report, the findings history and any push are unchanged).")
     parser.add_argument("--version", action="store_true")
     parser.add_argument("--pg-host", default=None,
                          help="PostgreSQL server hostname or IP. Required unless --version is given.")
@@ -1827,6 +1891,25 @@ def main():
 
     if not args.pg_host or not args.pg_user:
         parser.error("the following arguments are required: --pg-host, --pg-user")
+
+    # [v1.0.7] --log-dir: mirror the console to a log file, as adprofiler.py
+    # and entra_graph_collector.py always do.
+    if args.log_dir is not None:
+        try:
+            args.log_dir.mkdir(parents=True, exist_ok=True)
+            log_path = args.log_dir / f"adaudit-results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+            log_fh = open(log_path, "w", encoding="utf-8")
+        except OSError as exc:
+            print(f"[ERROR] Cannot write a log file in {args.log_dir}: {exc}")
+            return EXIT_FATAL
+        real_stdout = sys.stdout
+        sys.stdout = _TeeStream(real_stdout, log_fh)
+
+        def _restore_stdout():
+            sys.stdout = real_stdout
+            log_fh.close()
+        atexit.register(_restore_stdout)
+        log(f"Mirroring console output to {log_path}")
 
     global PG_HOST, PG_PORT, PG_DBNAME, PG_USER, PG_PASSWORD
     PG_HOST = args.pg_host
@@ -2109,8 +2192,13 @@ def main():
     # inventory plugins ran), not gated behind finding_plugins alone,
     # since an inventory-only filtered run (--category "User Accounts"
     # matching only 8001, say) should still get a workbook.
-    if finding_plugins or inventory_plugins:
-        excel_filename = f"adaudit-findings_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    # [v1.0.7] --no-excel skips it (an unattended run whose results are
+    # pushed has no reader for it); --report-dir says where it goes.
+    if args.no_excel:
+        log("Excel workbook not written (--no-excel).")
+    elif finding_plugins or inventory_plugins:
+        args.report_dir.mkdir(parents=True, exist_ok=True)
+        excel_filename = str(args.report_dir / f"adaudit-findings_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
         write_excel_report(plugin_summaries, all_findings, inventory_results, excel_filename,
                            compliance)
         log(f"Wrote Excel findings report to {excel_filename}")
@@ -2161,7 +2249,7 @@ def cli():
     try:
         return main()
     except KeyboardInterrupt:
-        log("[ERROR] Interrupted (Ctrl-C).")
+        log(f"[ERROR] Interrupted ({INTERRUPTED_BY}).")
         return EXIT_INTERRUPTED
     except (psycopg2.Error, RuntimeError, OSError, ImportError) as exc:
         log(f"[ERROR] Fatal: {exc}".rstrip())

@@ -8,7 +8,7 @@ This file lists the people responsible for **ad-security-profiler** and explains
 - `run_lock.py`, the run lock shared by the three scripts
 - `secret_input.py`, how the three scripts read passwords and secrets
 - the finding plugins in `plugins/`
-- the PostgreSQL schema (`schema_init.sql` and the `schema_migration_vNN.sql` files)
+- the PostgreSQL schema (`schema_init.sql` and the `schema_migration_vNN.sql` files), with `schema_setup.py`, which applies them unattended
 
 ## Current maintainers
 
@@ -27,7 +27,7 @@ Each area lists the files it covers. Any change to an area needs approval from o
 | Plugin runner and reporting | `adaudit.py`, `adaudit_push.py` | @prisoner881 |
 | Run lock and secret input | `run_lock.py`, `secret_input.py` | @prisoner881 |
 | Finding and inventory plugins | `plugins/`, `COMPLIANCE_TAGS.md` | @prisoner881 |
-| Database schema | `schema_init.sql`, `schema_migration_v*.sql` | @prisoner881 |
+| Database schema | `schema_init.sql`, `schema_migration_v*.sql`, `schema_setup.py` | @prisoner881 |
 | Documentation | `SETUP.md`, `RELEASE_NOTES.md`, `MAINTAINERS.md` | @prisoner881 |
 
 ## Maintainer responsibilities
@@ -63,6 +63,7 @@ Maintainers check pull requests against these conventions.
   - Every schema change ships as a new `schema_migration_vNN.sql` and is also folded into `schema_init.sql`. A fresh install and an upgrade must produce the same schema.
   - `EXPECTED_SCHEMA_VERSION` in `adprofiler.py` and `REQUIRED_SCHEMA_VERSION` in `adaudit.py` are raised to match.
   - Migrations are never edited after release.
+  - `schema_setup.py` takes the newest `schema_migration_vNN.sql` as the target and checks that `schema_init.sql`'s fresh-install row records that same version; keep the two in step. A migration must insert its own row into `schema_migration_history` (the script checks it), and must not contain psql meta-commands (only pg_dump's `\restrict`/`\unrestrict` lines in `schema_init.sql` are skipped).
 - **Versioning:**
   - Each script carries its own `VERSION`, and changes are recorded in its docstring or in `changelog.txt`.
   - Plugins carry their own `version` and `revision_date`, plus a `[vX.Y]` note in the docstring explaining what changed.

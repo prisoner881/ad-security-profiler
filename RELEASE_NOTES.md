@@ -6,6 +6,31 @@ Changes on the `development` branch, which collects the work towards
 running the scripts unattended under a supervising process (scheduled runs
 in a container). They are not in `release` yet.
 
+### Ready for a supervising process (2026-11-05)
+
+adprofiler.py 1.0.8, entra_graph_collector.py 1.0.6, adaudit.py 1.0.7, new
+`schema_setup.py` 1.0. No schema change, no plugin change.
+
+- **SIGTERM is handled like Ctrl-C** in all three scripts (`docker stop`,
+  systemd and a supervising process send it): adprofiler.py rolls back and
+  marks its run aborted, entra_graph_collector.py reports which tables were
+  refreshed, adaudit.py marks its evaluation run aborted (never pushed); all
+  exit `130`. Before, the process was killed outright and its run row stayed
+  "running". A signal that arrives during a database statement or network
+  call takes effect when it returns: allow a generous stop timeout.
+- **`--log-dir DIR`** on all three scripts puts the log file in `DIR`.
+  `adaudit.py` now writes a log file too, but only with `--log-dir`.
+- **`adaudit.py --no-excel`** skips the workbook; **`--report-dir DIR`** says
+  where it goes.
+- **`schema_setup.py`** creates the schema on an empty database or applies
+  the missing migrations in order, without `psql`: each file is applied
+  completely or not at all, and its recorded version is checked. Tested
+  against PostgreSQL 17: a fresh install and an upgrade from v46 produce
+  identical schemas. See `SETUP.md`, section 5.
+
+Upgrading: replace the scripts and add `schema_setup.py` (optional; the
+scripts do not need it to run).
+
 ### Secrets without a terminal (2026-11-05)
 
 adprofiler.py 1.0.7, entra_graph_collector.py 1.0.5, adaudit.py 1.0.6, new

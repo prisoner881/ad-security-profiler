@@ -4,7 +4,7 @@
  adprofiler.py -- Active Directory Security & Compliance Profiler (Collector)
 ================================================================================
 
-VERSION: 1.0.7
+VERSION: 1.0.8
 
 PURPOSE:
     Connects to an on-premise Active Directory Domain Controller via LDAP,
@@ -53,6 +53,8 @@ INPUT FORMAT (command line):
         --smb-host       Host for the SMB session. Default: --dc-host.
         --sysvol-max-script-files  Script files scanned per folder tree.
                          Default: 500.
+        --log-dir        [v1.0.8] Directory for the log file. Default: the
+                         current directory.
         --pg-port        PostgreSQL port. Default: 5432.
         --pg-dbname      PostgreSQL database. Default: adprofiler.
         --pg-password    PostgreSQL password. Prefer the environment
@@ -73,7 +75,7 @@ INPUT FORMAT (command line):
     Exit status: 0 success; 1 failed (nothing committed; the reason is
     logged); 75 not started because another adprofiler.py,
     entra_graph_collector.py or adaudit.py run holds the run lock
-    (run_lock.py); 130 interrupted (Ctrl-C).
+    (run_lock.py); 130 interrupted (Ctrl-C, or SIGTERM since v1.0.8).
 
     Example:
         python3 adprofiler.py --dc-host dc01.lab.local \\
@@ -125,7 +127,9 @@ DESIGN NOTES:
       scratch files.
     - Ctrl-C (SIGINT) is caught, the in-progress transaction is rolled
       back, the sync_run row is marked 'aborted', and the script exits
-      cleanly.
+      cleanly. [v1.0.8] SIGTERM (`docker stop`, systemd, a supervising
+      process) is handled the same way; it used to kill the process
+      outright and leave the sync_run row 'running'.
 
 ================================================================================
 """
@@ -190,7 +194,7 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
-VERSION = "1.0.7"
+VERSION = "1.0.8"
 
 # [v0.7.7] The oldest collector version whose stored derived fields
 # (parsed / typed columns computed from raw attributes) are current. A
@@ -793,13 +797,29 @@ def cleanup_temp_files():
 atexit.register(cleanup_temp_files)
 
 
+# [v1.0.8] Which signal interrupted the run, for the log and sync_run.
+INTERRUPTED_BY = "Ctrl-C"
+
+
 def handle_sigint(signum, frame):
+    """SIGINT (Ctrl-C) and, since v1.0.8, SIGTERM -- what `docker stop`, systemd
+    and a supervising process send -- roll the run back and exit 130. Without a
+    SIGTERM handler the process was killed outright, leaving its sync_run row
+    'running'. A repeated SIGTERM is ignored so the rollback can finish."""
+    global INTERRUPTED_BY
     sys.stdout.write("\n")
-    log_warn("Interrupt received (Ctrl-C). Rolling back and aborting cleanly...")
+    if signum == signal.SIGTERM:
+        INTERRUPTED_BY = "SIGTERM"
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        log_warn("Termination signal (SIGTERM) received. Rolling back and aborting cleanly...")
+    else:
+        INTERRUPTED_BY = "Ctrl-C"
+        log_warn("Interrupt received (Ctrl-C). Rolling back and aborting cleanly...")
     raise KeyboardInterrupt
 
 
 signal.signal(signal.SIGINT, handle_sigint)
+signal.signal(signal.SIGTERM, handle_sigint)
 
 
 # [v0.5.16] KEYCREDENTIALLINK_BLOB ([MS-ADTS] 2.2.20): parsed so plugins can
@@ -5395,6 +5415,10 @@ def parse_args():
                               "--smb-host must then be the DC's FQDN).")
     parser.add_argument("--smb-host", default=None,
                          help="Host for the SYSVOL SMB session. Default: --dc-host.")
+    parser.add_argument("--log-dir", default=".", metavar="DIR",
+                         help="[v1.0.8] Directory for the run's log file "
+                              "(adprofiler-results_<timestamp>.log); created if missing. "
+                              "Default: the current directory.")
     parser.add_argument("--sysvol-max-script-files", type=int, default=500,
                          help="Upper limit on script files scanned per folder tree "
                               "(each GPO's Scripts folder, NETLOGON). Default: 500.")
@@ -5437,7 +5461,15 @@ def main():
     # file in the current working directory. atexit guarantees the
     # file gets flushed and closed, and the real stdout restored, no
     # matter how main() below exits.
-    log_filename = f"adprofiler-results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    # [v1.0.8] --log-dir: where the log file goes (a supervising process keeps
+    # the logs of every run together, away from its working directory).
+    try:
+        os.makedirs(args.log_dir, exist_ok=True)
+    except OSError as exc:
+        print(f"ERROR: cannot create the log directory {args.log_dir}: {exc}")
+        sys.exit(1)
+    log_filename = os.path.join(
+        args.log_dir, f"adprofiler-results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
     log_fh = open(log_filename, "w", encoding="utf-8")  # [v1.0.5] not the locale encoding (Windows)
     real_stdout = sys.stdout
     sys.stdout = _TeeStream(real_stdout, log_fh)
@@ -6585,7 +6617,7 @@ def main():
 
     except KeyboardInterrupt:
         exit_code = 130
-        log_warn("Aborting due to Ctrl-C...")
+        log_warn(f"Aborting due to {INTERRUPTED_BY}...")
         if pg_conn is not None:
             try:
                 pg_conn.rollback()
@@ -6595,7 +6627,7 @@ def main():
             if run_id is not None:
                 try:
                     finalize_sync_run(pg_conn, run_id, "aborted",
-                                       failure_reason="Interrupted by user (Ctrl-C).")
+                                       failure_reason=f"Interrupted ({INTERRUPTED_BY}).")
                 except Exception as exc:
                     log_error(f"Could not finalize sync_run as aborted: {exc}")
 

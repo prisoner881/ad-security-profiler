@@ -9,6 +9,23 @@ the script's own docstring now keeps a one-line summary per entry, this
 file keeps the complete detail (root causes, what was verified, why a
 decision was made a particular way) for anyone who wants it.
 
+    1.0.8 - For running under a scheduler or container daemon:
+            - SIGTERM (what `docker stop`, systemd and a supervising process
+              send) is handled like Ctrl-C: the transaction is rolled back,
+              the sync_run row is marked 'aborted' ("Interrupted (SIGTERM)."),
+              exit 130. Without a handler the process was killed outright and
+              its sync_run row, committed separately at the start, stayed
+              'running'. A repeated SIGTERM is ignored so the rollback can
+              finish. A signal that arrives while a database statement or a
+              blocking LDAP call is running takes effect when it returns, so
+              a supervisor should allow a generous stop timeout.
+            - --log-dir DIR puts the log file in DIR (created if missing;
+              default: the current directory), so a supervisor can keep every
+              run's log together.
+            - New companion script schema_setup.py creates the schema on an
+              empty database or applies the missing migrations, without psql
+              (see SETUP.md). No schema change.
+
     1.0.7 - Secrets without a terminal (new module secret_input.py, shared
             with entra_graph_collector.py 1.0.5 and adaudit.py 1.0.6). The
             LDAP bind password (also used for the SYSVOL SMB session) is
