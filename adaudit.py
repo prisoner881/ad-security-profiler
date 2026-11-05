@@ -2,7 +2,7 @@
 """
 adaudit.py -- AD Security & Compliance Plugin Runner
 ======================================================
-VERSION: 1.0.7
+VERSION: 1.0.8
 
 Companion to adprofiler.py. Where adprofiler.py collects AD data,
 adaudit.py analyzes it: discovers every plugin file in plugins/, runs each
@@ -25,6 +25,22 @@ DESIGN:
       as: (status, object_guid, stig_severity, stig_reference,
       tool_severity, tool_reference, fd_severity, summary, detail).
       Zero rows returned = clean pass, nothing to report.
+    - [v1.0.8] Push authentication by activation key (the platform's
+      document 03). The key the client copies from the FortifyData portal
+      -- --activation-key, FD_ACTIVATION_KEY, or the file named by
+      FD_ACTIVATION_KEY_FILE (a mounted secret or /dev/fd/N) -- is checked
+      before anything is sent; it supplies the license key, sent as
+      "Authorization: LicenseKey <key>", the company id for the request
+      paths, and the environment that picks the API server (absent: us,
+      pending confirmation). --api-url / FD_API_URL still override the
+      server; --api-company-id / FD_COMPANY_ID, if set, must match the key.
+      A 401 (key unknown or malformed, or the integration switched off)
+      stops the push with a message saying so; the runs stay queued, exit
+      5. With the activation key, a 403 without a reason is a refusal, not
+      "waiting for approval" (that reading is kept for the older API key
+      only). The older API key still works, with a warning, until the
+      platform stops accepting it. An interactive run with no key now
+      prompts for the activation key.
     - [v1.0.7] For running under a scheduler or container daemon: SIGTERM
       (`docker stop`, systemd, a supervising process) is handled like
       Ctrl-C -- the evaluation run is marked aborted and never pushed,
@@ -273,8 +289,10 @@ USAGE:
     python3 adaudit.py --framework PCI-DSS-4.0 "SOC 2"  # only plugins tagged for these frameworks
     python3 adaudit.py --plugins-dir ./plugins   # override plugin location
     python3 adaudit.py --fail-on warn            # exit 4 if any open WARN/FAIL finding
-    python3 adaudit.py --push --api-url us --api-company-id 12 --api-key-file key.txt
+    FD_ACTIVATION_KEY_FILE=/run/secrets/fd_activation_key python3 adaudit.py --push
                                                  # evaluate, then push unpushed runs
+    python3 adaudit.py --push --api-url us --api-company-id 12 --api-key-file key.txt
+                                                 # the same with the older API key
     python3 adaudit.py --push-only               # push the backlog, evaluate nothing
     python3 adaudit.py --push --push-dry-run out/  # write the payloads, send nothing
     python3 adaudit.py --push --no-excel --log-dir /data/logs  # unattended: log file, no workbook
@@ -310,7 +328,6 @@ EXIT STATUS ([v0.7.3]; always 0 before):
 import sys
 import argparse
 import atexit
-import getpass
 import importlib.util
 import signal
 import re
@@ -326,7 +343,7 @@ import adaudit_push
 import run_lock  # [v1.0.2] one run at a time, see run_lock.py
 import secret_input  # [v1.0.6] secrets from the environment, a file or a prompt
 
-VERSION = "1.0.7"
+VERSION = "1.0.8"
 
 # [test-candidate-branch] Always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
@@ -1711,33 +1728,99 @@ def write_excel_report(plugin_summaries, all_findings, inventory_results, filena
 # ============================================================================
 
 def resolve_push_config(args, parser):
-    """[v0.10.0] None when no push was asked for. Credentials come from the
-    options, then the environment (FD_API_URL, FD_COMPANY_ID, FD_API_KEY),
-    then for the key a file, then an interactive prompt. A dry run needs
-    none of them."""
+    """[v0.10.0] None when no push was asked for.
+
+    [v1.0.8] Credentials, first match wins:
+      - the activation key from the FortifyData portal: --activation-key,
+        FD_ACTIVATION_KEY or the file named by FD_ACTIVATION_KEY_FILE
+        (secret_input.py). It carries the license key (sent as
+        "Authorization: LicenseKey"), the company id and the environment,
+        which picks the API server. --api-url / FD_API_URL still override
+        the server (testing against a local mock); --api-company-id /
+        FD_COMPANY_ID, if given, must match the key's company.
+      - the older API key (--api-key, FD_API_KEY, --api-key-file), with
+        --api-url and --api-company-id as before, until the platform stops
+        accepting it; a warning says so.
+      - neither: an interactive run prompts for the activation key; an
+        unattended one stops with a message.
+    A dry run needs no credentials; an activation key given to a dry run
+    is still checked and supplies the company id and server."""
     pushing = args.push or args.push_only or args.push_run is not None
     if args.push_dry_run and not pushing:
         parser.error("--push-dry-run needs --push, --push-only or --push-run")
     if not pushing:
         return None
-    url = args.api_url or os.environ.get("FD_API_URL")
-    url = adaudit_push.API_SERVERS.get((url or "").lower(), url)
+
+    url_override = args.api_url or os.environ.get("FD_API_URL")
+    url_override = adaudit_push.API_SERVERS.get((url_override or "").lower(), url_override)
     company = args.api_company_id
     if company is None and os.environ.get("FD_COMPANY_ID"):
         try:
             company = int(os.environ["FD_COMPANY_ID"])
         except ValueError:
             parser.error("FD_COMPANY_ID must be an integer")
+
+    activation_given = bool(args.activation_key or os.environ.get("FD_ACTIVATION_KEY")
+                            or os.environ.get("FD_ACTIVATION_KEY_FILE"))
+    api_key_given = bool(args.api_key or os.environ.get("FD_API_KEY") or args.api_key_file)
+    if activation_given and api_key_given:
+        parser.error("give either the activation key (--activation-key, FD_ACTIVATION_KEY, "
+                     "FD_ACTIVATION_KEY_FILE) or the older API key (--api-key, FD_API_KEY, "
+                     "--api-key-file), not both")
+
+    def check_url(url):
+        if not (url.startswith("https://")
+                or re.match(r"http://(localhost|127\.0\.0\.1)(:\d+)?(/|$)", url)):
+            parser.error("the API URL must be https:// (or test / us / eu); plain http is only "
+                         "accepted for localhost, for testing against a local mock")
+
+    common = {"dry_run_dir": args.push_dry_run, "gzip": not args.no_gzip,
+              "timeout": args.api_timeout}
+
+    # --- activation key (license) ----------------------------------------
+    if activation_given or (not api_key_given and not args.push_dry_run):
+        try:
+            text, source = secret_input.resolve_secret(
+                "FortifyData activation key", args.activation_key, "--activation-key",
+                "FD_ACTIVATION_KEY", "FortifyData activation key (from the portal): ")
+        except secret_input.SecretUnavailable as exc:
+            parser.error(f"pushing needs the activation key: {exc}")
+        if source == secret_input.FROM_OPTION:
+            print("[WARN] " + secret_input.option_warning("Activation key", "--activation-key",
+                                                          "FD_ACTIVATION_KEY"))
+        try:
+            lic = adaudit_push.parse_activation_key(text)
+        except adaudit_push.LicenseKeyError as exc:
+            parser.error(f"the activation key is not usable: {exc}. Copy it again from the "
+                         f"FortifyData portal")
+        if company is not None and company != lic.company_id:
+            parser.error(f"--api-company-id / FD_COMPANY_ID ({company}) does not match the "
+                         f"activation key's company ({lic.company_id}); omit it")
+        url = url_override or adaudit_push.API_SERVERS[lic.environment_or_default]
+        check_url(url)
+        log(f"Push: activation key for company {lic.company_id}, environment "
+            f"{lic.environment_or_default}"
+            + ("" if lic.environment else " (default)")
+            + f" -> {url}"
+            + (" (overridden by --api-url / FD_API_URL)" if url_override else "")
+            + f"; key from the {secret_input.describe_source(source, '--activation-key', 'FD_ACTIVATION_KEY')}.")
+        return dict(common, url=url, company_id=lic.company_id, key=lic.license_key,
+                    auth_scheme="LicenseKey")
+
+    # --- dry run without credentials -------------------------------------
+    if args.push_dry_run and not api_key_given:
+        return dict(common, url=url_override or "https://dry-run.invalid",
+                    company_id=company or 0, key=None, auth_scheme="LicenseKey")
+
+    # --- older API key -----------------------------------------------------
+    url = url_override
     if args.push_dry_run:
-        return {"url": url or "https://dry-run.invalid", "company_id": company or 0, "key": None,
-                "dry_run_dir": args.push_dry_run, "gzip": not args.no_gzip,
-                "timeout": args.api_timeout}
+        return dict(common, url=url or "https://dry-run.invalid", company_id=company or 0,
+                    key=None, auth_scheme="ApiKey")
     if not url or company is None:
-        parser.error("pushing needs --api-url (or FD_API_URL) and --api-company-id "
-                     "(or FD_COMPANY_ID)")
-    if not (url.startswith("https://") or re.match(r"http://(localhost|127\.0\.0\.1)(:\d+)?(/|$)", url)):
-        parser.error("--api-url must be https:// (or test / us / eu); plain http is only "
-                     "accepted for localhost, for testing against a local mock")
+        parser.error("pushing with an API key needs --api-url (or FD_API_URL) and "
+                     "--api-company-id (or FD_COMPANY_ID)")
+    check_url(url)
     key = None
     if args.api_key:
         print("[WARN] API key supplied via --api-key is visible in shell history and process "
@@ -1750,16 +1833,13 @@ def resolve_push_config(args, parser):
             key = args.api_key_file.read_text(encoding="utf-8").splitlines()[0].strip()
         except (OSError, IndexError) as exc:
             parser.error(f"cannot read the API key from {args.api_key_file}: {exc}")
-    elif sys.stdin.isatty():
-        key = getpass.getpass(f"FortifyData API key for company {company}: ").strip()
     if not key:
-        parser.error("pushing needs an API key: --api-key, FD_API_KEY, --api-key-file, or "
-                     "run interactively to be prompted")
+        parser.error("the API key is empty")
     if key.lower().startswith("apikey "):
         key = key[7:].strip()
-    return {"url": url, "company_id": company, "key": key, "dry_run_dir": None,
-            "gzip": not args.no_gzip, "timeout": args.api_timeout}
-
+    print("[WARN] Pushing with the older API key. The FortifyData platform is moving to the "
+          "activation key from the portal (FD_ACTIVATION_KEY or FD_ACTIVATION_KEY_FILE).")
+    return dict(common, url=url, company_id=company, key=key, auth_scheme="ApiKey")
 
 def run_push(conn, client_id, sync_run_id, push_cfg, all_plugins, inventory_results, only_run_id):
     """[v0.10.0] Pushes unpushed runs (or one run). Returns False when the
@@ -1782,7 +1862,8 @@ def run_push(conn, client_id, sync_run_id, push_cfg, all_plugins, inventory_resu
     try:
         api = adaudit_push.ApiClient(push_cfg["url"], push_cfg["company_id"], push_cfg["key"], log,
                                      compress=push_cfg["gzip"], timeout=push_cfg["timeout"],
-                                     dry_run_dir=push_cfg["dry_run_dir"])
+                                     dry_run_dir=push_cfg["dry_run_dir"],
+                                     auth_scheme=push_cfg["auth_scheme"])
         pushed, waiting = adaudit_push.push_runs(conn, client_id, api, all_plugins,
                                                  inventory_provider, VERSION, log, only_run_id)
     except ImportError as exc:
@@ -1850,9 +1931,15 @@ def main():
                               "prompted; an option is visible in process listings.")
     push = parser.add_argument_group(
         "pushing results to FortifyData",
-        "Credentials can be given as options, environment variables (FD_API_URL, "
-        "FD_COMPANY_ID, FD_API_KEY) or, for the key, a file; a missing key is prompted for "
-        "when running interactively.")
+        "The activation key from the FortifyData portal carries the license, company id and "
+        "server: give it as FD_ACTIVATION_KEY or FD_ACTIVATION_KEY_FILE (or --activation-key); "
+        "a missing key is prompted for when running interactively. The older API key "
+        "(--api-key / FD_API_KEY / --api-key-file with --api-url and --api-company-id) is "
+        "still accepted for now.")
+    push.add_argument("--activation-key", default=None,
+                      help="[v1.0.8] Activation key from the FortifyData portal. Visible in "
+                           "process listings: prefer FD_ACTIVATION_KEY or "
+                           "FD_ACTIVATION_KEY_FILE.")
     push.add_argument("--push", action="store_true",
                       help="After evaluating, push every complete run not yet accepted by the "
                            "API, oldest first (this run included).")
