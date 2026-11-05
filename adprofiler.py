@@ -4,7 +4,7 @@
  adprofiler.py -- Active Directory Security & Compliance Profiler (Collector)
 ================================================================================
 
-VERSION: 1.0.6
+VERSION: 1.0.7
 
 PURPOSE:
     Connects to an on-premise Active Directory Domain Controller via LDAP,
@@ -32,9 +32,9 @@ INPUT FORMAT (command line):
         --pg-user       PostgreSQL username.
 
     Optional:
-        --password      Bind password. If omitted, you will be prompted
-                         securely (recommended -- avoids the password
-                         appearing in shell history or `ps` output).
+        --password      Bind password. Prefer the environment (below) or
+                         the prompt: an option appears in shell history
+                         and `ps` output.
         --port           LDAP port. Default: 389 (or 636 if --ssl is set).
         --ssl            Use LDAPS (TLS) instead of plaintext LDAP.
         --ca-cert        [v1.0.5] With --ssl, verify the DC's certificate
@@ -55,9 +55,20 @@ INPUT FORMAT (command line):
                          Default: 500.
         --pg-port        PostgreSQL port. Default: 5432.
         --pg-dbname      PostgreSQL database. Default: adprofiler.
-        --pg-password    PostgreSQL password. If omitted, you will be
-                         prompted securely.
+        --pg-password    PostgreSQL password. Prefer the environment
+                         (below) or the prompt.
         --version        Print version and exit.
+
+    Secrets without a terminal [v1.0.7] (secret_input.py): each secret is
+    taken from its option, else its environment variable, else the file
+    named by <variable>_FILE (first line; a mounted Docker/Kubernetes
+    secret, or /dev/fd/N for a pipe from a supervising process), else a
+    hidden prompt when there is a terminal:
+        AD_BIND_PASSWORD / AD_BIND_PASSWORD_FILE   LDAP (and SMB) bind password
+        PGPASSWORD / PGPASSWORD_FILE               PostgreSQL password
+    Without a terminal, a missing bind password stops the run (exit 1); a
+    missing PostgreSQL password leaves it to libpq (~/.pgpass, PGPASSFILE,
+    or a password-less method).
 
     Exit status: 0 success; 1 failed (nothing committed; the reason is
     logged); 75 not started because another adprofiler.py,
@@ -122,7 +133,6 @@ DESIGN NOTES:
 import sys
 import os
 import argparse
-import getpass
 import signal
 import atexit
 import struct
@@ -161,6 +171,7 @@ except ImportError:
     sys.exit(1)
 
 import run_lock  # [v1.0.2] one run at a time, see run_lock.py
+import secret_input  # [v1.0.7] secrets from the environment, a file or a prompt
 
 try:
     # [v0.3.0] Security descriptor (ACL) parsing. Same library BloodHound.py
@@ -179,7 +190,7 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
-VERSION = "1.0.6"
+VERSION = "1.0.7"
 
 # [v0.7.7] The oldest collector version whose stored derived fields
 # (parsed / typed columns computed from raw attributes) are current. A
@@ -721,6 +732,28 @@ def log_warn(msg):
 
 def log_error(msg):
     print(f"{_C.DIM}[{_ts()}]{_C.RESET} {_C.RED}[FAIL]{_C.RESET}    {msg}")
+
+
+def get_secret(what, option_value, option_name, env_var, prompt, required=True):
+    """[v1.0.7] A secret from the command-line option, the environment
+    variable, the file named by <env_var>_FILE, or an interactive prompt --
+    see secret_input.py. Logs where it came from (never the value); exits 1
+    with the reason when a required secret cannot be obtained, e.g. no
+    terminal to prompt on."""
+    try:
+        value, source = secret_input.resolve_secret(what, option_value, option_name, env_var,
+                                                    prompt, required=required)
+    except secret_input.SecretUnavailable as exc:
+        log_error(f"Cannot start: {exc}.")
+        sys.exit(1)
+    if source == secret_input.FROM_OPTION:
+        log_warn(secret_input.option_warning(what, option_name, env_var))
+    elif source in (secret_input.FROM_ENV, secret_input.FROM_FILE):
+        log_info(f"{what}: from the {secret_input.describe_source(source, option_name, env_var)}.")
+    elif source == secret_input.NOT_GIVEN:
+        log_info(f"{what}: none given; libpq will use ~/.pgpass, PGPASSFILE or a "
+                 f"password-less authentication method.")
+    return value
 
 
 def log_header(msg):
@@ -5326,8 +5359,9 @@ def parse_args():
                          help="Bind account (UPN or DOMAIN\\user). "
                               "Required unless --version is given.")
     parser.add_argument("--password", default=None,
-                         help="Bind password. If omitted, you will be prompted "
-                              "securely (recommended).")
+                         help="Bind password. Prefer the AD_BIND_PASSWORD or "
+                              "AD_BIND_PASSWORD_FILE environment variable, or omit it "
+                              "to be prompted; an option is visible in process listings.")
     parser.add_argument("--port", type=int, default=None,
                          help="LDAP port. Default: 389, or 636 if --ssl is set.")
     parser.add_argument("--ssl", action="store_true",
@@ -5375,8 +5409,9 @@ def parse_args():
     parser.add_argument("--pg-user", default=None,
                          help="PostgreSQL username. Required unless --version is given.")
     parser.add_argument("--pg-password", default=None,
-                         help="PostgreSQL password. If omitted, you will be prompted "
-                              "securely (recommended).")
+                         help="PostgreSQL password. Prefer the PGPASSWORD or "
+                              "PGPASSWORD_FILE environment variable, or omit it to be "
+                              "prompted; an option is visible in process listings.")
     args = parser.parse_args()
 
     if not args.version and (not args.dc_host or not args.username):
@@ -5423,13 +5458,13 @@ def main():
     PG_PORT = args.pg_port
     PG_DBNAME = args.pg_dbname
     PG_USER = args.pg_user
-    if args.pg_password:
-        log_warn("PostgreSQL password supplied via --pg-password is visible in "
-                  "shell history and process listings. Prefer omitting it and "
-                  "entering it at the secure prompt.")
-        PG_PASSWORD = args.pg_password
-    else:
-        PG_PASSWORD = getpass.getpass(f"PostgreSQL password for {args.pg_user}@{args.pg_host}: ")
+    # [v1.0.7] --pg-password, PGPASSWORD, PGPASSWORD_FILE, then the prompt
+    # (secret_input.py); without a terminal and without any of them, None:
+    # libpq then uses ~/.pgpass, PGPASSFILE or password-less authentication.
+    PG_PASSWORD = get_secret("PostgreSQL password", args.pg_password, "--pg-password",
+                             "PGPASSWORD",
+                             f"PostgreSQL password for {args.pg_user}@{args.pg_host}: ",
+                             required=False)
 
     # [v1.0.2] Never alongside another adprofiler.py, entra_graph_collector.py
     # or adaudit.py run against this database (run_lock.py). Taken before
@@ -5445,13 +5480,10 @@ def main():
         sys.exit(1)
     log_info("Run lock acquired (no other collector or adaudit.py run in progress).")
 
-    if args.password:
-        log_warn("Password supplied via --password is visible in shell history "
-                  "and process listings. Prefer omitting it and entering it "
-                  "at the secure prompt.")
-        password = args.password
-    else:
-        password = getpass.getpass(f"LDAP password for {args.username}: ")
+    # [v1.0.7] --password, AD_BIND_PASSWORD, AD_BIND_PASSWORD_FILE, then the
+    # prompt (secret_input.py). Also used for the SYSVOL (SMB) session.
+    password = get_secret("LDAP bind password", args.password, "--password",
+                          "AD_BIND_PASSWORD", f"LDAP password for {args.username}: ")
 
     port = args.port or (636 if args.ssl else 389)
 

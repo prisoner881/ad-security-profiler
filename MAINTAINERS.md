@@ -6,6 +6,7 @@ This file lists the people responsible for **ad-security-profiler** and explains
 - `entra_graph_collector.py`, the Entra ID collector
 - `adaudit.py`, the plugin runner and report writer, with `adaudit_push.py` (push to the FortifyData API)
 - `run_lock.py`, the run lock shared by the three scripts
+- `secret_input.py`, how the three scripts read passwords and secrets
 - the finding plugins in `plugins/`
 - the PostgreSQL schema (`schema_init.sql` and the `schema_migration_vNN.sql` files)
 
@@ -24,7 +25,7 @@ Each area lists the files it covers. Any change to an area needs approval from o
 | AD collector | `adprofiler.py`, `sysvol_collector.py`, `changelog.txt` | @prisoner881 |
 | Entra ID collector | `entra_graph_collector.py` | @prisoner881 |
 | Plugin runner and reporting | `adaudit.py`, `adaudit_push.py` | @prisoner881 |
-| Run lock | `run_lock.py` | @prisoner881 |
+| Run lock and secret input | `run_lock.py`, `secret_input.py` | @prisoner881 |
 | Finding and inventory plugins | `plugins/`, `COMPLIANCE_TAGS.md` | @prisoner881 |
 | Database schema | `schema_init.sql`, `schema_migration_v*.sql` | @prisoner881 |
 | Documentation | `SETUP.md`, `RELEASE_NOTES.md`, `MAINTAINERS.md` | @prisoner881 |
@@ -74,6 +75,7 @@ Maintainers check pull requests against these conventions.
 - **Collection safety:**
   - Collectors only read; they never write to Active Directory or Entra ID.
   - Secrets are never stored. That includes passwords, LAPS and gMSA passwords, KDS root keys and the AD FS DKM key.
+  - Secrets the scripts need are read through `secret_input.py` (option, environment variable, `_FILE`, prompt) and are never logged.
   - New optional reads must not stop a run when they fail.
 
 ## Reporting security issues

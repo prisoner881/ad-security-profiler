@@ -2,7 +2,7 @@
 """
 adaudit.py -- AD Security & Compliance Plugin Runner
 ======================================================
-VERSION: 1.0.5
+VERSION: 1.0.6
 
 Companion to adprofiler.py. Where adprofiler.py collects AD data,
 adaudit.py analyzes it: discovers every plugin file in plugins/, runs each
@@ -25,6 +25,17 @@ DESIGN:
       as: (status, object_guid, stig_severity, stig_reference,
       tool_severity, tool_reference, fd_severity, summary, detail).
       Zero rows returned = clean pass, nothing to report.
+    - [v1.0.6] Secrets without a terminal (secret_input.py). The
+      PostgreSQL password is taken from --pg-password, else PGPASSWORD,
+      else the file named by PGPASSWORD_FILE (first line; a mounted Docker
+      or Kubernetes secret, or /dev/fd/N for a pipe from a supervising
+      process), else a hidden prompt when there is a terminal; with none of
+      them and no terminal, libpq is left to use ~/.pgpass, PGPASSFILE or a
+      password-less method (getpass raised EOFError). PGPASSWORD was
+      ignored before: the script always prompted. The FortifyData API key
+      is unchanged (--api-key, FD_API_KEY, --api-key-file -- which also
+      accepts /dev/fd/N -- or the prompt). Where each secret came from is
+      printed, never the value.
     - [v1.0.5] A finding whose STIG or tool reference changed gets a new
       version (it kept the reference it was first recorded with). Push: a
       finding that was fixed and came back is sent with the date it came
@@ -259,8 +270,9 @@ USAGE:
 EXIT STATUS ([v0.7.3]; always 0 before):
     0   Run completed and every selected plugin ran.
     1   Fatal error: no database connection, no successful collection
-        run to analyze, the Excel report couldn't be written, or an
-        unexpected error. Results are missing or unusable.
+        run to analyze, the Excel report couldn't be written, a secret
+        file that can't be read (or PGPASSWORD and PGPASSWORD_FILE both
+        set), or an unexpected error. Results are missing or unusable.
     2   Command-line usage error (argparse's own convention).
     3   Run completed, but INCOMPLETE: at least one plugin failed to
         load, a finding plugin's query or evidence write failed, or an
@@ -298,8 +310,9 @@ import psycopg2.extras
 
 import adaudit_push
 import run_lock  # [v1.0.2] one run at a time, see run_lock.py
+import secret_input  # [v1.0.6] secrets from the environment, a file or a prompt
 
-VERSION = "1.0.5"
+VERSION = "1.0.6"
 
 # [test-candidate-branch] Always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
@@ -1768,8 +1781,9 @@ def main():
     parser.add_argument("--pg-user", default=None,
                          help="PostgreSQL username. Required unless --version is given.")
     parser.add_argument("--pg-password", default=None,
-                         help="PostgreSQL password. If omitted, you will be prompted "
-                              "securely (recommended).")
+                         help="PostgreSQL password. Prefer the PGPASSWORD or "
+                              "PGPASSWORD_FILE environment variable, or omit it to be "
+                              "prompted; an option is visible in process listings.")
     push = parser.add_argument_group(
         "pushing results to FortifyData",
         "Credentials can be given as options, environment variables (FD_API_URL, "
@@ -1819,13 +1833,25 @@ def main():
     PG_PORT = args.pg_port
     PG_DBNAME = args.pg_dbname
     PG_USER = args.pg_user
-    if args.pg_password:
-        print("[WARN] PostgreSQL password supplied via --pg-password is visible in "
-              "shell history and process listings. Prefer omitting it and entering "
-              "it at the secure prompt.")
-        PG_PASSWORD = args.pg_password
-    else:
-        PG_PASSWORD = getpass.getpass(f"PostgreSQL password for {args.pg_user}@{args.pg_host}: ")
+    # [v1.0.6] --pg-password, PGPASSWORD, PGPASSWORD_FILE, then the prompt
+    # (secret_input.py); without a terminal and without any of them, None:
+    # libpq then uses ~/.pgpass, PGPASSFILE or password-less authentication.
+    try:
+        PG_PASSWORD, pg_source = secret_input.resolve_secret(
+            "PostgreSQL password", args.pg_password, "--pg-password", "PGPASSWORD",
+            f"PostgreSQL password for {args.pg_user}@{args.pg_host}: ", required=False)
+    except secret_input.SecretUnavailable as exc:
+        log(f"[ERROR] Cannot start: {exc}.")
+        return EXIT_FATAL
+    if pg_source == secret_input.FROM_OPTION:
+        print("[WARN] " + secret_input.option_warning("PostgreSQL password", "--pg-password",
+                                                      "PGPASSWORD"))
+    elif pg_source in (secret_input.FROM_ENV, secret_input.FROM_FILE):
+        log("PostgreSQL password: from the "
+            + secret_input.describe_source(pg_source, "--pg-password", "PGPASSWORD") + ".")
+    elif pg_source == secret_input.NOT_GIVEN:
+        log("PostgreSQL password: none given; libpq will use ~/.pgpass, PGPASSFILE or a "
+            "password-less authentication method.")
 
     # [v1.0.2] Never alongside adprofiler.py, entra_graph_collector.py or
     # another adaudit.py run against this database (run_lock.py). Held until
