@@ -36,6 +36,8 @@ USB drive, secure file transfer, etc.):
 - `run_lock.py` (used by all three scripts: one run at a time)
 - `secret_input.py` (used by all three scripts: passwords and secrets
   from the environment, a file or a prompt)
+- `schema_setup.py` (optional: creates or upgrades the database schema
+  without `psql`, see section 5)
 - `requirements.txt`
 - `schema_init.sql`
 - `RELEASE_NOTES.md`
@@ -54,6 +56,7 @@ adprofiler/
     adaudit_push.py
     run_lock.py
     secret_input.py
+    schema_setup.py
     requirements.txt
     schema_init.sql
     RELEASE_NOTES.md
@@ -106,6 +109,28 @@ This is a one-time step per database -- it creates every table,
 function, and index all three scripts need. You'll be prompted for the
 PostgreSQL password unless it's already set via `PGPASSWORD` or a
 `.pgpass` file.
+
+**Alternatively, without `psql`** (and the way an unattended setup does
+it), run `schema_setup.py` from the same directory as the schema files:
+
+```
+python3 schema_setup.py --pg-host <your-postgres-host> --pg-user <your-postgres-user> \
+    --pg-dbname <your-database-name>
+```
+
+On an empty database it applies `schema_init.sql`; on an existing one it
+applies every `schema_migration_vNN.sql` the database does not have yet, in
+order; on a current one it does nothing. Each file is applied completely or
+not at all, and the script checks that it recorded its version. It refuses
+PostgreSQL older than 17, a database older than schema v31 (no version
+history), a database newer than the files, and an incomplete set of files.
+Run it as the role that owns the schema. `--check` reports what it would do
+and changes nothing (exit status `3` when something needs doing). It takes
+the run lock, so no collection runs while the schema changes. Exit status:
+`0` current, `1` failed (the message says why and which version the database
+is at), `3` (with `--check`) setup needed, `75` run lock held, `130`
+interrupted. The PostgreSQL password comes from the same places as for the
+other scripts (section 7, "Passwords and secrets without a terminal").
 
 ## 6. What you'll need before running anything
 
@@ -370,6 +395,27 @@ long time; every network request has its own timeout and retries, so a
 dead domain controller or Graph endpoint ends in a non-zero exit rather
 than a hang.
 
+For a supervising process or container (adprofiler.py 1.0.8,
+entra_graph_collector.py 1.0.6, adaudit.py 1.0.7):
+
+- **Stopping a run:** SIGTERM (what `docker stop` and systemd send) is
+  handled like Ctrl-C: the run is rolled back or marked aborted and the
+  script exits `130`. A signal that arrives while a database statement or a
+  network call is running takes effect when it returns, so allow a generous
+  stop timeout (for example `stop_grace_period: 5m` in Docker Compose, or
+  `TimeoutStopSec=300` in systemd); a process killed outright leaves its run
+  marked as running.
+- **Logs:** `--log-dir DIR` puts each run's log file in `DIR` (created if
+  missing). `adprofiler.py` and `entra_graph_collector.py` always write one
+  (default: the current directory); `adaudit.py` writes
+  `adaudit-results_<timestamp>.log` only with `--log-dir`. The log files are
+  never deleted by the scripts.
+- **Workbook:** `adaudit.py --no-excel` skips the Excel workbook (the
+  console report, the findings history and the push are unchanged);
+  `--report-dir DIR` says where it goes otherwise.
+- **Schema:** `schema_setup.py` (section 5) brings the database to the
+  scripts' schema version before a run.
+
 **Passwords and secrets without a terminal** (adprofiler.py 1.0.7,
 entra_graph_collector.py 1.0.5, adaudit.py 1.0.6): a scheduler, a container
 or a supervising process has no terminal to prompt on, and command-line
@@ -526,7 +572,8 @@ troubleshooting if anything looked wrong during collection.
   normal after updating `adprofiler.py` without also updating the
   database. The message itself tells you exactly which
   `schema_migration_vNN.sql` file(s) to apply, by number, against your
-  *existing* database. Never re-run `schema_init.sql` against a
+  *existing* database (or run `schema_setup.py`, which applies them in
+  order for you). Never re-run `schema_init.sql` against a
   database that already has data in it -- that file is for a
   brand-new, empty database only, and can fail or leave things in a
   mixed state against one that isn't.

@@ -2,9 +2,16 @@
 """
 entra_graph_collector.py -- Microsoft Entra ID / Graph API Email Collector
 
-VERSION: 1.0.5
+VERSION: 1.0.6
 
 CHANGELOG:
+    1.0.6 - For running under a scheduler or container daemon: SIGTERM (what
+            `docker stop`, systemd and a supervising process send) is handled
+            like Ctrl-C -- the partial-run report says which tables were
+            refreshed, exit 130 -- instead of killing the process outright.
+            New --log-dir DIR puts the log file there (created if missing;
+            default: the current directory).
+
     1.0.5 - Secrets without a terminal (secret_input.py). The client secret
             is taken from --app-secret, else ENTRA_APP_SECRET, else the file
             named by ENTRA_APP_SECRET_FILE (first line; a mounted Docker or
@@ -307,8 +314,10 @@ import base64
 import hashlib
 import email.utils
 import json
+import os
 import random
 import re
+import signal
 import sys
 import time
 import uuid
@@ -332,7 +341,7 @@ PG_DBNAME = "adprofiler"
 PG_USER = None
 PG_PASSWORD = None
 
-VERSION = "1.0.5"
+VERSION = "1.0.6"
 
 # [v0.5.0] Retry policy shared by every Graph/token request (see
 # _send_with_retry()). 429 and transient 5xx responses, plus network
@@ -730,6 +739,27 @@ def get_secret(what, option_value, option_name, env_var, prompt, required=True):
         log_info(f"{what}: none given; libpq will use ~/.pgpass, PGPASSFILE or a "
                  f"password-less authentication method.")
     return value
+
+
+# [v1.0.6] Which signal interrupted the run, for the log.
+INTERRUPTED_BY = "Ctrl-C"
+
+
+def handle_sigterm(signum, frame):
+    """[v1.0.6] SIGTERM -- what `docker stop`, systemd and a supervising process
+    send -- is handled like Ctrl-C: the step in progress is abandoned, the
+    partial-run report says which tables were refreshed, exit 130. It used to
+    kill the process outright with no report. A repeated SIGTERM is ignored so
+    the report can be written."""
+    global INTERRUPTED_BY
+    INTERRUPTED_BY = "SIGTERM"
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    sys.stdout.write("\n")
+    log_warn("Termination signal (SIGTERM) received. Stopping...")
+    raise KeyboardInterrupt
+
+
+signal.signal(signal.SIGTERM, handle_sigterm)
 
 
 def log_header(msg):
@@ -3726,6 +3756,10 @@ def parse_args():
                               "Needs OnPremisesPublishingProfiles.ReadWrite.All -- Microsoft "
                               "offers no read-only permission for this read, so it is off by "
                               "default; this collector still only reads with it.")
+    parser.add_argument("--log-dir", default=".", metavar="DIR",
+                         help="[v1.0.6] Directory for the run's log file "
+                              "(entra-graph-collector-results_<timestamp>.log); created if "
+                              "missing. Default: the current directory.")
     parser.add_argument("--version", action="store_true", help="Print version and exit.")
     parser.add_argument("--pg-host", default=None,
                          help="PostgreSQL server hostname or IP. Required unless --version is given.")
@@ -3837,7 +3871,15 @@ def main():
 
     # [test-candidate-branch] Same reasoning as adprofiler.py's identical
     # addition -- see that script's main() for the full comment.
-    log_filename = f"entra-graph-collector-results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    # [v1.0.6] --log-dir: where the log file goes.
+    try:
+        os.makedirs(args.log_dir, exist_ok=True)
+    except OSError as exc:
+        print(f"ERROR: cannot create the log directory {args.log_dir}: {exc}")
+        sys.exit(1)
+    log_filename = os.path.join(
+        args.log_dir,
+        f"entra-graph-collector-results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
     log_fh = open(log_filename, "w", encoding="utf-8")  # [v1.0.4] not the locale encoding (Windows)
     real_stdout = sys.stdout
     sys.stdout = _TeeStream(real_stdout, log_fh)
@@ -4009,7 +4051,7 @@ def main():
         log_partial_run(completed_steps)
         sys.exit(1)
     except KeyboardInterrupt:
-        log_warn("Aborting due to Ctrl-C...")
+        log_warn(f"Aborting due to {INTERRUPTED_BY}...")
         log_partial_run(completed_steps)
         sys.exit(130)
     except Exception:
