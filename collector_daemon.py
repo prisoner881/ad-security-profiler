@@ -2,7 +2,7 @@
 collector_daemon.py -- runs the AD/Entra collection, evaluation and push
 every day, unattended, and reports its health
 ==============================================================================
-VERSION: 1.0.3
+VERSION: 1.0.4
 
 The long-running process of a client installation. It starts, and from then
 on never exits by itself: it is stopped (SIGTERM, e.g. `docker stop`) or the
@@ -78,6 +78,12 @@ it exits on its own. A wrong AD or Entra setting is not one of them: the
 daemon keeps running, reports it and retries.
 
 CHANGELOG:
+    1.0.4  Schema migrations that need a full rescan (schema_setup.py 1.2,
+           "-- adprofiler: full-rescan" in a migration's header): schema_setup
+           records it in <state_dir>/full_rescan_needed, the next adprofiler.py
+           run gets --full-rescan, and the file is removed once that run
+           succeeds -- one rescan however many such migrations were applied
+           (a client skipping several updates).
     1.0.3  No change of its own: the version of the collector image, whose
            schema_setup.py (1.1) no longer ships migration files up to v50.
     1.0.2  A failed Entra collection no longer blocks the evaluation and
@@ -121,7 +127,7 @@ from pathlib import Path
 import platform_client as pc
 import secret_input
 
-VERSION = "1.0.3"
+VERSION = "1.0.4"
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -176,6 +182,7 @@ LOCK_FILE = "daemon.lock"
 FINGERPRINT_KEY_FILE = "fingerprint.key"
 INSTANCE_FILE = "instance_id"
 CA_CERT_FILE = "ldaps_ca.pem"
+RESCAN_FILE = "full_rescan_needed"
 # Only these files are pruned: what the scripts write to --log-dir and
 # --report-dir. Anything else in those directories is left alone.
 PRUNED_PATTERNS = ("*-results_*.log", "adaudit-findings_*.xlsx")
@@ -1127,7 +1134,9 @@ class Daemon:
             return None
 
         # 1. Schema
-        result = step("schema_setup", self.db_args(), db_secrets)
+        rescan_file = self.s.state_dir / RESCAN_FILE
+        result = step("schema_setup", self.db_args() + ["--rescan-file", str(rescan_file)],
+                      db_secrets)
         if (end := stopped_or_locked(result)) is not None:
             return end
         if result.rc != RC_OK:
@@ -1135,12 +1144,22 @@ class Daemon:
 
         # 2. AD
         collection_failed = None
-        result = step("adprofiler", self.adprofiler_args(cfg) + self.db_args(),
+        rescan = rescan_file.exists()
+        if rescan:
+            self.log.info("A schema migration asked for a full rescan: this collection runs "
+                          "with --full-rescan")
+        result = step("adprofiler", self.adprofiler_args(cfg) + self.db_args()
+                      + (["--full-rescan"] if rescan else []),
                       dict(db_secrets, AD_BIND_PASSWORD=cfg.ad.password))
         if (end := stopped_or_locked(result)) is not None:
             return end
         if result.rc != RC_OK:
             collection_failed = f"adprofiler failed: {result.summary}"
+        elif rescan:
+            try:
+                rescan_file.unlink()
+            except OSError as exc:
+                self.log.warning(f"Cannot remove {rescan_file}: {exc}")
 
         # 3. Entra. [1.0.2] A failure no longer blocks the evaluation of the
         # AD data: adaudit.py --skip-entra then shows the Entra checks as NOT

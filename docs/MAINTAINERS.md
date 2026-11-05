@@ -8,7 +8,7 @@ This file lists the people responsible for **ad-security-profiler** and explains
 - `run_lock.py`, the run lock shared by the three scripts
 - `secret_input.py`, how the three scripts read passwords and secrets
 - the finding plugins in `plugins/`
-- the PostgreSQL schema (`schema_init.sql`, and from v51 on the `schema_migration_vNN.sql` files), with `schema_setup.py`, which applies them unattended
+- the PostgreSQL schema (`schema_init.sql`, the v50 baseline, and the migrations in `migrations/`), with `schema_setup.py`, which applies them unattended
 - `collector_daemon.py`, the unattended daemon that runs the scripts daily, with `platform_client.py` (the FortifyData platform side)
 - the container packaging (`Dockerfile`, `docker/`)
 
@@ -29,7 +29,7 @@ Each area lists the files it covers. Any change to an area needs approval from o
 | Plugin runner and reporting | `adaudit.py`, `adaudit_push.py` | @prisoner881 |
 | Run lock and secret input | `run_lock.py`, `secret_input.py` | @prisoner881 |
 | Finding and inventory plugins | `plugins/`, `docs/COMPLIANCE_TAGS.md` | @prisoner881 |
-| Database schema | `schema_init.sql`, `schema_migration_v*.sql`, `schema_setup.py` | @prisoner881 |
+| Database schema | `schema_init.sql`, `migrations/`, `schema_setup.py` | @prisoner881 |
 | Collector daemon | `collector_daemon.py`, `platform_client.py`, `collector_daemon.example.toml`, `docs/DAEMON.md` | @prisoner881 |
 | Container packaging | `Dockerfile`, `.dockerignore`, `docker/`, `docs/CONTAINER.md` | @prisoner881 |
 | Documentation | `docs/SETUP.md`, `docs/RELEASE_NOTES.md`, `docs/MAINTAINERS.md`, `docs/DAEMON.md`, `docs/CONTAINER.md`, `docs/PERMISSIONS.md` | @prisoner881 |
@@ -50,7 +50,7 @@ Maintainers:
 1. Work on a feature branch and open a pull request against `release`.
 2. A maintainer for every affected area must approve the pull request before it is merged.
 3. A pull request that changes the schema, or how collected data is interpreted, must include:
-   - the matching migration file;
+   - the matching migration file in `migrations/` (see "Schema changes" below);
    - the version bumps listed under "Project conventions";
    - a note on whether existing databases need `adprofiler.py --full-rescan`.
 4. A pull request must not contain:
@@ -64,11 +64,18 @@ Maintainers:
 Maintainers check pull requests against these conventions.
 
 - **Schema changes:**
-  - `schema_init.sql` is the complete current schema; a production installation starts from it on an empty database. The migration files up to v50 were removed (they remain in the git history).
-  - From v51 on, every schema change ships as a new `schema_migration_vNN.sql` (so installed databases can be upgraded) and is also folded into `schema_init.sql`. A fresh install and an upgrade must produce the same schema.
-  - `EXPECTED_SCHEMA_VERSION` in `adprofiler.py` and `REQUIRED_SCHEMA_VERSION` in `adaudit.py` are raised to match.
-  - Migrations are never edited after release.
-  - `schema_setup.py` takes the version `schema_init.sql`'s fresh-install row records as the target, and refuses a migration file newer than it; raise that row with every migration. A migration must insert its own row into `schema_migration_history` (the script checks it), and must not contain psql meta-commands (only pg_dump's `\restrict`/`\unrestrict` lines in `schema_init.sql` are skipped).
+  - **The model:** `schema_init.sql` is the **v50 baseline and is never edited**. Every later change is one migration in `migrations/`: `schema_migration_v51.sql`, `v52`, and so on, with no gap. `schema_setup.py` creates a new database from the baseline and then applies every migration in order. It brings an existing database (v50 or later) up the same chain, however many versions behind it is, so a fresh install and an upgraded database run the same SQL. The migration files up to v50 were removed; they remain in the git history.
+  - **One file per version:** `migrations/schema_migration_vNN.sql`, NN one more than the newest one there.
+  - **All or nothing:** wrapped in `BEGIN;` … `COMMIT;`, ending with its own row: `INSERT INTO ad_intel.schema_migration_history (version_number, description) VALUES (NN, '…') ON CONFLICT (version_number) DO NOTHING;`. `schema_setup.py` checks that the row was written.
+  - **Schema-qualified names** (`ad_intel.…`). No psql meta-commands (`\i`, `\set`, …): the file is sent through psycopg2.
+  - **Self-contained.** A migration may assume only the schema that vNN-1 left. Clients skip updates: one going from v50 to v55 never ran the code of v51 to v54, so a migration must not rely on data that an intermediate version's collector or adaudit.py would have written. Any backfill is done in the migration's SQL.
+  - **Full rescan:** when existing objects need one `adprofiler.py --full-rescan` to fill new columns, put the line `-- adprofiler: full-rescan` in the header. The daemon then rescans once, however many such migrations a client applies at once.
+  - **Never edited once released.** A mistake is fixed by the next migration.
+  - **Code follows:** `EXPECTED_SCHEMA_VERSION` in `adprofiler.py` (an exact match) and `REQUIRED_SCHEMA_VERSION` in `adaudit.py` are raised to NN in the same pull request, and adprofiler.py's structural check (`validate_schema()`) learns any table or column it now writes.
+  - **Tested before release** on PostgreSQL 17:
+    - a fresh install (the baseline plus the whole chain);
+    - an upgrade from every earlier released version, with data;
+    - the two schemas compared with `pg_dump --schema-only`.
 - **Documentation** lives in `docs/`. A script's message or comment names a document by its path (`docs/PERMISSIONS.md`); documents refer to one another by file name alone.
 - **Versioning:**
   - Each script carries its own `VERSION`, and changes are recorded in its docstring or in `changelog.txt`.

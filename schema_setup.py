@@ -2,7 +2,7 @@
 """
 schema_setup.py -- creates or upgrades the ad_intel database schema, unattended
 ==============================================================================
-VERSION: 1.1
+VERSION: 1.2
 
 adprofiler.py, entra_graph_collector.py and adaudit.py refuse to run against a
 schema other than the one they were built for, and until now the schema could
@@ -11,22 +11,37 @@ missing `schema_migration_vNN.sql` in order for an existing one. A supervising
 process (a scheduler or container daemon) has nobody to do that, so this
 script does it:
 
-    - Empty database (no ad_intel schema): applies schema_init.sql, which
-      creates the whole current schema. PostgreSQL 17 or later is required
-      (two functions use MERGE ... RETURNING merge_action()).
-    - Existing schema: reads its version (max(version_number) in
-      ad_intel.schema_migration_history) and applies every
-      schema_migration_vNN.sql above it, oldest first, up to the version
-      schema_init.sql installs.
-    - Already current: does nothing.
+[1.2] The schema is a frozen baseline plus a chain of migrations:
 
-[1.1] The migration files up to v50 were removed: a production installation
-starts from an empty database. The target version is now the one
-schema_init.sql records, and migration files are optional -- a later schema
-change ships as schema_migration_v51.sql (and onward) next to it, and this
-script applies those to an existing database as before. A database older
-than the target with no migration files to bring it there is refused: create
-a new, empty database instead.
+    schema_init.sql                       the v50 baseline; never edited
+    migrations/schema_migration_v51.sql   each later change, one file per
+    migrations/schema_migration_v52.sql   version, never edited once
+    ...                                   released
+
+The target version is the newest migration (v50 when there is none). The
+chain must be complete: v51, v52, ... up to the target, no gap.
+
+    - Empty database (no ad_intel schema): applies the baseline, then every
+      migration in order. A fresh install therefore runs exactly the SQL an
+      upgraded database ran, so the two cannot differ. PostgreSQL 17 or
+      later is required (two functions use MERGE ... RETURNING
+      merge_action()).
+    - Existing schema: reads its version (max(version_number) in
+      ad_intel.schema_migration_history) and applies every migration above
+      it, oldest first, up to the target -- however many versions behind it
+      is (a client may skip updates: v50 to v55 applies v51-v55 in one run).
+    - Already current: does nothing.
+    - Older than the baseline (v50): refused; create a new, empty database.
+
+A migration whose header has the line
+
+    -- adprofiler: full-rescan
+
+needs one adprofiler.py run with --full-rescan afterwards, so that objects
+unchanged in AD get the new columns. With --rescan-file FILE, applying such
+a migration creates FILE; collector_daemon.py then runs the next collection
+with --full-rescan and removes the file once that run succeeds -- once, however
+many such migrations were applied.
 
 Each file is sent to the server as one batch. A file without its own
 BEGIN/COMMIT then runs as one implicit transaction, applied completely or not
@@ -44,14 +59,12 @@ guessed at.
 Refused, with a message saying what to do by hand:
     - a database whose ad_intel schema has no schema_migration_history table
       (older than v31);
-    - [1.1] a database older than schema_init.sql's version when the
-      migration files to bring it there are not shipped (create a new,
-      empty database);
+    - a database older than the baseline (create a new, empty database);
+    - [1.2] a gap in the migration chain, or a migration file at or below
+      the baseline's version (a mixed set of files);
     - a database whose schema is newer than the files shipped here (upgrade
       the scripts instead);
     - an ad_intel schema that exists but is empty or incomplete;
-    - a migration file newer than schema_init.sql's version (a mixed set of
-      files).
 
 The partition maintenance functions are SECURITY DEFINER: run this as the
 role that owns the schema (normally the role the scripts connect as). A
@@ -97,7 +110,7 @@ except ImportError:
 import run_lock
 import secret_input
 
-VERSION = "1.1"
+VERSION = "1.2"
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -108,9 +121,10 @@ EXIT_INTERRUPTED = 130
 # The oldest version with schema_migration_history (v31 creates it and
 # backfills v30). An older database cannot be upgraded automatically.
 FIRST_TRACKED_VERSION = 31
-# Migrations after which existing objects need adprofiler.py --full-rescan
-# once (their headers say so); later ones rescan by themselves or need none.
-FULL_RESCAN_AFTER = {33, 36, 37, 38}
+# [1.2] A migration that needs adprofiler.py --full-rescan afterwards says so
+# in its header (see the module docstring).
+FULL_RESCAN_MARKER = re.compile(r"^--\s*adprofiler:\s*full-rescan\s*$", re.MULTILINE)
+MIGRATIONS_SUBDIR = "migrations"
 # pg_dump's psql-only lines, safe to leave out when sending the file.
 PSQL_META_ALLOWED = re.compile(r"^\\(restrict|unrestrict)\b")
 MIGRATION_NAME = re.compile(r"^schema_migration_v(\d+)\.sql$")
@@ -160,26 +174,42 @@ signal.signal(signal.SIGTERM, handle_sigterm)
 
 
 def find_files(schema_dir):
-    """(schema_init path, {version: migration path}, target version). [1.1]
-    The target is the version schema_init.sql installs; migration files are
-    optional, and none may be newer than it."""
+    """(baseline path, baseline version, {version: migration path}, target
+    version). [1.2] The migrations are schema_dir/migrations/
+    schema_migration_vNN.sql; they must continue the baseline without a gap."""
     init_path = schema_dir / "schema_init.sql"
     if not init_path.is_file():
         raise SetupError(f"{init_path} not found (--schema-dir points at the wrong directory?)")
     m = FRESH_INSTALL_VERSION.search(init_path.read_text(encoding="utf-8"))
     if not m:
         raise SetupError(f"{init_path} does not record the version it installs")
-    target = int(m.group(1))
+    baseline = int(m.group(1))
     migrations = {}
-    for path in schema_dir.iterdir():
-        m = MIGRATION_NAME.match(path.name)
-        if m and path.is_file():
-            migrations[int(m.group(1))] = path
-    newer = sorted(v for v in migrations if v > target)
-    if newer:
-        raise SetupError(f"{init_path} installs schema v{target}, but there is a migration file "
-                         f"for v{newer[-1]}: the schema files are incomplete or mixed")
-    return init_path, migrations, target
+    migrations_dir = schema_dir / MIGRATIONS_SUBDIR
+    if migrations_dir.is_dir():
+        for path in migrations_dir.iterdir():
+            m = MIGRATION_NAME.match(path.name)
+            if m and path.is_file():
+                migrations[int(m.group(1))] = path
+    stray = sorted(path.name for path in schema_dir.iterdir()
+                   if MIGRATION_NAME.match(path.name))
+    if stray:
+        raise SetupError(f"migration file(s) outside {MIGRATIONS_SUBDIR}/: {', '.join(stray)} "
+                         f"-- they belong in {migrations_dir}")
+    too_old = sorted(v for v in migrations if v <= baseline)
+    if too_old:
+        raise SetupError(f"migration file(s) for v{', v'.join(map(str, too_old))} are at or below "
+                         f"the baseline (schema_init.sql, v{baseline}): a mixed set of files")
+    target = max(migrations, default=baseline)
+    gaps = [v for v in range(baseline + 1, target + 1) if v not in migrations]
+    if gaps:
+        raise SetupError("the migration chain has a gap: "
+                         + ", ".join(f"schema_migration_v{v}.sql" for v in gaps) + " missing")
+    return init_path, baseline, migrations, target
+
+
+def needs_rescan(path):
+    return bool(FULL_RESCAN_MARKER.search(path.read_text(encoding="utf-8")))
 
 
 def sql_for_server(path):
@@ -259,11 +289,36 @@ def apply_file(args, password, path, expect_version):
         conn.close()
 
 
+def apply_migrations(args, password, migrations, versions, fresh=False):
+    """Applies the migrations, in order. A migration that needs a full
+    rescan is recorded as soon as it has applied, so that a later failure in
+    the chain cannot lose the request (the next attempt starts after it). A
+    new database (fresh) needs none: its first collection writes every
+    object in full."""
+    for version in versions:
+        path = migrations[version]
+        log(f"  Applying {MIGRATIONS_SUBDIR}/{path.name}...")
+        apply_file(args, password, path, version)
+        log(f"  Schema v{version} applied.")
+        if needs_rescan(path) and not fresh:
+            note_rescan(args, version)
+
+
+def note_rescan(args, version):
+    log(f"[NOTE] Migration v{version} needs one adprofiler.py run with --full-rescan, so "
+        f"unchanged objects get the new columns.")
+    if args.rescan_file:
+        args.rescan_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(args.rescan_file, "a", encoding="utf-8") as fh:
+            fh.write(f"full rescan needed after schema migration v{version}\n")
+        log(f"Recorded in {args.rescan_file}: the next collection runs with --full-rescan.")
+
+
 def run(args, password):
-    init_path, migrations, newest = find_files(args.schema_dir)
-    log(f"Schema files in {args.schema_dir}: schema_init.sql (v{newest})"
-        + (f" and migrations v{min(migrations)}-v{max(migrations)}." if migrations else
-           "; no migration files (a new database only, or one already at this version)."))
+    init_path, baseline, migrations, target = find_files(args.schema_dir)
+    log(f"Schema files in {args.schema_dir}: baseline schema_init.sql (v{baseline})"
+        + (f" and {MIGRATIONS_SUBDIR}/ v{min(migrations)}-v{target}; target v{target}."
+           if migrations else f", no migrations; target v{target}."))
     conn = connect(args, password)
     try:
         state, current, owner_is_me = database_state(conn)
@@ -277,38 +332,39 @@ def run(args, password):
             f"than v{FIRST_TRACKED_VERSION}, or incomplete. It cannot be upgraded; create a new, "
             f"empty database and run this script against it.")
 
+    chain = list(range(baseline + 1, target + 1))
     if state == "empty":
         if args.check:
-            log(f"Check: the database has no ad_intel schema; schema_init.sql (v{newest}) would "
-                f"be applied.")
+            log(f"Check: the database has no ad_intel schema; the baseline (v{baseline})"
+                + (f" and migrations v{chain[0]}-v{target}" if chain else "")
+                + " would be applied.")
             return EXIT_NEEDS_SETUP
         if server_version < 170000:
             raise SetupError(f"PostgreSQL {server_version // 10000} found; the schema needs "
                              f"PostgreSQL 17 or later")
-        log(f"The database has no ad_intel schema: creating schema v{newest} from "
+        log(f"The database has no ad_intel schema: creating the v{baseline} baseline from "
             f"schema_init.sql...")
-        apply_file(args, password, init_path, newest)
-        log(f"Schema v{newest} created.")
+        apply_file(args, password, init_path, baseline)
+        log(f"Schema v{baseline} created.")
+        apply_migrations(args, password, migrations, chain, fresh=True)
+        log(f"The database is now at schema v{target}.")
         return EXIT_OK
 
     if current is None:
         raise SetupError("ad_intel.schema_migration_history is empty: the schema is incomplete. "
                          "It cannot be upgraded automatically.")
-    if current > newest:
+    if current > target:
         raise SetupError(f"the database is at schema v{current}, newer than the files here "
-                         f"(v{newest}): upgrade the scripts, not the database")
-    if current == newest:
+                         f"(v{target}): upgrade the scripts, not the database")
+    if current == target:
         log(f"The database is at schema v{current}: nothing to do.")
         return EXIT_OK
-
-    pending = list(range(current + 1, newest + 1))
-    missing = [v for v in pending if v not in migrations]
-    if missing:
+    if current < baseline:
         raise SetupError(
-            f"the database is at schema v{current}, and this release installs v{newest} but "
-            "ships no migration for " + ", ".join(f"v{v}" for v in missing) + ": it cannot "
-            "upgrade this database. Create a new, empty database and run this script against "
-            "it (the earlier migration files were removed; see docs/RELEASE_NOTES.md).")
+            f"the database is at schema v{current}, older than the v{baseline} baseline: it "
+            f"cannot be upgraded. Create a new, empty database and run this script against it.")
+
+    pending = list(range(current + 1, target + 1))
     if args.check:
         log(f"Check: the database is at schema v{current}; would apply "
             + ", ".join(f"v{v}" for v in pending) + ".")
@@ -317,15 +373,8 @@ def run(args, password):
         log("[WARN] The connecting role does not own the ad_intel schema. Migrations that "
             "replace the partition maintenance functions should run as the owner.")
     log(f"The database is at schema v{current}; applying {len(pending)} migration(s).")
-    for version in pending:
-        log(f"  Applying {migrations[version].name}...")
-        apply_file(args, password, migrations[version], version)
-        log(f"  Schema v{version} applied.")
-    rescan = sorted(FULL_RESCAN_AFTER.intersection(pending))
-    if rescan:
-        log("[NOTE] Migration(s) " + ", ".join(f"v{v}" for v in rescan) + " need one "
-            "adprofiler.py run with --full-rescan, so unchanged objects get the new columns.")
-    log(f"The database is now at schema v{newest}.")
+    apply_migrations(args, password, migrations, pending)
+    log(f"The database is now at schema v{target}.")
     return EXIT_OK
 
 
@@ -341,8 +390,11 @@ def parse_args():
                              "an option is visible in process listings.")
     parser.add_argument("--schema-dir", type=Path, default=Path(__file__).resolve().parent,
                         metavar="DIR",
-                        help="Directory holding schema_init.sql and the schema_migration_vNN.sql "
-                             "files. Default: this script's directory.")
+                        help="Directory holding schema_init.sql (the v50 baseline) and the "
+                             "migrations/ folder. Default: this script's directory.")
+    parser.add_argument("--rescan-file", type=Path, default=None, metavar="FILE",
+                        help="[1.2] Create FILE when an applied migration needs one adprofiler.py "
+                             "run with --full-rescan (collector_daemon.py passes this).")
     parser.add_argument("--check", action="store_true",
                         help="Report what would be done; change nothing (exit 3 if needed).")
     parser.add_argument("--log-dir", type=Path, default=None, metavar="DIR",

@@ -43,6 +43,7 @@ USB drive, secure file transfer, etc.):
   see section 9 and `DAEMON.md`)
 - `requirements.txt`
 - `schema_init.sql`
+- The `migrations/` folder (schema changes after v50; may be empty)
 - The `docs/` folder (this guide, `RELEASE_NOTES.md` and the other
   documents)
 - A `plugins/` subdirectory containing every plugin `.py` file
@@ -64,6 +65,7 @@ adprofiler/
     collector_daemon.example.toml (optional, section 9)
     requirements.txt
     schema_init.sql
+    migrations/
     docs/
         SETUP.md, RELEASE_NOTES.md, ...
     plugins/
@@ -124,19 +126,24 @@ python3 schema_setup.py --pg-host <your-postgres-host> --pg-user <your-postgres-
     --pg-dbname <your-database-name>
 ```
 
-On an empty database it applies `schema_init.sql`; on a current one it does
-nothing. The file is applied completely or not at all, and the script checks
-that it recorded its version.
+The schema is the v50 baseline (`schema_init.sql`, never edited) plus one
+migration per later version in the `migrations/` folder
+(`schema_migration_v51.sql`, `v52`, ...).
+- **Empty database:** it applies the baseline, then every migration in
+  order.
+- **Existing database (v50 or later):** it applies every migration above
+  the database's version, in order. A database several versions behind is
+  brought up in one run.
+- **Current database:** it does nothing.
 
-**An existing database at an older schema version cannot be upgraded by
-this release.** The migration files up to v50 were removed, because a
-production installation starts from an empty database. Create a new, empty
-database instead. A later schema change will ship as
-`schema_migration_v51.sql` (and onward), and `schema_setup.py` will apply
-those to an existing database in order.
+Each file is applied completely or not at all, and the script checks that
+it recorded its version.
 
-It refuses PostgreSQL older than 17, a database newer than the files, and an
-older database it has no migration for.
+It refuses:
+- PostgreSQL older than 17;
+- a database older than v50 (create a new, empty one);
+- a database newer than the files;
+- a gap in the migration chain.
 Run it as the role that owns the schema. `--check` reports what it would do
 and changes nothing (exit status `3` when something needs doing). It takes
 the run lock, so no collection runs while the schema changes. Exit status:
@@ -642,10 +649,12 @@ by `docker/install.sh`. See `CONTAINER.md`.
   or "predates schema version tracking")**: this means the database's
   schema doesn't match what this version of the script expects --
   normal after updating `adprofiler.py` without also updating the
-  database. Run `schema_setup.py`: it applies any migration shipped
-  for that database's version. If this release ships none (a database
-  older than v50, from before the migration files were removed), create
-  a new, empty database and run `schema_setup.py` against it. Never
+  database. Run `schema_setup.py`: it applies the migrations in
+  `migrations/` above the database's version, in order. A database
+  older than v50 cannot be upgraded: create a new, empty database and
+  run `schema_setup.py` against it. When a migration needs one
+  `adprofiler.py --full-rescan`, `schema_setup.py` says so (the daemon
+  does it by itself). Never
   re-run `schema_init.sql` against a database that already has data in
   it -- that file is for a brand-new, empty database only, and can fail
   or leave things in a mixed state against one that isn't.

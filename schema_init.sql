@@ -1,19 +1,22 @@
 -- ============================================================================
 -- adprofiler / adaudit / entra_graph_collector -- Consolidated Schema Init
 --
--- The complete schema (v50) for a brand-new, empty database (PostgreSQL 17
--- or later); schema_setup.py applies it. The fresh-install row in
--- schema_migration_history (near the end) records the version.
+-- THE v50 BASELINE -- NEVER EDITED. Every later schema change is a migration
+-- in migrations/ (schema_migration_v51.sql, v52, ...). schema_setup.py
+-- creates a new database from this file and then applies every migration in
+-- order, and brings an existing database (v50 or later) up the same chain,
+-- so a fresh install and an upgraded one run the same SQL. PostgreSQL 17 or
+-- later. The fresh-install row in schema_migration_history (near the end)
+-- records v50.
 --
 -- HISTORY OF THIS FILE
 --   It was first built at v28, replacing schema.sql and migrations v2-v28,
 --   as follows. Every later migration (v29-v50) has been folded in by hand:
 --   changed objects in place (marked [vNN]) and new ones in a "vNN
---   ADDITIONS" section near the end. The migration files themselves were
---   removed from the repository after v50, since a production installation
---   starts from this file; comments below that name one (for its full
---   story) refer to the git history. A later schema change ships as
---   schema_migration_v51.sql (and onward) and is folded in here as well.
+--   ADDITIONS" section near the end. The migration files up to v50 were
+--   then removed from the repository; comments below that name one (for
+--   its full story) refer to the git history. From v51 on, changes are NOT
+--   folded in here: this file stays the v50 baseline.
 --
 -- HOW THIS WAS BUILT
 --   1. A fresh database was built from schema.sql + all 27 migrations,
@@ -53,8 +56,7 @@
 -- VERIFIED SINCE
 --   On PostgreSQL 17, through v50, a database created from this file and
 --   one upgraded with the migration files were compared schema-for-schema
---   (pg_dump --schema-only) before each schema version was released. Do
---   the same for every migration from v51 on.
+--   (pg_dump --schema-only) before each schema version was released.
 -- ============================================================================
 
 \restrict OOcQP0WMkT0AsbNush24UiP3dWhgPaYpJef3WNchs34wML8TNbcq16wxfqY5N5C
