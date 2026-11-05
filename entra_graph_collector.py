@@ -2,9 +2,23 @@
 """
 entra_graph_collector.py -- Microsoft Entra ID / Graph API Email Collector
 
-VERSION: 1.0.4
+VERSION: 1.0.5
 
 CHANGELOG:
+    1.0.5 - Secrets without a terminal (secret_input.py). The client secret
+            is taken from --app-secret, else ENTRA_APP_SECRET, else the file
+            named by ENTRA_APP_SECRET_FILE (first line; a mounted Docker or
+            Kubernetes secret, or /dev/fd/N for a pipe from a supervising
+            process), else a hidden prompt when there is a terminal; the
+            PostgreSQL password likewise from --pg-password, PGPASSWORD,
+            PGPASSWORD_FILE or the prompt. Without a terminal, a missing
+            client secret stops the run with exit 1 and a message naming
+            the variables (getpass raised EOFError); a missing PostgreSQL
+            password leaves it to libpq (~/.pgpass, PGPASSFILE or a
+            password-less method). PGPASSWORD was ignored before: the script
+            always prompted and passed the answer explicitly. The log says
+            where each secret came from, never the value.
+
     1.0.4 - PIM-eligible role holders get their on-premises SID and
             accountEnabled from the user list (Graph's $expand returns only
             default properties, so eligible synced admins were never matched
@@ -291,7 +305,6 @@ import argparse
 import atexit
 import base64
 import hashlib
-import getpass
 import email.utils
 import json
 import random
@@ -307,6 +320,7 @@ import psycopg2
 import psycopg2.extras
 
 import run_lock  # [v1.0.1] one run at a time, see run_lock.py
+import secret_input  # [v1.0.5] secrets from the environment, a file or a prompt
 
 # [test-candidate-branch] Always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
@@ -318,7 +332,7 @@ PG_DBNAME = "adprofiler"
 PG_USER = None
 PG_PASSWORD = None
 
-VERSION = "1.0.4"
+VERSION = "1.0.5"
 
 # [v0.5.0] Retry policy shared by every Graph/token request (see
 # _send_with_retry()). 429 and transient 5xx responses, plus network
@@ -694,6 +708,28 @@ def log_warn(msg):
 
 def log_error(msg):
     print(f"{_C.DIM}[{_ts()}]{_C.RESET} {_C.RED}[FAIL]{_C.RESET}    {msg}")
+
+
+def get_secret(what, option_value, option_name, env_var, prompt, required=True):
+    """[v1.0.5] A secret from the command-line option, the environment
+    variable, the file named by <env_var>_FILE, or an interactive prompt --
+    see secret_input.py. Logs where it came from (never the value); exits 1
+    with the reason when a required secret cannot be obtained, e.g. no
+    terminal to prompt on."""
+    try:
+        value, source = secret_input.resolve_secret(what, option_value, option_name, env_var,
+                                                    prompt, required=required)
+    except secret_input.SecretUnavailable as exc:
+        log_error(f"Cannot start: {exc}.")
+        sys.exit(1)
+    if source == secret_input.FROM_OPTION:
+        log_warn(secret_input.option_warning(what, option_name, env_var))
+    elif source in (secret_input.FROM_ENV, secret_input.FROM_FILE):
+        log_info(f"{what}: from the {secret_input.describe_source(source, option_name, env_var)}.")
+    elif source == secret_input.NOT_GIVEN:
+        log_info(f"{what}: none given; libpq will use ~/.pgpass, PGPASSFILE or a "
+                 f"password-less authentication method.")
+    return value
 
 
 def log_header(msg):
@@ -3666,8 +3702,10 @@ def parse_args():
                          help="Entra App Registration's Application (client) ID. "
                               "Required unless --version is given.")
     parser.add_argument("--app-secret", default=None,
-                         help="App Registration client secret. If omitted, you "
-                              "will be prompted securely (recommended).")
+                         help="App Registration client secret. Prefer the "
+                              "ENTRA_APP_SECRET or ENTRA_APP_SECRET_FILE environment "
+                              "variable, or omit it to be prompted; an option is visible "
+                              "in process listings.")
     parser.add_argument("--domain-fqdn", default=None,
                          help="The on-prem AD domain FQDN already collected by "
                               "adprofiler.py (e.g. contoso.local) -- used to find "
@@ -3698,8 +3736,9 @@ def parse_args():
     parser.add_argument("--pg-user", default=None,
                          help="PostgreSQL username. Required unless --version is given.")
     parser.add_argument("--pg-password", default=None,
-                         help="PostgreSQL password. If omitted, you will be prompted "
-                              "securely (recommended).")
+                         help="PostgreSQL password. Prefer the PGPASSWORD or "
+                              "PGPASSWORD_FILE environment variable, or omit it to be "
+                              "prompted; an option is visible in process listings.")
     args = parser.parse_args()
 
     if not args.version and (not args.tenant_id or not args.app_id):
@@ -3816,13 +3855,13 @@ def main():
     PG_PORT = args.pg_port
     PG_DBNAME = args.pg_dbname
     PG_USER = args.pg_user
-    if args.pg_password:
-        log_warn("PostgreSQL password supplied via --pg-password is visible in shell "
-                  "history and process listings. Prefer omitting it and entering it "
-                  "at the secure prompt.")
-        PG_PASSWORD = args.pg_password
-    else:
-        PG_PASSWORD = getpass.getpass(f"PostgreSQL password for {args.pg_user}@{args.pg_host}: ")
+    # [v1.0.5] --pg-password, PGPASSWORD, PGPASSWORD_FILE, then the prompt
+    # (secret_input.py); without a terminal and without any of them, None:
+    # libpq then uses ~/.pgpass, PGPASSFILE or password-less authentication.
+    PG_PASSWORD = get_secret("PostgreSQL password", args.pg_password, "--pg-password",
+                             "PGPASSWORD",
+                             f"PostgreSQL password for {args.pg_user}@{args.pg_host}: ",
+                             required=False)
 
     # [v1.0.1] Never alongside another adprofiler.py, entra_graph_collector.py
     # or adaudit.py run against this database (run_lock.py). Taken before
@@ -3838,13 +3877,11 @@ def main():
         sys.exit(1)
     log_info("Run lock acquired (no other collector or adaudit.py run in progress).")
 
-    if args.app_secret:
-        log_warn("App secret supplied via --app-secret is visible in shell history "
-                  "and process listings. Prefer omitting it and entering it at the "
-                  "secure prompt.")
-        app_secret = args.app_secret
-    else:
-        app_secret = getpass.getpass("Entra App Registration client secret: ")
+    # [v1.0.5] --app-secret, ENTRA_APP_SECRET, ENTRA_APP_SECRET_FILE, then the
+    # prompt (secret_input.py).
+    app_secret = get_secret("Entra App Registration client secret", args.app_secret,
+                            "--app-secret", "ENTRA_APP_SECRET",
+                            "Entra App Registration client secret: ")
 
     start_time = datetime.now(timezone.utc)
     completed_steps = []

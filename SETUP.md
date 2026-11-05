@@ -34,6 +34,8 @@ USB drive, secure file transfer, etc.):
 - `adaudit.py`
 - `adaudit_push.py` (used by `adaudit.py --push`)
 - `run_lock.py` (used by all three scripts: one run at a time)
+- `secret_input.py` (used by all three scripts: passwords and secrets
+  from the environment, a file or a prompt)
 - `requirements.txt`
 - `schema_init.sql`
 - `RELEASE_NOTES.md`
@@ -51,6 +53,7 @@ adprofiler/
     adaudit.py
     adaudit_push.py
     run_lock.py
+    secret_input.py
     requirements.txt
     schema_init.sql
     RELEASE_NOTES.md
@@ -189,7 +192,9 @@ PostgreSQL password unless it's already set via `PGPASSWORD` or a
 
 None of these need to be typed on the command line if you'd rather
 not -- every password/secret prompts securely (hidden input) if you
-simply omit the corresponding flag.
+simply omit the corresponding flag, or can come from an environment
+variable or a file (see "Passwords and secrets without a terminal" in
+section 7).
 
 ## 7. Running the scripts, in sequence
 
@@ -364,6 +369,58 @@ scripts set no overall time limit, because a large directory can take a
 long time; every network request has its own timeout and retries, so a
 dead domain controller or Graph endpoint ends in a non-zero exit rather
 than a hang.
+
+**Passwords and secrets without a terminal** (adprofiler.py 1.0.7,
+entra_graph_collector.py 1.0.5, adaudit.py 1.0.6): a scheduler, a container
+or a supervising process has no terminal to prompt on, and command-line
+options such as `--password` are visible to anyone who can list processes.
+Each secret is therefore taken from the first of these that is set:
+
+1. its command-line option (works, with a warning);
+2. its environment variable;
+3. the file named by the same variable with `_FILE` appended -- the first
+   line of the file is used. This suits a Docker or Kubernetes secret
+   mounted as a file, and also a pipe: a supervising process can start the
+   script with, for example, `AD_BIND_PASSWORD_FILE=/dev/fd/3` and write the
+   password into file descriptor 3, so it never touches disk, a command
+   line or an environment;
+4. a hidden prompt, when the script is run from a terminal.
+
+| Secret | Option | Variable | File variable | Used by |
+|---|---|---|---|---|
+| AD bind password (LDAP and SYSVOL) | `--password` | `AD_BIND_PASSWORD` | `AD_BIND_PASSWORD_FILE` | `adprofiler.py` |
+| Entra App Registration client secret | `--app-secret` | `ENTRA_APP_SECRET` | `ENTRA_APP_SECRET_FILE` | `entra_graph_collector.py` |
+| PostgreSQL password | `--pg-password` | `PGPASSWORD` | `PGPASSWORD_FILE` | all three |
+| FortifyData API key | `--api-key` | `FD_API_KEY` | `--api-key-file` (option) | `adaudit.py --push` |
+
+- Set either the variable or its `_FILE` variant, not both (the script
+  refuses to start).
+- Without a terminal and without any of these, `adprofiler.py` and
+  `entra_graph_collector.py` stop with exit status `1` and a message
+  naming the variables. A missing PostgreSQL password is not an error:
+  the PostgreSQL client library then uses `~/.pgpass` (or the file named by
+  `PGPASSFILE`, which is that library's own variable for a `.pgpass`-format
+  file, not the same as `PGPASSWORD_FILE`) or a password-less method, and
+  reports its own error if none works.
+- The logs say where each secret came from (for example "from the file
+  named by AD_BIND_PASSWORD_FILE"), never the secret itself.
+- Keep secret files readable only by the account that runs the scripts
+  (`chmod 600`). An environment variable is visible to that account and to
+  root (`/proc/<pid>/environ`) and is inherited by anything the script
+  starts; a file or a pipe is the better choice where it can be used.
+
+Example, from a script or a scheduler:
+
+```
+export PGPASSWORD_FILE=/run/secrets/pg_password
+export AD_BIND_PASSWORD_FILE=/run/secrets/ad_bind_password
+export ENTRA_APP_SECRET_FILE=/run/secrets/entra_app_secret
+python3 adprofiler.py --dc-host dc01.corp.local --username svc_audit@corp.local --ssl \
+    --pg-host db --pg-user adprofiler --pg-dbname adprofiler && \
+python3 entra_graph_collector.py --tenant-id <tenant> --app-id <app-id> \
+    --domain-fqdn corp.local --pg-host db --pg-user adprofiler --pg-dbname adprofiler && \
+python3 adaudit.py --pg-host db --pg-user adprofiler --pg-dbname adprofiler
+```
 
 **Optional -- push the results to FortifyData:**
 

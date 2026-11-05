@@ -9,6 +9,29 @@ the script's own docstring now keeps a one-line summary per entry, this
 file keeps the complete detail (root causes, what was verified, why a
 decision was made a particular way) for anyone who wants it.
 
+    1.0.7 - Secrets without a terminal (new module secret_input.py, shared
+            with entra_graph_collector.py 1.0.5 and adaudit.py 1.0.6). The
+            LDAP bind password (also used for the SYSVOL SMB session) is
+            taken from --password, else AD_BIND_PASSWORD, else the file
+            named by AD_BIND_PASSWORD_FILE, else a hidden prompt when
+            standard input is a terminal; the PostgreSQL password likewise
+            from --pg-password, PGPASSWORD, PGPASSWORD_FILE or the prompt.
+            Why: a scheduler or container has no terminal, so getpass raised
+            EOFError (a traceback), leaving only the command-line options,
+            which show in `ps` output and a container's recorded command.
+            The _FILE variants read the first line of a mounted Docker or
+            Kubernetes secret, or of /dev/fd/N, so a supervising process can
+            hand a secret over an inherited pipe without it touching disk,
+            a command line or an environment. Without a terminal, a missing
+            bind password stops the run with exit 1 and a message naming the
+            variables; a missing PostgreSQL password is left to libpq
+            (~/.pgpass, PGPASSFILE, or a password-less method), which
+            psycopg2 now gets as None. Setting both a variable and its _FILE
+            variant is refused. PGPASSWORD was ignored before: the script
+            always prompted and passed the answer explicitly, overriding it.
+            The log says where each secret came from, never the value. The
+            option warning now points to the variables. No schema change.
+
     1.0.6 - RootDSE values go through _rootdse_value(), which takes a list's
             first item or a plain string as is. With the server schema loaded
             (get_info=ALL), ldap3 formats attributes the schema marks

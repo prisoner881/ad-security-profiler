@@ -1,5 +1,46 @@
 # Release Notes
 
+## Development branch (not yet released)
+
+Changes on the `development` branch, which collects the work towards
+running the scripts unattended under a supervising process (scheduled runs
+in a container). They are not in `release` yet.
+
+### Secrets without a terminal (2026-11-05)
+
+adprofiler.py 1.0.7, entra_graph_collector.py 1.0.5, adaudit.py 1.0.6, new
+`secret_input.py` 1.0. No schema change, no plugin change.
+
+The AD bind password, the Entra ID client secret and the PostgreSQL
+password came only from a command-line option or an interactive prompt.
+Without a terminal the prompt failed with a traceback, which left the
+options, and those are visible in process listings and in a container's
+recorded command. Each secret is now taken from the first of:
+
+1. its option (`--password`, `--app-secret`, `--pg-password`), with a
+   warning, as before;
+2. its environment variable: `AD_BIND_PASSWORD`, `ENTRA_APP_SECRET`,
+   `PGPASSWORD`;
+3. the file named by `AD_BIND_PASSWORD_FILE`, `ENTRA_APP_SECRET_FILE` or
+   `PGPASSWORD_FILE` (first line): a mounted Docker or Kubernetes secret,
+   or `/dev/fd/N` for a pipe from a supervising process, so the secret
+   never touches disk, a command line or an environment;
+4. a hidden prompt, when there is a terminal.
+
+Without a terminal, a missing bind password or client secret stops the
+script with exit status 1 and a message naming the variables. A missing
+PostgreSQL password is left to the PostgreSQL client library (`~/.pgpass`,
+`PGPASSFILE`, or a password-less method). Setting a variable and its
+`_FILE` variant together is refused. `PGPASSWORD` was ignored before (the
+scripts always prompted). The logs say where each secret came from, never
+the secret. The FortifyData API key is unchanged (`--api-key`,
+`FD_API_KEY`, `--api-key-file`, which also accepts `/dev/fd/N`, or the
+prompt). See `SETUP.md`, "Passwords and secrets without a terminal".
+
+Upgrading: replace the scripts and **add `secret_input.py`** next to them;
+all three import it and fail to start without it. Interactive use is
+unchanged.
+
 ## Plugin update (2026-11-01): security bulletin review
 
 From a review of the January-October 2026 Microsoft security updates and
