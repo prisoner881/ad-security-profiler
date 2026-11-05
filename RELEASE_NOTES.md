@@ -6,6 +6,40 @@ Changes on the `development` branch, which collects the work towards
 running the scripts unattended under a supervising process (scheduled runs
 in a container). They are not in `release` yet.
 
+### Unattended collector daemon (2026-11-05)
+
+New `collector_daemon.py` 1.0.0 and `platform_client.py` 1.0;
+`secret_input.py` 1.1; new `collector_daemon.example.toml` and `DAEMON.md`;
+`tzdata` added to `requirements.txt`. The scripts, the schema and the
+plugins are unchanged.
+
+- **`collector_daemon.py`** runs a client installation unattended. Once a
+  day, at a set time in a set time zone, it runs `schema_setup.py`,
+  `adprofiler.py`, `entra_graph_collector.py` (when configured) and
+  `adaudit.py` (with `--push` when an activation key is configured), each as
+  a child process. It never exits by itself. It reports its health every 5
+  minutes in `status.json` (and to the platform), and logs every step's
+  output.
+- **Secrets reach the scripts through pipes** (`<VAR>_FILE=/dev/fd/N`),
+  never on a command line or in a child's environment, and are never
+  logged or written to disk by the daemon.
+- **Failures are handled, not retried blindly.**
+  - A failed collection skips the evaluation and still pushes earlier runs.
+  - A failed run waits for the next scheduled time, unless its
+    configuration changes: a new password is tried at once, and a wrong one
+    is not retried into an account lockout.
+  - A held run lock postpones the run by 5 minutes.
+  - A failed push is retried hourly.
+  - A missed run is caught up on start.
+- **Two modes.**
+  - Local: the configuration and secrets come from the daemon's own TOML
+    file and secret files. Works today, including the push.
+  - FortifyData: lease, configuration with encrypted secrets, and health
+    through the platform. Its endpoints are provisional until the platform
+    developer specifies them; tested against a mock only.
+- `secret_input.py` 1.1: `resolve_secret(..., allow_prompt=False)` and
+  `read_secret_file()`, for the daemon. The scripts behave as before.
+
 ### Push authentication by activation key (2026-11-05)
 
 adaudit.py 1.0.8, `adaudit_push.py` (contract 1.0, unchanged). No schema or

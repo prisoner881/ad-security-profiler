@@ -2,7 +2,7 @@
 secret_input.py -- where adprofiler.py, entra_graph_collector.py and
 adaudit.py get their secrets, with or without a terminal
 ==============================================================================
-VERSION: 1.0
+VERSION: 1.1
 
 The three scripts need up to three secrets: the AD bind password
 (adprofiler.py), the Entra ID App Registration client secret
@@ -49,13 +49,17 @@ description of where it came from ("environment variable PGPASSWORD",
 CHANGELOG:
     1.0  First version (adprofiler.py 1.0.7, entra_graph_collector.py 1.0.5,
          adaudit.py 1.0.6).
+    1.1  For collector_daemon.py: resolve_secret(allow_prompt=False) never
+         prompts (a daemon started from a terminal must not stop and wait
+         for input), and read_secret_file() reads a secret from a file named
+         in a configuration file, with the same rules as <variable>_FILE.
 """
 
 import getpass
 import os
 import sys
 
-VERSION = "1.0"
+VERSION = "1.1"
 
 # A secret file larger than this is refused: a secret is a short string, and
 # a mistaken path (a log, a disk image) should not be read into memory.
@@ -73,7 +77,15 @@ class SecretUnavailable(Exception):
     contains the secret."""
 
 
-def _read_secret_file(env_file_var, path):
+def read_secret_file(path, described_as):
+    """[1.1] First line of the file (or pipe) at path, without its line
+    ending. described_as names where the path came from, for messages
+    ("the file named by [database] password_file"). Raises
+    SecretUnavailable."""
+    return _read_secret_file(described_as, path, prefix="")
+
+
+def _read_secret_file(env_file_var, path, prefix="the file named by "):
     """First line of the file (or pipe) at path, without its line ending."""
     try:
         # newline="" keeps "\r" so that a CRLF file can be handled below,
@@ -82,22 +94,23 @@ def _read_secret_file(env_file_var, path):
             content = fh.read(MAX_SECRET_FILE_BYTES + 1)
     except OSError as exc:
         raise SecretUnavailable(
-            f"cannot read the file named by {env_file_var} ({path}): {exc.strerror or exc}")
+            f"cannot read {prefix}{env_file_var} ({path}): {exc.strerror or exc}")
     except UnicodeDecodeError:
-        raise SecretUnavailable(f"the file named by {env_file_var} ({path}) is not UTF-8 text")
+        raise SecretUnavailable(f"{prefix}{env_file_var} ({path}) is not UTF-8 text")
     if len(content) > MAX_SECRET_FILE_BYTES:
         raise SecretUnavailable(
-            f"the file named by {env_file_var} ({path}) is larger than "
+            f"{prefix}{env_file_var} ({path}) is larger than "
             f"{MAX_SECRET_FILE_BYTES // 1024} KiB; it should hold only the secret")
     first_line = content.split("\n", 1)[0]
     if first_line.endswith("\r"):
         first_line = first_line[:-1]
     if not first_line:
-        raise SecretUnavailable(f"the file named by {env_file_var} ({path}) is empty")
+        raise SecretUnavailable(f"{prefix}{env_file_var} ({path}) is empty")
     return first_line
 
 
-def resolve_secret(what, option_value, option_name, env_var, prompt, required=True):
+def resolve_secret(what, option_value, option_name, env_var, prompt, required=True,
+                   allow_prompt=True):
     """Returns (secret, source) where source is one of FROM_OPTION, FROM_ENV,
     FROM_FILE, FROM_PROMPT or NOT_GIVEN (secret None; only when required is
     False). `what` names the secret in messages ("LDAP bind password"),
@@ -105,7 +118,9 @@ def resolve_secret(what, option_value, option_name, env_var, prompt, required=Tr
     environment variable ("AD_BIND_PASSWORD"; the file variant is env_var +
     "_FILE"), prompt the text of the interactive prompt. Raises
     SecretUnavailable when a required secret cannot be obtained, or when the
-    environment is contradictory or unreadable."""
+    environment is contradictory or unreadable. [1.1] allow_prompt=False
+    skips the prompt even on a terminal; option_name may then be None (no
+    command-line option exists)."""
     if option_value:
         return option_value, FROM_OPTION
 
@@ -121,13 +136,18 @@ def resolve_secret(what, option_value, option_name, env_var, prompt, required=Tr
         return _read_secret_file(env_file_var, env_file), FROM_FILE
 
     stdin = sys.stdin
-    if stdin is not None and stdin.isatty():
+    if allow_prompt and stdin is not None and stdin.isatty():
         try:
             return getpass.getpass(prompt), FROM_PROMPT
         except EOFError:
             pass  # the terminal closed: treat as not given
     if not required:
         return None, NOT_GIVEN
+    if not allow_prompt:
+        raise SecretUnavailable(
+            f"no {what} was given. Set {env_var}, or {env_file_var} to a file holding it "
+            f"(a mounted secret or /dev/fd/N)"
+            + (f", or pass {option_name} (visible in process listings)" if option_name else ""))
     raise SecretUnavailable(
         f"no {what} was given and there is no terminal to prompt on. Set {env_var}, or "
         f"{env_file_var} to a file holding it (a mounted secret or /dev/fd/N), or pass "

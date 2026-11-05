@@ -1,0 +1,75 @@
+# collector_daemon.py configuration -- example. See DAEMON.md.
+#
+# Copy it (e.g. to /etc/fortifydata/collector.toml), adjust, and check it:
+#     python3 collector_daemon.py --config /etc/fortifydata/collector.toml --check-config
+#
+# Relative paths are relative to this file's directory. No secret is ever
+# written in this file: each is a *_file setting naming a file that holds it
+# (first line), or an environment variable.
+
+[daemon]
+state_dir = "/var/lib/fortifydata-collector"    # instance id, key pair, status.json; keep it
+log_dir = "/var/log/fortifydata-collector"      # collector_daemon.log (rotated daily) + scripts/
+# log_retention_days = 30         # daemon logs, script logs and reports older than this are removed
+# scripts_dir = "/opt/ad-security-profiler"     # default: this program's own directory
+# python = "/opt/ad-security-profiler/venv/bin/python"   # default: the interpreter running the daemon
+# stop_timeout = 240              # seconds a step gets to stop after SIGTERM; the container's
+                                  # stop grace period must be longer (docker: stop_grace_period: 5m)
+# retry_interval = 300            # waits after a configuration, platform or run-lock problem
+
+[platform]
+# "local": the run configuration comes from [schedule], [ad] and [entra] below.
+# "fortifydata": the lease, the run configuration and the health reports go
+#   through the platform (PROVISIONAL endpoints, see DAEMON.md).
+mode = "local"
+# The activation key from the FortifyData portal. Required in "fortifydata"
+# mode; in "local" mode it turns on the push of results. Or set
+# FD_ACTIVATION_KEY / FD_ACTIVATION_KEY_FILE instead.
+# activation_key_file = "/run/secrets/fd_activation_key"
+# push = true                     # default: on when an activation key is configured
+# api_url = "https://api.test.fortifydata.com"   # or test / us / eu; default: the key's environment
+# ca_bundle = "/etc/ssl/certs/corporate-proxy-ca.pem"   # behind a TLS-inspecting proxy
+# renew_interval = 120            # lease renewal, seconds
+# health_interval = 300           # health report, seconds
+# request_timeout = 30            # per platform request, seconds
+
+[database]
+host = "postgres"
+# port = 5432
+# dbname = "adprofiler"
+user = "adprofiler"
+# The password: password_file, or PGPASSWORD / PGPASSWORD_FILE, or none of
+# them (libpq's ~/.pgpass, or a password-less authentication method).
+password_file = "/run/secrets/pg_password"
+
+[run]
+# excel = false                   # also write the Excel workbook to report_dir
+# report_dir = "/var/lib/fortifydata-collector/reports"   # default: <state_dir>/reports
+
+# ---------------------------------------------------------------------------
+# Local mode only: the run configuration. (In "fortifydata" mode these
+# sections are ignored; the portal provides the same settings.)
+# ---------------------------------------------------------------------------
+
+[schedule]
+time = "02:30"                    # 24-hour, in the time zone below
+timezone = "America/Chicago"      # IANA name; default UTC
+
+[ad]
+dc_host = "dc01.corp.example.com"
+username = "svc_adaudit@corp.example.com"
+password_file = "/run/secrets/ad_bind_password"   # or AD_BIND_PASSWORD(_FILE)
+# ssl = true                      # LDAPS (default); false for plain LDAP on 389
+# port = 636
+ca_cert_file = "/etc/fortifydata/corp-root-ca.pem"   # verifies the DC's LDAPS certificate
+# sysvol = true                   # also read Group Policy files over SMB
+# sysvol_kerberos = false
+# smb_host = "dc01.corp.example.com"
+domain_fqdn = "corp.example.com"  # links the Entra data to this domain
+
+# Optional: without this section the Entra step is skipped.
+# [entra]
+# tenant_id = "00000000-0000-0000-0000-000000000000"
+# app_id = "00000000-0000-0000-0000-000000000000"
+# client_secret_file = "/run/secrets/entra_app_secret"   # or ENTRA_APP_SECRET(_FILE)
+# include_pta_agents = false

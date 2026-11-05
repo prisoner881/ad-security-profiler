@@ -41,6 +41,11 @@ cryptography~=49.0
 # inventory tabs). Not needed by adprofiler.py or entra_graph_collector.py.
 openpyxl~=3.1
 
+# tzdata: IANA time zone data for collector_daemon.py's schedule (zoneinfo).
+# zoneinfo uses the operating system's time zone database first; this
+# package is the fallback for minimal container images that have none.
+tzdata>=2025.2
+
 # Note: psycopg2-binary (not psycopg2) deliberately -- bundles its own
 # libpq, so it doesn't need PostgreSQL client dev headers/build tooling
 # on the host. The binary package's own docs recommend the source
