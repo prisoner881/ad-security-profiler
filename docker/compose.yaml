@@ -1,0 +1,105 @@
+# FortifyData AD/Entra audit collector -- docker compose. See CONTAINER.md.
+#
+# Two containers: the collector (collector_daemon.py) and its PostgreSQL 17
+# database. The database is on an internal network with no outside access
+# and no published port. Settings come from .env, written by install.sh.
+
+name: fortifydata-collector
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:17-trixie}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: adprofiler
+      POSTGRES_DB: adprofiler
+      # Read once, when the database is first created; changing the file
+      # later does not change the database password (see CONTAINER.md).
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_password
+    secrets:
+      - pg_password
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - db
+    shm_size: 256mb
+    stop_grace_period: 2m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U adprofiler -d adprofiler"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 1m
+    logging: *logging
+
+  collector:
+    image: ${COLLECTOR_IMAGE:-fortifydata-ad-collector:1.0.1}
+    restart: unless-stopped
+    init: true
+    # The owner of ./secrets, ./config and ./data (install.sh sets these).
+    user: "${COLLECTOR_UID:-10001}:${COLLECTOR_GID:-10001}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ADAUDIT_DAEMON_CONFIG: /config/collector.toml
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
+    volumes:
+      - ./config:/config:ro
+      - ./data/state:/var/lib/fortifydata-collector
+      - ./data/logs:/var/log/fortifydata-collector
+    secrets:
+      - pg_password
+      - ad_bind_password
+      - entra_app_secret
+      - fd_activation_key
+    networks:
+      - db
+      - egress
+    # Name resolution for the domain controllers: the container uses the
+    # host's resolver. If the host does not resolve the AD domain, name the
+    # domain's DNS servers here.
+    # dns:
+    #   - 10.0.0.10
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Longer than [daemon] stop_timeout (240 s): a step gets that long to
+    # stop after SIGTERM, then the daemon releases the lease.
+    stop_grace_period: 5m
+    healthcheck:
+      test: ["CMD", "python", "/opt/collector/collector_daemon.py", "--healthcheck"]
+      interval: 1m
+      timeout: 30s
+      retries: 3
+      start_period: 5m
+    logging: *logging
+
+networks:
+  db:
+    internal: true
+  egress: {}
+
+volumes:
+  pgdata: {}
+
+secrets:
+  pg_password:
+    file: ./secrets/pg_password
+  ad_bind_password:
+    file: ./secrets/ad_bind_password
+  entra_app_secret:
+    file: ./secrets/entra_app_secret
+  fd_activation_key:
+    file: ./secrets/fd_activation_key

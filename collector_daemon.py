@@ -2,7 +2,7 @@
 collector_daemon.py -- runs the AD/Entra collection, evaluation and push
 every day, unattended, and reports its health
 ==============================================================================
-VERSION: 1.0.0
+VERSION: 1.0.1
 
 The long-running process of a client installation. It starts, and from then
 on never exits by itself: it is stopped (SIGTERM, e.g. `docker stop`) or the
@@ -74,6 +74,10 @@ it exits on its own. A wrong AD or Entra setting is not one of them: the
 daemon keeps running, reports it and retries.
 
 CHANGELOG:
+    1.0.1  --check-config no longer takes the one-process lock and logs only
+           to standard error, so a configuration can be checked while the
+           daemon runs (docker compose run --rm collector --check-config).
+           Container packaging added (Dockerfile, docker/).
     1.0.0  First version. platform_client.py 1.0; the platform's activation,
            configuration and health endpoints are PROVISIONAL (not yet
            specified by the platform).
@@ -103,7 +107,7 @@ from pathlib import Path
 import platform_client as pc
 import secret_input
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -464,9 +468,10 @@ class Daemon:
 
     # --- start-up -------------------------------------------------------------
 
-    def prepare(self):
+    def prepare(self, take_lock=True):
         """Directories, persisted state, secrets of the daemon itself and the
-        platform client. Raises SettingsError."""
+        platform client. Raises SettingsError, or DaemonRunning when
+        take_lock is set and another process holds the lock."""
         for d in (self.s.state_dir, self.s.log_dir, self.s.script_log_dir, self.s.report_dir,
                   self.s.state_dir / "work"):
             try:
@@ -480,12 +485,13 @@ class Daemon:
         # One process per state directory: a second daemon, or --once next to
         # a running daemon, would share its lease, state and status files.
         # Held until the process exits.
-        self._lock_fh = open(self.s.state_dir / LOCK_FILE, "a")
-        try:
-            fcntl.flock(self._lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            raise DaemonRunning(f"another collector_daemon.py is running with state_dir "
-                                f"{self.s.state_dir}; stop it first")
+        if take_lock:
+            self._lock_fh = open(self.s.state_dir / LOCK_FILE, "a")
+            try:
+                fcntl.flock(self._lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                raise DaemonRunning(f"another collector_daemon.py is running with state_dir "
+                                    f"{self.s.state_dir}; stop it first")
         self.persist = read_json(self.s.state_dir / STATE_FILE)
         self._fp_key = self._fingerprint_key()
         self.instance_id = self._instance_id()
@@ -1454,14 +1460,15 @@ def main(argv=None):
 
     try:
         settings.log_dir.mkdir(parents=True, exist_ok=True)
-        log = setup_logging(settings.log_dir, settings.log_retention_days)
+        if not args.check_config:  # a check next to the running daemon logs to stderr only
+            log = setup_logging(settings.log_dir, settings.log_retention_days)
     except OSError as exc:
         log.error(f"Cannot use the log directory {settings.log_dir}: {exc}")
         return EXIT_CONFIG
     daemon = Daemon(settings, lambda: load_document(args.config), log)
     daemon.install_signal_handlers()
     try:
-        daemon.prepare()
+        daemon.prepare(take_lock=not args.check_config)
     except SettingsError as exc:
         log.error(f"Cannot start: {exc}")
         return EXIT_CONFIG

@@ -6,6 +6,30 @@ Changes on the `development` branch, which collects the work towards
 running the scripts unattended under a supervising process (scheduled runs
 in a container). They are not in `release` yet.
 
+### Container packaging (2026-11-05)
+
+collector_daemon.py 1.0.1; new `Dockerfile`, `.dockerignore`, `docker/`
+(`compose.yaml`, `collector.toml`, `install.sh`) and `CONTAINER.md`. The
+scripts, the schema and the plugins are unchanged.
+
+- **Two containers under docker compose:**
+  - the collector (`collector_daemon.py`, the scripts and plugins; Python
+    3.13);
+  - PostgreSQL 17, on an internal network with no outside access and no
+    published port.
+- **Hardened collector container:** non-root, read-only root filesystem,
+  no capabilities, `no-new-privileges`. Secrets are mounted from files,
+  logs are capped, and the healthcheck uses `--healthcheck`. The 5-minute
+  stop grace period lets a running step stop cleanly and the lease be
+  released.
+- **`docker/install.sh`** creates the installation directory:
+  configuration, secret files (it generates the database password), data
+  directories and `.env`. Run again for an upgrade, it never overwrites the
+  configuration or a secret.
+- **collector_daemon.py 1.0.1:** `--check-config` works while the daemon
+  runs (it no longer takes the one-process lock, and logs only to standard
+  error).
+
 ### Unattended collector daemon (2026-11-05)
 
 New `collector_daemon.py` 1.0.0 and `platform_client.py` 1.0;
