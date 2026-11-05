@@ -2,7 +2,7 @@
 """
 adaudit.py -- AD Security & Compliance Plugin Runner
 ======================================================
-VERSION: 1.0.9
+VERSION: 1.0.10
 
 Companion to adprofiler.py. Where adprofiler.py collects AD data,
 adaudit.py analyzes it: discovers every plugin file in plugins/, runs each
@@ -25,6 +25,9 @@ DESIGN:
       as: (status, object_guid, stig_severity, stig_reference,
       tool_severity, tool_reference, fd_severity, summary, detail).
       Zero rows returned = clean pass, nothing to report.
+    - [v1.0.10] The schema migration files up to v50 were removed; the
+      message for a database older than REQUIRED_SCHEMA_VERSION says to run
+      schema_setup.py, or to create a new, empty database. No other change.
     - [v1.0.9] --skip-entra: the Entra ID data was not collected for this
       evaluation (entra_graph_collector.py failed or was not run), so the
       Entra plugins are NOT ASSESSED and their queries are not run -- as for
@@ -107,7 +110,7 @@ DESIGN:
       SYSVOL and checks its freshness itself sets PLUGIN["sysvol_optional"]
       = True (4009 v1.5) and is exempt.
     - [v1.0.0] Release 1.0 (adprofiler.py 1.0.0, entra_graph_collector.py
-      1.0.0, sysvol_collector.py 1.1, schema v46; see RELEASE_NOTES.md).
+      1.0.0, sysvol_collector.py 1.1, schema v46; see docs/RELEASE_NOTES.md).
       No change in behavior from 0.10.6: same plugins, same findings.
     - [v0.10.6] Requires schema v46 (entra_graph_collector.py 0.9.0; no
       adprofiler change). Entra ID coverage waves 1 and 2: new plugins
@@ -201,7 +204,7 @@ DESIGN:
       the client (adprofiler.py --sysvol), like Entra plugins without Entra
       data (OPTIONAL_DATA_SOURCES).
     - [v0.8.0] Compliance-framework reporting. Each finding plugin's
-      framework_tags (format and allowed IDs: COMPLIANCE_TAGS.md) are
+      framework_tags (format and allowed IDs: docs/COMPLIANCE_TAGS.md) are
       split by prefix into (framework, control id) via FRAMEWORKS /
       split_framework_tag(). The workbook gains a "Compliance Summary"
       sheet right after Summary (per framework: controls referenced,
@@ -227,8 +230,7 @@ DESIGN:
       runs; its open findings are closed with change_status 'retired'
       (schema v35), not 'remediated', since the issue still exists and
       is now reported by the successor. adaudit.py also refuses to run
-      against a database older than REQUIRED_SCHEMA_VERSION, naming the
-      migration files to apply.
+      against a database older than REQUIRED_SCHEMA_VERSION.
     - [v0.7.2] A plugin file that fails to load (syntax error, bad or
       missing PLUGIN dict, duplicate plugin_id) is reported in one
       consolidated [ERROR] block, both right after discovery and again
@@ -352,7 +354,7 @@ import adaudit_push
 import run_lock  # [v1.0.2] one run at a time, see run_lock.py
 import secret_input  # [v1.0.6] secrets from the environment, a file or a prompt
 
-VERSION = "1.0.9"
+VERSION = "1.0.10"
 
 # [test-candidate-branch] Always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
@@ -399,7 +401,7 @@ REQUIRED_INVENTORY_PLUGIN_KEYS = {"plugin_id", "plugin_type", "category", "name"
 
 # [v0.8.0] Compliance frameworks, in report order: (key, display name,
 # workbook sheet name, tag prefixes). A tag is "<prefix><control id>" --
-# see COMPLIANCE_TAGS.md. CISA-SCUBA- must be listed before the generic
+# see docs/COMPLIANCE_TAGS.md. CISA-SCUBA- must be listed before the generic
 # CISA- advisory prefix, since split_framework_tag() takes the first
 # match. The advisory bucket keeps the whole tag as its control id
 # ("CVE-2021-42278"), since the bare number means nothing on its own.
@@ -907,19 +909,17 @@ def check_schema_version(conn):
         cur.execute("SELECT to_regclass('ad_intel.schema_migration_history') IS NOT NULL;")
         if not cur.fetchone()[0]:
             raise RuntimeError(
-                "Database predates schema version tracking -- apply the "
-                "schema_migration_vNN.sql files (v31 onward) to bring it to "
-                f"v{REQUIRED_SCHEMA_VERSION}.")
+                "Database predates schema version tracking: it cannot be upgraded. Create a "
+                "new, empty database and run schema_setup.py against it.")
         cur.execute("SELECT max(version_number) FROM schema_migration_history;")
         current = cur.fetchone()[0] or 0
     conn.commit()
     if current < REQUIRED_SCHEMA_VERSION:
-        missing = ", ".join(f"schema_migration_v{v}.sql"
-                            for v in range(current + 1, REQUIRED_SCHEMA_VERSION + 1))
         raise RuntimeError(
             f"Database schema is v{current}; this adaudit.py needs v{REQUIRED_SCHEMA_VERSION}. "
-            f"Apply, in order: {missing} (psql -v ON_ERROR_STOP=1 -f <file>). Never "
-            f"re-run schema_init.sql against a database that already has data.")
+            f"Run schema_setup.py: it applies any migration shipped for this database's "
+            f"version, and otherwise says to create a new, empty database. Never run "
+            f"schema_init.sql against a database that already has data.")
     return current
 
 
@@ -2072,7 +2072,7 @@ def main():
     unknown_tags = unknown_framework_tags(plugins)
     if unknown_tags:
         log(f"[WARN] {len(unknown_tags)} framework tag(s) match no known framework prefix "
-            f"(see COMPLIANCE_TAGS.md); they are kept in control_catalog but left off the "
+            f"(see docs/COMPLIANCE_TAGS.md); they are kept in control_catalog but left off the "
             f"compliance sheets:")
         for tag in sorted(unknown_tags):
             log(f"    - {tag} (plugin(s) {', '.join(str(i) for i in sorted(unknown_tags[tag]))})")

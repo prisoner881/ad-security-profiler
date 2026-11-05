@@ -1,4 +1,4 @@
-# collector_daemon.py configuration -- example. See DAEMON.md.
+# collector_daemon.py configuration -- example. See docs/DAEMON.md.
 #
 # Copy it (e.g. to /etc/fortifydata/collector.toml), adjust, and check it:
 #     python3 collector_daemon.py --config /etc/fortifydata/collector.toml --check-config
@@ -20,7 +20,7 @@ log_dir = "/var/log/fortifydata-collector"      # collector_daemon.log (rotated 
 [platform]
 # "local": the run configuration comes from [schedule], [ad] and [entra] below.
 # "fortifydata": the lease, the run configuration and the health reports go
-#   through the platform (PROVISIONAL endpoints, see DAEMON.md).
+#   through the platform (PROVISIONAL endpoints, see docs/DAEMON.md).
 mode = "local"
 # The activation key from the FortifyData portal. Required in "fortifydata"
 # mode; in "local" mode it turns on the push of results. Or set

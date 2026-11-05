@@ -6,6 +6,37 @@ Changes on the `development` branch, which collects the work towards
 running the scripts unattended under a supervising process (scheduled runs
 in a container). They are not in `release` yet.
 
+### Schema migration files removed (2026-11-05)
+
+`schema_setup.py` 1.1, adprofiler.py 1.0.10, adaudit.py 1.0.10,
+collector_daemon.py 1.0.3 (no change of its own; image 1.0.3). Schema
+unchanged (v50).
+
+- **`schema_migration_v30.sql` to `v50.sql` are removed.** They served
+  testing; a production installation starts from an empty database, which
+  `schema_init.sql` creates at v50.
+- **`schema_setup.py` 1.1:**
+  - It takes its target version from `schema_init.sql`.
+  - Migration files are optional. A later schema change ships as
+    `schema_migration_v51.sql` (and onward), and it applies those to an
+    installed database in order, as before.
+  - **A database older than v50 can no longer be upgraded.** For such a
+    database it says to create a new, empty one. This applies to test
+    databases from before this change; in the containers, use
+    `docker compose down -v`, then `up -d`.
+- **adprofiler.py and adaudit.py** no longer name migration files in their
+  messages. For a database that is behind, they say to run
+  `schema_setup.py`. For missing partitions, adprofiler.py says to run
+  `SELECT ad_intel.run_partition_maintenance();` as the schema owner.
+
+### Documentation moved to `docs/` (2026-11-05)
+
+All documents (`SETUP.md`, `RELEASE_NOTES.md`, `PERMISSIONS.md`,
+`DAEMON.md`, `CONTAINER.md`, `COMPLIANCE_TAGS.md`, `MAINTAINERS.md` and
+`changelog.txt`) are now in `docs/`. The scripts' messages and comments
+point there. The collector image carries the whole folder. No code
+change.
+
 ### Entra failures, integrity check, permissions guide (2026-11-05)
 
 adprofiler.py 1.0.9, adaudit.py 1.0.9, entra_graph_collector.py 1.0.7,

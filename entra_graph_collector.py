@@ -8,7 +8,7 @@ CHANGELOG:
     1.0.7 - Named for what it collects: "Microsoft Entra ID collector"
             (banner, --help, this docstring) instead of "email collector",
             the name from when it read only mail attributes. The
-            permission list is now kept in PERMISSIONS.md (client-facing
+            permission list is now kept in docs/PERMISSIONS.md (client-facing
             setup of the App Registration). No behaviour change.
     1.0.6 - For running under a scheduler or container daemon: SIGTERM (what
             `docker stop`, systemd and a supervising process send) is handled
@@ -78,7 +78,7 @@ CHANGELOG:
             failed, 75 not started (run lock held), 130 interrupted.
 
     1.0.0 - Release 1.0 (adprofiler.py 1.0.0, adaudit.py 1.0.0, schema
-            v46; see RELEASE_NOTES.md). No change in behavior from 0.9.1.
+            v46; see docs/RELEASE_NOTES.md). No change in behavior from 0.9.1.
 
     0.9.1 - federated_token_validation_policy: Graph's 404 for a tenant
             that never configured the policy is recorded as read ('ok',
@@ -238,7 +238,7 @@ WHY THIS IS A SEPARATE SCRIPT, NOT A MODE ON adprofiler.py
 
 CREDENTIAL SETUP (done once, by the client, in their own Entra tenant)
     [1.0.7] The client-facing, current version of these steps, with every
-    permission and what it unlocks, is PERMISSIONS.md. The notes below are
+    permission and what it unlocks, is docs/PERMISSIONS.md. The notes below are
     the history of how the list grew.
     1. Register an application in the Entra admin center (Entra ID ->
        App registrations -> New registration). Any name/redirect URI is
@@ -402,7 +402,7 @@ GRAPH_DIRECTORY_ROLES_URL = "https://graph.microsoft.com/v1.0/directoryRoles"
 # licensing; without it Graph answers 400/403 and the collector records
 # that it couldn't check rather than failing the run. Permissions:
 # RoleManagement.Read.Directory (eligibility) and Directory.Read.All or
-# GroupMember.Read.All (group members) -- both already in SETUP.md's list.
+# GroupMember.Read.All (group members) -- both already in docs/SETUP.md's list.
 GRAPH_ROLE_ELIGIBILITY_URL = (
     "https://graph.microsoft.com/v1.0/roleManagement/directory/roleEligibilityScheduleInstances"
     "?$expand=principal,roleDefinition"

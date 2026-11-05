@@ -4,7 +4,7 @@
  adprofiler.py -- Active Directory Security & Compliance Profiler (Collector)
 ================================================================================
 
-VERSION: 1.0.9
+VERSION: 1.0.10
 
 PURPOSE:
     Connects to an on-premise Active Directory Domain Controller via LDAP,
@@ -18,7 +18,7 @@ PURPOSE:
     also reads Group Policy settings from SYSVOL and NETLOGON over SMB.
 
     adaudit.py analyzes what this script and entra_graph_collector.py
-    collect. RELEASE_NOTES.md lists the current version of every
+    collect. docs/RELEASE_NOTES.md lists the current version of every
     component.
 
 INPUT FORMAT (command line):
@@ -83,7 +83,7 @@ INPUT FORMAT (command line):
             --pg-host db01.lab.local --pg-user adprofiler
 
 SETUP:
-    See SETUP.md: a Python virtual environment with the packages in
+    See docs/SETUP.md: a Python virtual environment with the packages in
     requirements.txt (ldap3, psycopg2-binary, impacket, cryptography, ...)
     and a PostgreSQL 17 database initialised from schema_init.sql.
 
@@ -194,7 +194,7 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
-VERSION = "1.0.9"
+VERSION = "1.0.10"
 
 # [v0.7.7] The oldest collector version whose stored derived fields
 # (parsed / typed columns computed from raw attributes) are current. A
@@ -2004,7 +2004,7 @@ def run_capability_probe(conn, base_dn):
             "detail": "OK" if ok else (
                 "nTSecurityDescriptor not returned even with SD Flags control "
                 "(Owner+Group+DACL only). Grant READ_CONTROL on the "
-                "domain root (see PERMISSIONS.md)."
+                "domain root (see docs/PERMISSIONS.md)."
             ),
         }
     except (LDAPException, LDAPCollectionError) as exc:
@@ -2035,14 +2035,14 @@ def run_capability_probe(conn, base_dn):
             log_warn("No deleted objects are visible. Unless nothing has ever been deleted in "
                      "this domain, the bind account cannot list CN=Deleted Objects: deletions "
                      "are then never recorded, and deleted accounts keep being reported. Grant "
-                     "it List Contents and Read Property there (PERMISSIONS.md, section 2.3).")
+                     "it List Contents and Read Property there (docs/PERMISSIONS.md, section 2.3).")
     except (LDAPException, LDAPCollectionError) as exc:
         results["view_deleted_objects"] = {
             "passed": False,
             "detail": (
                 f"{exc} -- grant the bind account List Contents and Read Property on "
                 "CN=Deleted Objects (dsacls /takeownership, then /G <account>:LCRP; "
-                "PERMISSIONS.md, section 2.3)."
+                "docs/PERMISSIONS.md, section 2.3)."
             ),
         }
 
@@ -2405,9 +2405,9 @@ def run_partition_maintenance(pg_conn):
             log_error(f"Partition maintenance failed: {str(exc).strip()}")
             log_error(f"The current month has no partition for {len(missing)} table(s) "
                       f"({', '.join(missing[:5])}{', ...' if len(missing) > 5 else ''}), so "
-                      f"collection cannot run. Re-apply schema_migration_v41.sql as the "
-                      f"schema owner (its functions run with the owner's rights), or run "
-                      f"SELECT ad_intel.run_partition_maintenance(); as the owner. Aborting.")
+                      f"collection cannot run. Run SELECT ad_intel.run_partition_maintenance(); "
+                      f"as the schema owner (the role schema_setup.py created the schema "
+                      f"with). Aborting.")
             raise CollectorAbort("Partition maintenance failed")
         log_warn(f"Partition maintenance failed (non-fatal, this month's partitions "
                  f"exist): {str(exc).strip()}")
@@ -5577,12 +5577,11 @@ def main():
             log_error(
                 f"Database schema is behind: currently at version "
                 f"{version_detail}, this script expects version "
-                f"{EXPECTED_SCHEMA_VERSION}. Apply "
-                f"schema_migration_v{version_detail + 1}.sql through "
-                f"schema_migration_v{EXPECTED_SCHEMA_VERSION}.sql, in "
-                f"order, against your EXISTING database (not "
-                f"schema_init.sql, which is for a brand-new, empty "
-                f"database only). Aborting."
+                f"{EXPECTED_SCHEMA_VERSION}. Run schema_setup.py: it "
+                f"applies any migration shipped for this database's "
+                f"version, and otherwise says to create a new, empty "
+                f"database (never run schema_init.sql against a "
+                f"database that has data). Aborting."
             )
             raise CollectorAbort("Schema validation failed")
         elif version_status == "ahead":
@@ -5598,19 +5597,15 @@ def main():
             schema_problems = validate_schema(pg_conn)
             log_error(
                 "Database predates schema version tracking (added in "
-                "schema_migration_v31.sql) -- this database is on some "
-                "version older than that, likely by more than one "
-                "migration. Structural check found "
+                "schema v31) -- this database is on some version older "
+                "than that. Structural check found "
                 f"{len(schema_problems)} problem(s):"
             )
             for problem in schema_problems:
                 log_error(f"  - {problem}")
             log_error(
-                "Apply schema_migration_vNN.sql files in order, starting "
-                "from wherever this database currently is, through at "
-                "least v31, against your EXISTING database (not "
-                "schema_init.sql, which is for a brand-new, empty "
-                "database only). Aborting."
+                "This database cannot be upgraded. Create a new, empty "
+                "database and run schema_setup.py against it. Aborting."
             )
             raise CollectorAbort("Schema validation failed")
 
@@ -5691,7 +5686,7 @@ def main():
                 f"{k}: {v['detail']}" for k, v in probe_results.items() if not v["passed"]
             )
             log_error("One or more required capabilities are missing. "
-                      "Aborting -- no data will be collected. See PERMISSIONS.md.")
+                      "Aborting -- no data will be collected. See docs/PERMISSIONS.md.")
             finalize_sync_run(pg_conn, run_id, "failed", failure_reason=reason,
                                failure_detail=probe_results)
             raise CollectorAbort("Capability probe failed")
@@ -6213,7 +6208,7 @@ def main():
                              "any, the bind account cannot read them (by default only Domain "
                              "Admins can), and every user is assessed against the default "
                              "domain policy: grant read on the Password Settings Container "
-                             "(PERMISSIONS.md, section 2.3).")
+                             "(docs/PERMISSIONS.md, section 2.3).")
             except LDAPException as exc:
                 log_warn(f"Fine-Grained Password Policy collection failed (non-fatal): {exc}")
 

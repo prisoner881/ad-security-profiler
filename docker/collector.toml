@@ -1,4 +1,4 @@
-# collector_daemon.py configuration for the container. See DAEMON.md for
+# collector_daemon.py configuration for the container. See docs/DAEMON.md for
 # every setting and collector_daemon.example.toml for the annotated list.
 #
 # Paths are inside the container:

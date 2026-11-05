@@ -43,9 +43,8 @@ USB drive, secure file transfer, etc.):
   see section 9 and `DAEMON.md`)
 - `requirements.txt`
 - `schema_init.sql`
-- `RELEASE_NOTES.md`
-- Every `schema_migration_vNN.sql` file (only needed to upgrade an
-  existing database -- see Troubleshooting)
+- The `docs/` folder (this guide, `RELEASE_NOTES.md` and the other
+  documents)
 - A `plugins/` subdirectory containing every plugin `.py` file
 
 When done, `~/adprofiler` should look like:
@@ -65,7 +64,8 @@ adprofiler/
     collector_daemon.example.toml (optional, section 9)
     requirements.txt
     schema_init.sql
-    RELEASE_NOTES.md
+    docs/
+        SETUP.md, RELEASE_NOTES.md, ...
     plugins/
         1001_....py
         1002_....py
@@ -124,12 +124,19 @@ python3 schema_setup.py --pg-host <your-postgres-host> --pg-user <your-postgres-
     --pg-dbname <your-database-name>
 ```
 
-On an empty database it applies `schema_init.sql`; on an existing one it
-applies every `schema_migration_vNN.sql` the database does not have yet, in
-order; on a current one it does nothing. Each file is applied completely or
-not at all, and the script checks that it recorded its version. It refuses
-PostgreSQL older than 17, a database older than schema v31 (no version
-history), a database newer than the files, and an incomplete set of files.
+On an empty database it applies `schema_init.sql`; on a current one it does
+nothing. The file is applied completely or not at all, and the script checks
+that it recorded its version.
+
+**An existing database at an older schema version cannot be upgraded by
+this release.** The migration files up to v50 were removed, because a
+production installation starts from an empty database. Create a new, empty
+database instead. A later schema change will ship as
+`schema_migration_v51.sql` (and onward), and `schema_setup.py` will apply
+those to an existing database in order.
+
+It refuses PostgreSQL older than 17, a database newer than the files, and an
+older database it has no migration for.
 Run it as the role that owns the schema. `--check` reports what it would do
 and changes nothing (exit status `3` when something needs doing). It takes
 the run lock, so no collection runs while the schema changes. Exit status:
@@ -635,26 +642,22 @@ by `docker/install.sh`. See `CONTAINER.md`.
   or "predates schema version tracking")**: this means the database's
   schema doesn't match what this version of the script expects --
   normal after updating `adprofiler.py` without also updating the
-  database. The message itself tells you exactly which
-  `schema_migration_vNN.sql` file(s) to apply, by number, against your
-  *existing* database (or run `schema_setup.py`, which applies them in
-  order for you). Never re-run `schema_init.sql` against a
-  database that already has data in it -- that file is for a
-  brand-new, empty database only, and can fail or leave things in a
-  mixed state against one that isn't.
-  After applying a migration, run `adprofiler.py` once with
-  `--full-rescan` so objects that haven't changed in AD still get the
-  columns the new version collects (otherwise some checks see them as
-  "not collected" until each object next changes).
+  database. Run `schema_setup.py`: it applies any migration shipped
+  for that database's version. If this release ships none (a database
+  older than v50, from before the migration files were removed), create
+  a new, empty database and run `schema_setup.py` against it. Never
+  re-run `schema_init.sql` against a database that already has data in
+  it -- that file is for a brand-new, empty database only, and can fail
+  or leave things in a mixed state against one that isn't.
 - **`adprofiler.py` stops with "The current month has no partition for
   ... table(s)"**: the collector creates the monthly storage partitions it
   needs at the start of every run (schema v41 and later). This message
-  means it wasn't allowed to: apply `schema_migration_v41.sql` (or
-  re-apply it) as the PostgreSQL user that owns the schema -- the
-  maintenance functions then run with that user's rights even when the
-  collector connects as a different user. Running
-  `SELECT ad_intel.run_partition_maintenance();` once as that owner also
-  fixes it.
+  means it wasn't allowed to: run
+  `SELECT ad_intel.run_partition_maintenance();` once as the PostgreSQL
+  user that owns the schema (the one `schema_setup.py` or
+  `schema_init.sql` created it with). The maintenance functions run with
+  the owner's rights even when the collector connects as a different
+  user.
 - **Disk use / data retention**: superseded history (old versions of
   objects, removed memberships and permissions) is kept for
   `retention_months` (12 by default, per client in the `client` table)

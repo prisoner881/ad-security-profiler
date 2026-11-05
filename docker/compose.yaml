@@ -1,4 +1,4 @@
-# FortifyData AD/Entra audit collector -- docker compose. See CONTAINER.md.
+# FortifyData AD/Entra audit collector -- docker compose. See docs/CONTAINER.md.
 #
 # Two containers: the collector (collector_daemon.py) and its PostgreSQL 17
 # database. The database is on an internal network with no outside access
@@ -20,7 +20,7 @@ services:
       POSTGRES_USER: adprofiler
       POSTGRES_DB: adprofiler
       # Read once, when the database is first created; changing the file
-      # later does not change the database password (see CONTAINER.md).
+      # later does not change the database password (see docs/CONTAINER.md).
       POSTGRES_PASSWORD_FILE: /run/secrets/pg_password
     secrets:
       - pg_password
@@ -39,7 +39,7 @@ services:
     logging: *logging
 
   collector:
-    image: ${COLLECTOR_IMAGE:-fortifydata-ad-collector:1.0.2}
+    image: ${COLLECTOR_IMAGE:-fortifydata-ad-collector:1.0.3}
     restart: unless-stopped
     init: true
     # The owner of ./secrets, ./config and ./data (install.sh sets these).

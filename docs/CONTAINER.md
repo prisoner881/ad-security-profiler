@@ -58,8 +58,8 @@ day-to-day operation.
 From the repository root:
 
 ```
-docker build -t fortifydata-ad-collector:1.0.2 .
-docker save fortifydata-ad-collector:1.0.2 | gzip > fortifydata-ad-collector-1.0.2.tar.gz
+docker build -t fortifydata-ad-collector:1.0.3 .
+docker save fortifydata-ad-collector:1.0.3 | gzip > fortifydata-ad-collector-1.0.3.tar.gz
 ```
 
 - **Size:** the image is about 320 MB, about 75 MB compressed.
@@ -101,7 +101,7 @@ On a Linux host with Docker Engine and the compose plugin:
 2. **Load the image**, if you received it as a file:
 
    ```
-   docker load -i fortifydata-ad-collector-1.0.2.tar.gz
+   docker load -i fortifydata-ad-collector-1.0.3.tar.gz
    ```
 
 3. **Prepare the accounts.** The client's administrators set up the AD
@@ -188,8 +188,12 @@ the database volume, so leave it out to keep the data.
 3. Set `COLLECTOR_IMAGE` in `.env` to the new tag.
 4. Run `docker compose up -d`.
 
-The daemon applies any new schema migration at the start of its next run
-(`schema_setup.py`).
+The daemon applies any schema migration shipped with the new image at the
+start of its next run (`schema_setup.py`). Migrations ship from v51 onward;
+the earlier ones were removed. A test installation whose database is older
+than the image's schema, with no migration for it, must start again with a
+new database: `docker compose down -v` deletes the database volume, then
+`docker compose up -d` creates it afresh.
 
 PostgreSQL minor versions come with a newer `postgres:17-trixie` image
 (`docker compose pull postgres`). A major-version upgrade (18) needs a dump
