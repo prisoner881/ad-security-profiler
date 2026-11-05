@@ -1,7 +1,7 @@
 """
 platform_client.py -- collector_daemon.py's side of the FortifyData platform
 ==============================================================================
-VERSION: 1.0
+VERSION: 2.0
 
 collector_daemon.py needs four things from "the platform":
 
@@ -20,42 +20,48 @@ LocalPlatform ([platform] mode = "local")
     before every run, so an edit needs no restart), secrets from files or
     environment variables, the lease calls do nothing and the health report
     goes only to the daemon log and its status file. Pushing still works
-    when an activation key is configured: the ingest API (adaudit_push.py,
-    contract 1.0) does not depend on the activation endpoints below. This
-    is the mode to run in until the platform endpoints exist.
+    when an activation key is configured.
 
 FortifyDataPlatform ([platform] mode = "fortifydata")
-    The activation, configuration and health endpoints, as PROPOSED to the
-    platform developer (questions-for-developer, sections 3 to 5). NONE OF
-    THEM IS CONFIRMED YET. Every path, field name, status code and the
-    secret encryption scheme are marked PROVISIONAL below and kept in one
-    place each, so that adapting this module to the developer's answers
-    touches only this file. Tested against a local mock only.
+    [2.0] The platform's collector API as the platform developer specified
+    it (documents 04 and 05), deployed on their test environment. All calls
+    go to the environment's API server and carry "Authorization: LicenseKey
+    <license key>":
 
-PROVISIONAL API (all relative to the environment's API server, the same one
-adaudit_push.py pushes to; authenticated with "Authorization: LicenseKey
-<license key from the activation key>"):
+    POST   /api/v1/integration/collector/activations/{instanceId}
+           take the lease (no body). 201 {"instanceId", "leaseExpiryDate",
+           "serverDate"}; a restart with the instance id that holds the
+           lease gets 201 too. 409 another instance holds it.
+    PUT    .../activations/{instanceId}    renew: 202 (same body); 404 no
+           activation for this id, 409 another instance holds it -> POST.
+    DELETE .../activations/{instanceId}    release: 202 always.
+    POST   /api/v1/integration/collector/health
+           the health report, every 5 minutes. The response is the
+           collector's record and its configuration, flat (document 05):
+           identity and lifecycle (status, targetVersion, autoUpgrade,
+           imageName, ...), the AD settings (host, username, password,
+           useLdaps, ldapPort, caCertificate, domainFqdn, readSysvol,
+           sysvolKerberos), Entra (entraTenantId -- null: no Entra --
+           entraClientId, entraClientSecret, readPtaAgents), the schedule
+           (scheduleTime, scheduleTimeZone) and configVersion.
 
-    POST   /collector/activations/{instance_id}   take the lease
-           body {"collector_version", "hostname", "public_key_pem"}
-           201/200 ok (body may give "lease_seconds"); 409 another instance
-           holds it; 401/403 key refused
-    PUT    /collector/activations/{instance_id}   renew the lease
-           200/204 ok; 404/409/410 the lease is lost (expired or taken)
-    DELETE /collector/activations/{instance_id}   release (404/410 are fine)
-    GET    /collector/configuration               the run configuration
-           200 JSON (RUN CONFIGURATION below); 404 not configured yet
-    POST   /collector/health/{instance_id}        the health report (JSON)
+    401: the key is not recognised or the integration is switched off --
+    the client must fetch a new activation key from the portal; 403: the key
+    is valid but may not call these endpoints. Both are retried every 5
+    minutes. A 404 from the health check: no collector for this key, or it
+    was deleted -- decommissioned: no scans, keep polling. Status EXPIRED:
+    no scans, keep reporting; FAILED (set by the platform from our own error
+    report) is ignored. The lease length comes from leaseExpiryDate - serverDate, and
+    serverDate (or the Date header) gives the clock skew, which the daemon
+    warns about. The secrets arrive as plain strings over TLS (the platform's
+    decision, Q4.3): there is no key pair and no encryption. host, username
+    or password null: not configured yet (no run, keep polling); Entra fields
+    null: no Entra step. ldapPort is always used as given.
 
-instance_id is a random UUID the daemon creates on first start and keeps in
-its state directory. The daemon key pair (RSA-3072, private key in
-state_dir/daemon_key.pem, mode 0600) is created at the same time; its public
-key goes with every activation so that the platform can encrypt secrets to
-this installation only.
+RUN CONFIGURATION, as the daemon uses it (the TOML file's tables; the
+platform's flat fields map onto it in config_from_health()):
 
-RUN CONFIGURATION (the same field names in the TOML file and in the JSON):
-
-    version                   any string or number; logged, never the content
+    version                   logged, never the content (configVersion)
     schedule.time             "HH:MM", 24-hour, local to schedule.timezone
     schedule.timezone         IANA name, e.g. "America/Chicago" (default UTC)
     ad.dc_host                required
@@ -74,59 +80,57 @@ RUN CONFIGURATION (the same field names in the TOML file and in the JSON):
     entra.client_secret       SECRET, required when entra is present
     entra.include_pta_agents  default false
 
-A SECRET field from the platform is either a plain string (accepted with a
-warning: a TLS-inspecting proxy can read it) or the PROVISIONAL envelope
-
-    {"alg": "RSA-OAEP-256+A256GCM", "ek": <b64>, "iv": <b64>, "ct": <b64>}
-
-ek is a fresh AES-256 key encrypted with RSA-OAEP (SHA-256, MGF1-SHA-256) to
-the daemon's public key; iv is the 12-byte GCM nonce; ct is the AES-GCM
-ciphertext of the UTF-8 secret followed by the 16-byte tag; the additional
-authenticated data is the field's path ("ad.password",
-"entra.client_secret"), so an encrypted value cannot be moved to another
-field. In the TOML file a secret is never written inline: see
-LocalPlatform.
-
 Nothing in this module logs or returns a secret except as the value of the
-secret field itself; RunConfig's repr hides them.
+secret field itself; RunConfig's repr hides them, and the cacheable copy of
+a platform response (PlatformResponse.cacheable) leaves them out.
 
 CHANGELOG:
-    1.0  First version (collector_daemon.py 1.0.0).
+    2.0  The platform's real collector API (documents 04 and 05): new paths,
+         no request body, 202 renewals, the lease from leaseExpiryDate, the
+         clock skew, the configuration in the health response (flat fields,
+         configVersion, status, targetVersion / autoUpgrade / imageName), no
+         key pair or secret encryption (TLS only, Q4.3). The environment
+         names prod / eu / test (adaudit_push.py).
+    1.0  First version (collector_daemon.py 1.0.0), against a proposed API.
 """
 
-import base64
 import json
 import os
 import re
-import socket
 import stat
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from datetime import time as dtime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import adaudit_push
 import secret_input
 
-VERSION = "1.0"
+VERSION = "2.0"
 
 USER_AGENT_PRODUCT = "fortifydata-ad-collector"
 
-# --- PROVISIONAL: pending the platform developer's answers -----------------
-ACTIVATION_PATH = "/collector/activations/{instance_id}"
-CONFIGURATION_PATH = "/collector/configuration"
-HEALTH_PATH = "/collector/health/{instance_id}"
+# The platform's collector API (documents 04 and 05).
+ACTIVATION_PATH = "/api/v1/integration/collector/activations/{instance_id}"
+HEALTH_PATH = "/api/v1/integration/collector/health"
 ACTIVATE_OK = {200, 201}
-RENEW_OK = {200, 204}
-RENEW_LEASE_LOST = {404, 409, 410}
-RELEASE_OK = {200, 202, 204, 404, 410}
-SECRET_ALG = "RSA-OAEP-256+A256GCM"
+RENEW_OK = {200, 202, 204}
+RENEW_LEASE_LOST = {404, 409}
+RELEASE_OK = {200, 202, 204, 404}
 DEFAULT_LEASE_SECONDS = 300
-# ---------------------------------------------------------------------------
+# The fields of a health response that hold secrets: never cached on disk.
+SECRET_FIELDS = ("password", "entraClientSecret")
+# Collector statuses in which no scan runs; the health checks continue
+# (platform developer, answer to Q3 of the follow-up). EXPIRED: the record is
+# returned unchanged and no update is taken. DELETED is never returned (the
+# health check answers 404 instead, CollectorRemoved); DECOMMISSIONED is the
+# daemon's own name for that. FAILED is a display state the platform sets
+# from our own error report, and is ignored.
+STOPPED_STATUSES = ("EXPIRED", "DELETED", "DECOMMISSIONED")
 
-DAEMON_KEY_FILE = "daemon_key.pem"
-DAEMON_KEY_BITS = 3072
 REQUEST_TIMEOUT_SECONDS = 30
 TRANSIENT_STATUSES = {408, 429, 500, 502, 503, 504}
 
@@ -161,6 +165,16 @@ class LeaseLost(PlatformError):
 class ConfigError(Exception):
     """The run configuration is missing, incomplete or invalid. The message
     says what to fix and never contains a secret."""
+
+
+class CollectorRemoved(PlatformError):
+    """[2.0] The health check answered 404: the platform has no collector for
+    this key, or it was deleted (decommissioned). No scans; keep polling."""
+
+
+class NotConfigured(ConfigError):
+    """[2.0] The platform has no AD settings for this collector yet (host,
+    username or password null): no run, keep polling."""
 
 
 # ============================================================================
@@ -326,98 +340,87 @@ def parse_run_config(data, secret_value):
     return RunConfig(version=version, schedule=schedule, ad=ad, entra=entra, warnings=warnings)
 
 
-# ============================================================================
-# The daemon key pair and secret envelopes (PROVISIONAL scheme)
-# ============================================================================
-
-class DaemonKey:
-    """RSA private key kept in the state directory, created on first use."""
-
-    def __init__(self, state_dir):
-        self.path = Path(state_dir) / DAEMON_KEY_FILE
-        self._key = None
-
-    def load_or_create(self):
-        from cryptography.hazmat.primitives import serialization
-        from cryptography.hazmat.primitives.asymmetric import rsa
-        if self._key is not None:
-            return self._key
-        if self.path.exists():
-            mode = self.path.stat().st_mode & 0o077
-            if mode:
-                os.chmod(self.path, 0o600)
-            self._key = serialization.load_pem_private_key(self.path.read_bytes(), password=None)
-            return self._key
-        key = rsa.generate_private_key(public_exponent=65537, key_size=DAEMON_KEY_BITS)
-        pem = key.private_bytes(serialization.Encoding.PEM,
-                                serialization.PrivateFormat.PKCS8,
-                                serialization.NoEncryption())
-        tmp = self.path.with_suffix(".tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(pem)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, self.path)
-        self._key = key
-        return key
-
-    def public_key_pem(self):
-        from cryptography.hazmat.primitives import serialization
-        return self.load_or_create().public_key().public_bytes(
-            serialization.Encoding.PEM,
-            serialization.PublicFormat.SubjectPublicKeyInfo).decode("ascii")
-
-    def fingerprint(self):
-        """SHA-256 of the DER public key, hex (loggable)."""
-        import hashlib
-        from cryptography.hazmat.primitives import serialization
-        der = self.load_or_create().public_key().public_bytes(
-            serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
-        return hashlib.sha256(der).hexdigest()
-
-    def decrypt(self, envelope, field_path):
-        from cryptography.exceptions import InvalidTag
-        from cryptography.hazmat.primitives import hashes
-        from cryptography.hazmat.primitives.asymmetric import padding
-        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-        if envelope.get("alg") != SECRET_ALG:
-            raise ConfigError(f"{field_path} is encrypted with {str(envelope.get('alg'))[:40]!r}, "
-                              f"not {SECRET_ALG}")
-        try:
-            ek = base64.b64decode(envelope["ek"], validate=True)
-            iv = base64.b64decode(envelope["iv"], validate=True)
-            ct = base64.b64decode(envelope["ct"], validate=True)
-        except (KeyError, TypeError, ValueError):
-            raise ConfigError(f"{field_path}: the encrypted value is malformed (ek, iv, ct)")
-        try:
-            cek = self.load_or_create().decrypt(ek, padding.OAEP(
-                mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(),
-                label=None))
-            plain = AESGCM(cek).decrypt(iv, ct, field_path.encode("utf-8"))
-        except (ValueError, InvalidTag):
-            raise ConfigError(f"{field_path} cannot be decrypted with this installation's key "
-                              f"(encrypted to another installation, or to a key from before "
-                              f"the state directory was reset); enter it again in the portal")
-        try:
-            return plain.decode("utf-8")
-        except UnicodeDecodeError:
-            raise ConfigError(f"{field_path} does not decrypt to text")
+def config_from_health(data):
+    """[2.0] RunConfig from a health response's flat fields (document 05).
+    Raises NotConfigured when host, username or password is null, and
+    ConfigError when a field is unusable."""
+    missing = [name for name in ("host", "username", "password")
+               if data.get(name) in (None, "")]
+    if missing:
+        raise NotConfigured("the collector is not configured in the FortifyData portal yet ("
+                            + ", ".join(missing) + " not set)")
+    use_ldaps = data.get("useLdaps")
+    use_ldaps = True if use_ldaps is None else use_ldaps
+    port = data.get("ldapPort")
+    if port is None:  # document 05 says it is always present; be safe
+        port = 636 if use_ldaps is True else 389
+    ad = {"dc_host": data.get("host"), "username": data.get("username"),
+          "password": data.get("password"), "ssl": use_ldaps, "port": port,
+          "ca_cert_pem": data.get("caCertificate") or None,
+          "domain_fqdn": data.get("domainFqdn"),
+          "sysvol": data.get("readSysvol"), "sysvol_kerberos": data.get("sysvolKerberos")}
+    warnings = []
+    entra = None
+    if data.get("entraTenantId"):
+        if data.get("entraClientId") and data.get("entraClientSecret"):
+            entra = {"tenant_id": data.get("entraTenantId"),
+                     "app_id": data.get("entraClientId"),
+                     "client_secret": data.get("entraClientSecret"),
+                     "include_pta_agents": data.get("readPtaAgents")}
+        else:
+            warnings.append("Entra: entraTenantId is set but the client id or secret is not; "
+                            "the Entra step is skipped")
+    schedule = {"time": data.get("scheduleTime"), "timezone": data.get("scheduleTimeZone")}
+    if not data.get("scheduleTime"):
+        warnings.append("scheduleTime is not set: 02:00 is used")
+    version = data.get("configVersion")
+    cfg = parse_run_config({"version": "unversioned" if version is None else version,
+                            "schedule": schedule, "ad": ad, "entra": entra},
+                           lambda path, raw: raw if isinstance(raw, str) and raw else None)
+    cfg.warnings = warnings + cfg.warnings
+    return cfg
 
 
-def encrypt_secret(public_key_pem, plaintext, field_path):
-    """The platform side of the envelope; used by tests and the mock."""
-    from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.hazmat.primitives.asymmetric import padding
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-    pub = serialization.load_pem_public_key(public_key_pem.encode("ascii"))
-    cek = AESGCM.generate_key(bit_length=256)
-    iv = os.urandom(12)
-    ct = AESGCM(cek).encrypt(iv, plaintext.encode("utf-8"), field_path.encode("utf-8"))
-    ek = pub.encrypt(cek, padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                                       algorithm=hashes.SHA256(), label=None))
-    b64 = lambda b: base64.b64encode(b).decode("ascii")  # noqa: E731
-    return {"alg": SECRET_ALG, "ek": b64(ek), "iv": b64(iv), "ct": b64(ct)}
+@dataclass
+class PlatformResponse:
+    """[2.0] What a health exchange brought back."""
+    config: object = None          # RunConfig, or None
+    config_error: str = None       # why there is no usable configuration
+    not_configured: bool = False
+    config_version: object = None
+    status: str = None             # the collector's status on the platform
+    target_version: str = None
+    auto_upgrade: bool = None
+    image_name: str = None
+    cacheable: dict = None         # the response without its secrets
+
+    @property
+    def scans_stopped(self):
+        return (self.status or "").upper() in STOPPED_STATUSES
+
+
+def response_from_health(data):
+    """PlatformResponse from a health response body (a dict)."""
+    resp = PlatformResponse(
+        config_version=data.get("configVersion"), status=data.get("status"),
+        target_version=data.get("targetVersion"), auto_upgrade=data.get("autoUpgrade"),
+        image_name=data.get("imageName"),
+        cacheable={k: v for k, v in data.items() if k not in SECRET_FIELDS})
+    try:
+        resp.config = config_from_health(data)
+    except NotConfigured as exc:
+        resp.config_error, resp.not_configured = str(exc), True
+    except ConfigError as exc:
+        resp.config_error = f"the configuration in the portal is not usable: {exc}"
+    return resp
+
+
+@dataclass
+class LeaseInfo:
+    """[2.0] A lease answer: its length, and the platform's clock against
+    ours (seconds; positive: our clock is ahead)."""
+    seconds: int = DEFAULT_LEASE_SECONDS
+    clock_skew: float = None
 
 
 # ============================================================================
@@ -432,25 +435,30 @@ class PlatformClient:
     activation_key = None
     #: an API URL override passed to adaudit.py --api-url, or None
     api_url_override = None
+    #: [2.0] True when the configuration arrives with the health exchange
+    config_via_health = False
 
     def describe(self):
         raise NotImplementedError
 
     def activate(self):
-        """Takes the lease. Returns the lease length in seconds."""
+        """Takes the lease. Returns LeaseInfo (None: no lease needed)."""
         raise NotImplementedError
 
     def renew(self):
+        """Renews the lease. Returns LeaseInfo or None."""
         raise NotImplementedError
 
     def release(self):
         raise NotImplementedError
 
     def fetch_config(self):
-        """Returns RunConfig; raises ConfigError or PlatformError."""
+        """Local mode: returns RunConfig; raises ConfigError."""
         raise NotImplementedError
 
-    def report_health(self, report):
+    def exchange_health(self, report):
+        """Sends the health report. Returns PlatformResponse, or None when
+        the health report goes nowhere (local mode). Raises PlatformError."""
         raise NotImplementedError
 
     @property
@@ -487,7 +495,7 @@ def load_activation_key(path, allow_env=True):
 def check_api_url(url):
     if not (url.startswith("https://")
             or re.match(r"http://(localhost|127\.0\.0\.1)(:\d+)?(/|$)", url)):
-        raise ConfigError("[platform] api_url must be https:// (or test / us / eu); plain "
+        raise ConfigError("[platform] api_url must be https:// (or prod / eu / test); plain "
                           "http is only accepted for localhost, for testing against a mock")
     return url.rstrip("/")
 
@@ -525,8 +533,8 @@ class LocalPlatform(PlatformClient):
     def release(self):
         pass
 
-    def report_health(self, report):
-        pass
+    def exchange_health(self, report):
+        return None
 
     # Environment variables for the secret fields, when no <name>_file is set.
     SECRET_ENV = {"ad.password": "AD_BIND_PASSWORD", "entra.client_secret": "ENTRA_APP_SECRET"}
@@ -595,25 +603,37 @@ class LocalPlatform(PlatformClient):
 
 
 # ============================================================================
-# FortifyData mode (PROVISIONAL)
+# FortifyData mode
 # ============================================================================
+
+def _parse_time(text):
+    if not isinstance(text, str) or not text:
+        return None
+    try:
+        moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
 
 class FortifyDataPlatform(PlatformClient):
 
     mode = "fortifydata"
+    config_via_health = True
 
-    def __init__(self, lic, activation_key, instance_id, daemon_key, collector_version,
+    def __init__(self, lic, activation_key, instance_id, collector_version,
                  api_url=None, ca_bundle=None, timeout=REQUEST_TIMEOUT_SECONDS, log=None):
         import requests
         self._requests = requests
         self.license = lic
         self.activation_key = activation_key
         self.instance_id = str(uuid.UUID(str(instance_id)))
-        self.key = daemon_key
         self.collector_version = collector_version
         self.api_url_override = check_api_url(api_url) if api_url else None
-        self.base_url = self.api_url_override or adaudit_push.API_SERVERS[
-            lic.environment_or_default]
+        try:
+            self.base_url = check_api_url(lic.api_url(self.api_url_override))
+        except adaudit_push.LicenseKeyError as exc:
+            raise ConfigError(f"{exc} ([platform] api_url)")
         self.timeout = timeout
         self.log = log
         self.session = requests.Session()
@@ -632,8 +652,8 @@ class FortifyDataPlatform(PlatformClient):
 
     def describe(self):
         return (f"FortifyData mode: company {self.license.company_id}, environment "
-                f"{self.license.environment_or_default}, API {self.base_url}, instance "
-                f"{self.instance_id} (PROVISIONAL activation/configuration/health endpoints)")
+                f"{self.license.environment or 'none'}, API {self.base_url}, instance "
+                f"{self.instance_id}")
 
     # --- HTTP ---------------------------------------------------------------
 
@@ -666,43 +686,66 @@ class FortifyDataPlatform(PlatformClient):
         except ValueError:
             pass
         detail = f" ({reason})" if reason else ""
-        if resp.status_code in (401, 403):
+        if resp.status_code == 401:
             return LicenseRefused(
-                f"{what}: the platform refused the license key (HTTP {resp.status_code})"
-                f"{detail}. Check that the AD audit integration is enabled for this client and "
-                f"that the activation key is current", retry_after)
+                f"{what}: the platform does not accept the activation key (HTTP 401){detail}: "
+                f"it is not recognised, or the AD audit integration is switched off. Fetch a "
+                f"new activation key from the FortifyData portal", retry_after)
+        if resp.status_code == 403:
+            return LicenseRefused(
+                f"{what}: the activation key is valid but not allowed to call this endpoint "
+                f"(HTTP 403){detail}. Check the collector's licence in the FortifyData portal",
+                retry_after)
         if resp.status_code in TRANSIENT_STATUSES:
             return PlatformError(f"{what}: HTTP {resp.status_code}{detail}; will retry",
                                  retry_after)
         return PlatformError(f"{what}: unexpected HTTP {resp.status_code}{detail}", retry_after)
 
+    def _lease_info(self, resp):
+        """LeaseInfo from a 201/202 answer: the length from leaseExpiryDate -
+        serverDate, the skew from serverDate (or the Date header)."""
+        body = self._body(resp)
+        body = body if isinstance(body, dict) else {}
+        server = _parse_time(body.get("serverDate"))
+        if server is None and resp.headers.get("Date"):
+            try:
+                server = parsedate_to_datetime(resp.headers["Date"])
+            except (TypeError, ValueError):
+                server = None
+        expiry = _parse_time(body.get("leaseExpiryDate"))
+        seconds = DEFAULT_LEASE_SECONDS
+        if expiry is not None and server is not None:
+            seconds = int((expiry - server).total_seconds())
+            if seconds <= 0:
+                seconds = DEFAULT_LEASE_SECONDS
+        skew = None
+        if server is not None:
+            skew = (datetime.now(timezone.utc) - server).total_seconds()
+        return LeaseInfo(seconds, skew)
+
     # --- lease --------------------------------------------------------------
 
     def activate(self):
         what = "activation"
-        payload = {"collector_version": self.collector_version,
-                   "hostname": socket.gethostname(),
-                   "public_key_pem": self.key.public_key_pem()}
-        resp = self._call("POST", ACTIVATION_PATH.format(instance_id=self.instance_id),
-                          what, payload)
+        resp = self._call("POST", ACTIVATION_PATH.format(instance_id=self.instance_id), what)
         if resp.status_code in ACTIVATE_OK:
-            body = self._body(resp) or {}
-            lease = body.get("lease_seconds") if isinstance(body, dict) else None
-            return lease if isinstance(lease, int) and lease > 0 else DEFAULT_LEASE_SECONDS
+            return self._lease_info(resp)
         if resp.status_code == 409:
-            raise LicenseInUse("activation: another collector instance holds this license "
-                               "(HTTP 409). Stop the other instance, or wait for its lease to "
-                               "expire if it is gone")
+            raise LicenseInUse("activation: license in use by another instance (HTTP 409). Stop "
+                               "the other collector, or wait for its lease to expire if it is "
+                               "gone")
         raise self._unexpected(resp, what)
 
     def renew(self):
         what = "lease renewal"
         resp = self._call("PUT", ACTIVATION_PATH.format(instance_id=self.instance_id), what)
         if resp.status_code in RENEW_OK:
-            return
+            return self._lease_info(resp)
         if resp.status_code in RENEW_LEASE_LOST:
             raise LeaseLost(f"lease renewal: the lease is no longer held (HTTP "
-                            f"{resp.status_code}); re-activating")
+                            f"{resp.status_code}"
+                            + (", another instance holds it" if resp.status_code == 409 else "")
+                            + "); re-activating")
         raise self._unexpected(resp, what)
 
     def release(self):
@@ -711,38 +754,18 @@ class FortifyDataPlatform(PlatformClient):
         if resp.status_code not in RELEASE_OK:
             raise self._unexpected(resp, what)
 
-    # --- configuration and health -------------------------------------------
+    # --- health and configuration -------------------------------------------
 
-    def fetch_config(self):
-        what = "configuration fetch"
-        resp = self._call("GET", CONFIGURATION_PATH, what)
+    def exchange_health(self, report):
+        what = "health check"
+        resp = self._call("POST", HEALTH_PATH, what, json.loads(json.dumps(report, default=str)))
         if resp.status_code == 404:
-            raise ConfigError("the platform has no run configuration for this client yet "
-                              "(HTTP 404): enter the AD settings in the portal")
-        if resp.status_code != 200:
+            raise CollectorRemoved("health check: the platform has no collector for this "
+                                   "activation key, or it was deleted (HTTP 404): no scans run "
+                                   "until it is set up again in the portal")
+        if resp.status_code >= 300:
             raise self._unexpected(resp, what)
         data = self._body(resp)
         if not isinstance(data, dict):
-            raise PlatformError("configuration fetch: the response is not a JSON object")
-        warnings = []
-
-        def secret_value(path, raw):
-            if raw is None or raw == "":
-                return None
-            if isinstance(raw, str):
-                warnings.append(f"{path} arrived unencrypted (protected by TLS only)")
-                return raw
-            if isinstance(raw, dict):
-                return self.key.decrypt(raw, path)
-            raise ConfigError(f"{path} is neither text nor an encrypted value")
-
-        cfg = parse_run_config(data, secret_value)
-        cfg.warnings = warnings + cfg.warnings
-        return cfg
-
-    def report_health(self, report):
-        what = "health report"
-        resp = self._call("POST", HEALTH_PATH.format(instance_id=self.instance_id), what,
-                          json.loads(json.dumps(report, default=str)))
-        if resp.status_code >= 300:
-            raise self._unexpected(resp, what)
+            raise PlatformError("health check: the response is not a JSON object")
+        return response_from_health(data)

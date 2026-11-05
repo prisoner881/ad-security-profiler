@@ -6,21 +6,18 @@ on its own; it is stopped from outside. Once a day it runs the collection,
 the evaluation and the push. Every 5 minutes it reports its health. It logs
 everything it does.
 
-**Status: the daemon is complete, but part of the platform side is not
-specified yet.**
-
-- **Local mode** works today, and pushes results when an activation key is
-  configured.
-- **FortifyData mode** uses three platform endpoints, for the lease, the run
-  configuration and health. They were proposed to the platform developer but
-  are not specified yet; this document calls them **provisional**. They are
-  implemented in one place (`platform_client.py`) and tested only against a
-  local mock.
+**Status:** both modes are complete.
+- **Local mode** takes its configuration from its own file, and pushes
+  results when an activation key is configured.
+- **FortifyData mode** uses the platform's collector API as the platform
+  developer specified it (lease, health check carrying the configuration).
+  It has been tested against a mock built to their specification; their
+  test environment has the real API.
 
 | File | What it is |
 |---|---|
 | `collector_daemon.py` | The daemon: scheduling, the run, health, logging, stopping |
-| `platform_client.py` | The platform interface: `LocalPlatform` and `FortifyDataPlatform` (provisional), configuration parsing, the daemon key pair |
+| `platform_client.py` | The platform interface: `LocalPlatform` and `FortifyDataPlatform`, configuration parsing |
 | `collector_daemon.example.toml` | Annotated configuration file |
 | `secret_input.py` 1.1 | Adds `allow_prompt=False` and `read_secret_file()` for the daemon |
 
@@ -127,78 +124,118 @@ There is no lease. The health report goes only to `status.json` and the log.
 
 With an activation key (`activation_key_file`, or `FD_ACTIVATION_KEY` /
 `FD_ACTIVATION_KEY_FILE`), the evaluation is pushed to the ingest API
-(contract 1.0), which works without the provisional endpoints. Use this mode
-until the platform endpoints exist.
+(contract 1.0).
 
-### FortifyData (`[platform] mode = "fortifydata"`) -- provisional
+### FortifyData (`[platform] mode = "fortifydata"`)
 
-The activation key is required. It gives:
-- the license key, sent as `Authorization: LicenseKey …`;
+This mode uses the platform's collector API as the platform developer
+specified it (their documents 04 and 05). It is deployed on their test
+environment.
+
+**The activation key** is required. It gives:
+- the license key, sent as `Authorization: LicenseKey …` on every call;
 - the company;
-- the environment, which picks the API server. `api_url` overrides it.
+- the environment `e`, which picks the API server:
 
-On first start the daemon creates two things in `state_dir`:
-- a random **instance id**;
-- an **RSA-3072 key pair**, with the private key in `daemon_key.pem`
-  (mode `0600`).
+| `e` | API server |
+|---|---|
+| `prod` (US production; `us` is never issued) | `https://api.fortifydata.com` |
+| `eu` | `https://api.eu.fortifydata.com` |
+| `test` | `https://api.test.fortifydata.com` |
 
-The public key is sent with every activation, so that the platform can
-encrypt the secrets to this installation only. Keep `state_dir` on a
-persistent volume. If it is lost, the installation gets a new identity and
-key: the platform must then re-encrypt the secrets, and the old lease
-expires on its own.
+Any other environment, and a bare license key, need `[platform] api_url`;
+without it the daemon refuses to start. A key without `e` is refused: no
+server is guessed.
 
-The provisional endpoints, all relative to the environment's API server:
+**Instance id.** On first start the daemon creates a random instance id in
+`state_dir`. Keep `state_dir` on a persistent volume. Restarting with the
+same id resumes the lease at once; there is no wait.
 
-| Call | Request | Answers the daemon understands |
+**The calls**, all relative to the API server:
+
+| Call | Request | Answers |
 |---|---|---|
-| Take the lease | `POST /collector/activations/{instance_id}`, body `{collector_version, hostname, public_key_pem}` | `200`/`201` (optional `lease_seconds`); `409` license in use; `401`/`403` refused |
-| Renew | `PUT /collector/activations/{instance_id}`, every `renew_interval` (120 s), or a third of the lease length if that is shorter | `200`/`204`; `404`/`409`/`410` lease lost → re-activate |
-| Release | `DELETE /collector/activations/{instance_id}`, on stop | `200`/`202`/`204`/`404`/`410` |
-| Run configuration | `GET /collector/configuration` | `200` JSON (below); `404` not configured yet |
-| Health | `POST /collector/health/{instance_id}`, every `health_interval` (300 s) | any `2xx` |
+| Take the lease | `POST /api/v1/integration/collector/activations/{instanceId}`, no body | `201` with `leaseExpiryDate` and `serverDate`; `409` license in use by another instance |
+| Renew | `PUT …/activations/{instanceId}`, every 2 minutes (or a third of the lease, if shorter) | `202`; `404` or `409` lease lost → take it again |
+| Release | `DELETE …/activations/{instanceId}`, on stop | `202` |
+| Health check | `POST /api/v1/integration/collector/health`, every 5 minutes, with the health report (section 5) | `200` with the collector's record **and its configuration**; `404` no collector for this key, or deleted |
 
-**Run configuration JSON.** It uses the same field names as the TOML
-sections:
+- **401:** the key is not recognised, or the integration is switched off.
+  The client must fetch a new activation key from the portal; the daemon
+  retries every 5 minutes.
+- **403:** the key is valid but may not call these endpoints.
 
-```json
-{"version": 7,
- "schedule": {"time": "02:30", "timezone": "America/Chicago"},
- "ad": {"dc_host": "dc01.corp.example.com", "username": "svc_adaudit@corp.example.com",
-        "password": {"alg": "RSA-OAEP-256+A256GCM", "ek": "…", "iv": "…", "ct": "…"},
-        "ssl": true, "ca_cert_pem": "-----BEGIN CERTIFICATE-----…", "sysvol": true,
-        "domain_fqdn": "corp.example.com"},
- "entra": {"tenant_id": "…", "app_id": "…", "client_secret": {"alg": "…", "ek": "…", "iv": "…", "ct": "…"}}}
-```
+**Lease and clock.** The lease length comes from `leaseExpiryDate` minus
+`serverDate`. The daemon warns when its clock is more than 2 minutes off
+the platform's.
 
-**Secret fields.** `ad.password` and `entra.client_secret` are encrypted:
-- an AES-256-GCM key is encrypted with RSA-OAEP (SHA-256) to the daemon's
-  public key (`ek`);
-- `iv` is the 12-byte nonce;
-- `ct` is the ciphertext followed by the tag;
-- the additional authenticated data is the field path (`ad.password`), so a
-  value cannot be moved to another field.
+**The configuration comes with the health check.** There is no separate
+configuration call. Every health answer carries the collector's whole
+configuration, and is the current truth:
+- **Flat fields:** `host`, `username`, `password`, `useLdaps`, `ldapPort`,
+  `caCertificate`, `domainFqdn`, `readSysvol`, `sysvolKerberos`,
+  `entraTenantId`, `entraClientId`, `entraClientSecret`, `readPtaAgents`,
+  `scheduleTime`, `scheduleTimeZone` and `configVersion`. They map onto the
+  same run settings as the local mode's `[ad]`, `[entra]` and `[schedule]`.
+- **`ldapPort`** is always passed to adprofiler.py as given.
+- **`host`, `username` or `password` null:** the collector is not
+  configured yet. No run; the health checks continue.
+- **`entraTenantId` null:** no Entra step (`adaudit.py --skip-entra`).
+- **A password changed in the portal** applies within 5 minutes.
+- **`configVersion`** is logged (never the content) and sent back in the
+  health report.
 
-A plain string is also accepted, with a warning in the log, because a
-TLS-inspecting proxy could read it.
+**Secrets** arrive as plain strings over TLS. That is the platform's
+decision: there is no key pair and no encryption. The daemon keeps them in
+memory only and passes them to the scripts through pipes (section 4).
+
+**The cache.** The last health answer is cached in
+`state_dir/platform_config.json` (mode `0600`) **without its secrets**.
+- **Platform outage while running:** runs continue with the configuration
+  in memory.
+- **Restart during an outage:** runs wait for the platform's next answer,
+  because the secrets are not on disk.
+
+**Collector status** in the health answer:
+
+| Status | The daemon |
+|---|---|
+| `EXPIRED` | Runs no scan; keeps sending health checks |
+| `FAILED` | Ignores it (the platform sets it from our own error report) |
+| A `404` from the health check (no collector, or deleted) | Reports itself `collector_decommissioned`, runs no scan, keeps polling |
+| Anything else (`CONFIGURED`, `HEALTHY`, `OUTDATED`, …) | Runs normally |
+
+**Updates.** When `targetVersion` is newer than the running version, the
+daemon logs it once, with `autoUpgrade` and `imageName`, and reports it in
+its health and status (`platform.update_available`). Installing the new
+image is the updater's job, which is still to be built. Our health report's
+top-level `version` is the image version; the platform compares it with
+`targetVersion` to show a collector as `OUTDATED`.
+
+**Schedule offset.** Each installation starts its scheduled runs a random 0
+to 30 minutes after the time set in the portal. The offset is chosen once,
+kept in `state.json`, and logged at start, so clients do not all start
+together.
+
+**Push.** The push to the ingest API does not check the lease: a scan that
+loses its lease midway still finishes and pushes.
 
 **Error handling.** Each problem has its own state, logged once and
-reported in the health report, and is retried:
+reported, and is retried:
 
 | State | Meaning | Retried |
 |---|---|---|
 | `license_in_use` | Another instance holds the license | Every 5 min |
-| `license_refused` | 401/403 | Every 5 min |
+| `license_refused` | 401 or 403 | Every 5 min |
 | `platform_unreachable` | | With backoff from 30 s to 5 min |
-| `config_error` | | Every 5 min |
+| `waiting_for_configuration` | No health answer yet | At the next health check |
+| `not_configured` | The portal has no AD settings yet | At the next health check |
+| `config_error` | A setting from the portal is unusable | At the next health check |
+| `collector_expired`, `collector_decommissioned` | See the status table | At the next health check |
 
 Behind a TLS-inspecting proxy, set `ca_bundle`. The daemon uses it for its
 own requests, and passes it to the scripts as `REQUESTS_CA_BUNDLE`, so the
-push uses it too. The `HTTPS_PROXY` variable is honoured.
-
-**Adapting to the platform developer's answers.** Only the constants
-marked `PROVISIONAL` at the top of `platform_client.py` and the
-`FortifyDataPlatform` class should need to change.
+push uses it too. `HTTPS_PROXY` and `NO_PROXY` are honoured.
 
 ## 3. Configuration file
 
@@ -226,8 +263,8 @@ See `collector_daemon.example.toml` for every setting, with comments.
 | Secret | Where the daemon gets it | How the step gets it |
 |---|---|---|
 | PostgreSQL password | `[database] password_file`, `PGPASSWORD`, `PGPASSWORD_FILE`, or none (libpq's `.pgpass`) | `PGPASSWORD_FILE=/dev/fd/N` |
-| AD bind password | Platform (encrypted), or local `[ad] password_file` / `AD_BIND_PASSWORD(_FILE)` | `AD_BIND_PASSWORD_FILE=/dev/fd/N` |
-| Entra client secret | Platform (encrypted), or local `[entra] client_secret_file` / `ENTRA_APP_SECRET(_FILE)` | `ENTRA_APP_SECRET_FILE=/dev/fd/N` |
+| AD bind password | Platform (health answer, in memory only), or local `[ad] password_file` / `AD_BIND_PASSWORD(_FILE)` | `AD_BIND_PASSWORD_FILE=/dev/fd/N` |
+| Entra client secret | Platform (health answer, in memory only), or local `[entra] client_secret_file` / `ENTRA_APP_SECRET(_FILE)` | `ENTRA_APP_SECRET_FILE=/dev/fd/N` |
 | Activation key | `[platform] activation_key_file`, `FD_ACTIVATION_KEY(_FILE)` | `FD_ACTIVATION_KEY_FILE=/dev/fd/N` |
 
 How each step receives its secrets:
@@ -296,7 +333,8 @@ container would not fix that, and the report already says what is wrong.
 | `log_dir/scripts/` | Each script's own log file (`--log-dir`). Files named `*-results_*.log` are pruned after `log_retention_days`. |
 | `state_dir/status.json` | The latest health report |
 | `state_dir/state.json` | Last attempt, last run, last success, pending push retry (mode `0600`) |
-| `state_dir/instance_id`, `daemon_key.pem` | Identity and key pair (FortifyData mode) |
+| `state_dir/instance_id` | The installation's identity (FortifyData mode) |
+| `state_dir/platform_config.json` | The last configuration from the platform, without its secrets (mode `0600`) |
 | `state_dir/fingerprint.key`, `daemon.lock` | Configuration-change key (mode `0600`); one-process lock |
 | `state_dir/reports/` | Excel workbooks when `[run] excel = true`. Files named `adaudit-findings_*.xlsx` are pruned after `log_retention_days`; nothing else is deleted. |
 | `state_dir/work/` | The children's working directory |
@@ -350,7 +388,8 @@ script and day-to-day operation.
 ## 9. Testing done
 
 Every behaviour below was tested in a container, against PostgreSQL 17 and
-a mock of the platform (the provisional endpoints plus the ingest API).
+a mock of the platform. The mock now follows the platform developer's
+specification (documents 04 and 05), alongside the ingest API.
 
 **With stand-in scripts:**
 - each secret arrives only through `/dev/fd`, with no TTY and an empty
@@ -369,8 +408,10 @@ a mock of the platform (the provisional endpoints plus the ingest API).
 - SIGTERM during a step, both a step that stops cleanly and one that
   ignores SIGTERM and is killed after `stop_timeout`; the lease is released
   both times;
-- the platform answering 409, 401, configuration 404 and plain-text
-  secrets;
+- the platform answering 409 and 401 on activation, 202 and 404 on renewal,
+  a clock skew, a non-standard LDAPS port, a newer target version, the
+  configuration cleared in the portal, the collector `EXPIRED`, a 404
+  (decommissioned) and 500 and 401 from the health check;
 - the push retry, including after an incomplete evaluation and when the
   push is switched off;
 - a second process on the same state directory is refused;
@@ -389,17 +430,17 @@ a mock of the platform (the provisional endpoints plus the ingest API).
 **Unit checks:**
 - next and previous scheduled time across both daylight-saving changes;
 - run configuration validation;
-- secret encryption round trip, and refusal of a value moved to another
-  field, tampered with, encrypted to another key, or malformed.
+- activation keys: `prod`/`eu`/`test`, no `e`, any other environment, bare
+  keys, explicit API URL.
 
 ## 10. Open questions
 
-- **The provisional API.** These depend on the platform developer's
-  answers (questions document, sections 3 to 5): paths, payloads, status
-  codes, the encryption scheme, the health payload, whether the lease is
-  held around the clock, and rate limits.
-- **Spreading the run times.** Runs could be spread across clients, for
-  example with a random delay within a window, if the platform wants its
-  load spread.
+- **Still with the platform:** a `reason` body on 401 and 403 (then the
+  "403 without reason = waiting for approval" rule is removed from the
+  push), activation key reissue, and installation approval under
+  licensing.
+- **The updater:** acting on `targetVersion` and `autoUpgrade` (pulling
+  and switching the image, with a backup and rollback) is still to be
+  built.
 - **Several AD domains per database.** Deferred; the Entra step then needs
   `ad.domain_fqdn`.

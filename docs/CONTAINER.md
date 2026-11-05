@@ -58,8 +58,8 @@ day-to-day operation.
 From the repository root:
 
 ```
-docker build -t fortifydata-ad-collector:1.0.4 .
-docker save fortifydata-ad-collector:1.0.4 | gzip > fortifydata-ad-collector-1.0.4.tar.gz
+docker build -t fortifydata-ad-collector:1.1.0 .
+docker save fortifydata-ad-collector:1.1.0 | gzip > fortifydata-ad-collector-1.1.0.tar.gz
 ```
 
 - **Size:** the image is about 320 MB, about 75 MB compressed.
@@ -101,7 +101,7 @@ On a Linux host with Docker Engine and the compose plugin:
 2. **Load the image**, if you received it as a file:
 
    ```
-   docker load -i fortifydata-ad-collector-1.0.4.tar.gz
+   docker load -i fortifydata-ad-collector-1.1.0.tar.gz
    ```
 
 3. **Prepare the accounts.** The client's administrators set up the AD
@@ -154,10 +154,11 @@ proxy, also put its CA certificate in `config/` and set
 **DNS.** The container resolves names through the host. If the host
 cannot resolve the AD domain, set `dns:` in `compose.yaml`.
 
-**FortifyData mode.** When the platform endpoints exist, set
-`mode = "fortifydata"` and `activation_key_file`. The `[schedule]`, `[ad]`
-and `[entra]` sections are then ignored, and the AD and Entra secret files
-can stay empty.
+**FortifyData mode.** Set `mode = "fortifydata"` and `activation_key_file`,
+and put the activation key in `secrets/fd_activation_key`. The configuration
+then comes from the portal, with the health check:
+- the `[schedule]`, `[ad]` and `[entra]` sections are ignored;
+- the AD and Entra secret files can stay empty.
 
 ## 4. Operating
 

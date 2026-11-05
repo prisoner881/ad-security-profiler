@@ -6,6 +6,48 @@ Changes on the `development` branch, which collects the work towards
 running the scripts unattended under a supervising process (scheduled runs
 in a container). They are not in `release` yet.
 
+### The platform's real collector API (2026-11-05)
+
+collector_daemon.py 1.1.0, platform_client.py 2.0, adaudit.py 1.0.11
+(adaudit_push.py), image 1.1.0. Schema unchanged (v50). This follows the
+platform developer's documents 04 (answers) and 05 (configuration
+contract), and their follow-up answers.
+
+- **Activation key environments.**
+  - `e` is the platform's environment. Only `prod` (US production; `us` is
+    never issued), `eu` and `test` have an API server a collector can use.
+    **Before this change a real production key would have failed.**
+  - A key without `e` is refused. Any other environment, or a bare license
+    key, needs the API URL given explicitly.
+  - `--api-url` takes `prod`, `eu` and `test` as shortcuts.
+- **Activation and lease** use the real paths
+  (`/api/v1/integration/collector/activations/{instanceId}`):
+  - no request body;
+  - renewal answers `202` (previously treated as a failure);
+  - the lease length comes from `leaseExpiryDate`;
+  - a clock more than 2 minutes off the platform's is warned about.
+- **The configuration comes with the health check** (`POST
+  /api/v1/integration/collector/health`, every 5 minutes):
+  - the flat fields of document 05, `ldapPort` used as given;
+  - a portal change applies within 5 minutes;
+  - `configVersion` and the image `version` go back in the health report;
+  - nulls mean "not configured yet": no run, keep polling.
+- **Secrets stay in memory.**
+  - They arrive over TLS only, as the platform decided: the key pair and
+    the secret encryption are removed.
+  - The last configuration is cached on disk without its secrets. A
+    restart during a platform outage therefore waits for the platform
+    before running.
+- **Collector status:**
+  - `EXPIRED`, or a `404` from the health check (no collector, or
+    deleted): no scans, keep reporting;
+  - `FAILED`: ignored.
+- **Updates:** a newer `targetVersion` is logged and reported, together with
+  `autoUpgrade` and `imageName`. Installing it is the updater's job, still
+  to be built.
+- **Schedule offset:** scheduled runs start a per-installation random 0–30
+  minutes after the set time, so clients do not all start together.
+
 ### Schema baseline and `migrations/` (2026-11-05)
 
 `schema_setup.py` 1.2, collector_daemon.py 1.0.4 (image 1.0.4). Schema

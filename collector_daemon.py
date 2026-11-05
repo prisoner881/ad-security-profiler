@@ -2,7 +2,7 @@
 collector_daemon.py -- runs the AD/Entra collection, evaluation and push
 every day, unattended, and reports its health
 ==============================================================================
-VERSION: 1.0.4
+VERSION: 1.1.0
 
 The long-running process of a client installation. It starts, and from then
 on never exits by itself: it is stopped (SIGTERM, e.g. `docker stop`) or the
@@ -15,14 +15,19 @@ What it does, in a loop:
     1. Lease: in FortifyData mode, takes the lease on the license
        (platform_client.py) and renews it every 2 minutes for as long as it
        runs. Without the lease no run starts. (Local mode needs no lease.)
-    2. Configuration: fetches the run configuration (AD and Entra settings,
-       their secrets and the daily schedule) from the platform, or reads it
-       from its own configuration file in local mode. Fetched again before
-       every run, hourly while waiting, and every 5 minutes after a failed
-       run or a configuration error: a fix made in the portal (or the file)
-       is picked up without a restart, and a failed run is retried as soon
-       as its configuration changes.
-    3. Schedule: once a day at the configured time and time zone. On start,
+    2. Configuration: in FortifyData mode it arrives with the answer to
+       every health check (every 5 minutes; platform_client.py 2.0), so a
+       change made in the portal applies within 5 minutes. Only the
+       non-secret part is cached on disk; the secrets stay in memory, so
+       runs continue through a platform outage, but after a restart they
+       wait for the platform. In local mode it is read from the daemon's
+       own configuration file, before every run, hourly while waiting, and
+       every 5 minutes after a failed run or a configuration error. A
+       failed run is retried as soon as its configuration changes.
+    3. Schedule: once a day at the configured time and time zone (in
+       FortifyData mode plus this installation's random offset of up to 30
+       minutes, chosen once and kept, so clients do not all start together).
+       On start,
        a run that was missed while the daemon was down (the most recent
        scheduled time passed with no run started since) is started at once.
        A failed run is NOT retried until the next scheduled time unless its
@@ -78,6 +83,16 @@ it exits on its own. A wrong AD or Entra setting is not one of them: the
 daemon keeps running, reports it and retries.
 
 CHANGELOG:
+    1.1.0  The platform's real collector API (platform_client.py 2.0,
+           documents 04 and 05): the configuration comes with the health
+           check (no separate fetch), the last answer is cached without its
+           secrets (platform_config.json), configVersion and the version
+           are in the health report, a collector the platform reports as
+           EXPIRED or DELETED runs no scan, an available newer version is
+           logged and reported, the lease length comes from
+           leaseExpiryDate, a clock skew of more than 2 minutes is warned
+           about, and scheduled runs start a per-installation random
+           0-30 minutes after the set time. No key pair any more.
     1.0.4  Schema migrations that need a full rescan (schema_setup.py 1.2,
            "-- adprofiler: full-rescan" in a migration's header): schema_setup
            records it in <state_dir>/full_rescan_needed, the next adprofiler.py
@@ -111,6 +126,7 @@ import json
 import logging
 import logging.handlers
 import os
+import random
 import re
 import shutil
 import signal
@@ -127,7 +143,7 @@ from pathlib import Path
 import platform_client as pc
 import secret_input
 
-VERSION = "1.0.4"
+VERSION = "1.1.0"
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -183,6 +199,9 @@ FINGERPRINT_KEY_FILE = "fingerprint.key"
 INSTANCE_FILE = "instance_id"
 CA_CERT_FILE = "ldaps_ca.pem"
 RESCAN_FILE = "full_rescan_needed"
+CONFIG_CACHE_FILE = "platform_config.json"   # [1.1.0] the last health response, no secrets
+SCHEDULE_OFFSET_MAX_SECONDS = 1800           # [1.1.0] up to 30 minutes after the set time
+CLOCK_SKEW_WARN_SECONDS = 120
 # Only these files are pruned: what the scripts write to --log-dir and
 # --report-dir. Anything else in those directories is left alone.
 PRUNED_PATTERNS = ("*-results_*.log", "adaudit-findings_*.xlsx")
@@ -470,6 +489,12 @@ class Daemon:
         self.lease_status = "not required"
         self.lease_last_renewed = None
         self.lease_seconds = None
+        self.clock_skew = None
+        self.health_now = threading.Event()      # [1.1.0] exchange health at once
+        self.config_received = threading.Event()  # a platform response arrived
+        self.wake = threading.Event()             # wakes the main loop early
+        self.platform_info = {}                  # status, target version, ...
+        self._last_target_logged = None
         self.lease_error = None
 
         self.config = None
@@ -544,11 +569,20 @@ class Daemon:
             if lic is None:
                 raise SettingsError("[platform] mode = \"fortifydata\" needs the activation key: "
                                     "activation_key_file, or FD_ACTIVATION_KEY(_FILE)")
-            self.platform = pc.FortifyDataPlatform(
-                lic, key_text, self.instance_id, pc.DaemonKey(self.s.state_dir), VERSION,
-                api_url=self.s.api_url,
-                ca_bundle=str(self.s.ca_bundle) if self.s.ca_bundle else None,
-                timeout=self.s.request_timeout, log=self.log)
+            try:
+                self.platform = pc.FortifyDataPlatform(
+                    lic, key_text, self.instance_id, VERSION, api_url=self.s.api_url,
+                    ca_bundle=str(self.s.ca_bundle) if self.s.ca_bundle else None,
+                    timeout=self.s.request_timeout, log=self.log)
+            except pc.ConfigError as exc:
+                raise SettingsError(str(exc))
+            # [1.1.0] A random start offset of up to 30 minutes after the
+            # scheduled time, chosen once per installation and kept, so that
+            # clients do not all start together (the platform's request).
+            if not isinstance(self.persist.get("schedule_offset_seconds"), int):
+                self.persist["schedule_offset_seconds"] = random.randint(
+                    0, SCHEDULE_OFFSET_MAX_SECONDS)
+                self.save_persist()
         else:
             self.platform = pc.LocalPlatform(self.load_doc, activation_key=key_text,
                                              api_url_override=self.s.api_url, log=self.log)
@@ -562,7 +596,7 @@ class Daemon:
         self.log.info(f"Platform: {self.platform.describe()}")
         if lic is not None:
             self.log.info(f"Activation key: company {lic.company_id}, environment "
-                          f"{lic.environment_or_default}, from {key_source}; push "
+                          f"{lic.environment or 'none (bare license key)'}, from {key_source}; push "
                           f"{'on' if self.push_enabled else 'off'}")
         self.log.info(f"Database: {self.s.db_user}@{self.s.db_host}:{self.s.db_port}/"
                       f"{self.s.db_name}, password from {db_source}")
@@ -571,7 +605,32 @@ class Daemon:
                              + ", ".join(self.s.unknown_keys))
         self.log.info(f"State in {self.s.state_dir}, logs in {self.s.log_dir} "
                       f"(kept {self.s.log_retention_days} days)")
+        if self.platform.config_via_health:
+            cached = read_json(self.s.state_dir / CONFIG_CACHE_FILE)
+            if cached:
+                self.log.info(f"Last configuration from the platform: version "
+                              f"{cached.get('configVersion')} (cached without its secrets; "
+                              f"runs wait for the platform's next answer)")
+            self.log.info(f"Scheduled runs start {self.schedule_offset // 60} min "
+                          f"{self.schedule_offset % 60} s after the set time (this "
+                          f"installation's offset)")
         self.versions = self._script_versions()
+
+    # --- the schedule, with this installation's offset --------------------------
+
+    @property
+    def schedule_offset(self):
+        if not (self.platform and self.platform.config_via_health):
+            return 0
+        return self.persist.get("schedule_offset_seconds") or 0
+
+    def next_slot(self, schedule, after):
+        offset = timedelta(seconds=self.schedule_offset)
+        return next_occurrence(schedule, after - offset) + offset
+
+    def previous_slot(self, schedule, now):
+        offset = timedelta(seconds=self.schedule_offset)
+        return previous_occurrence(schedule, now - offset) + offset
 
     def _fingerprint_key(self):
         """Key for the configuration fingerprint (see _fingerprint), kept in
@@ -644,8 +703,13 @@ class Daemon:
         with self.lock:
             cfg = self.config
             return {
-                "report_format": 1,
+                "report_format": 2,
                 "generated_at": iso(utcnow()),
+                # [1.1.0] The version the platform records, and the
+                # configuration version this daemon runs (document 04, 5.2).
+                "version": VERSION,
+                "configVersion": self.platform_info.get("config_version",
+                                                        cfg.version if cfg else None),
                 "instance_id": self.instance_id,
                 "hostname": socket.gethostname(),
                 "mode": self.s.mode,
@@ -657,6 +721,10 @@ class Daemon:
                           "status": self.lease_status,
                           "last_renewed": iso(self.lease_last_renewed),
                           "error": self.lease_error},
+                "clock_skew_seconds": (round(self.clock_skew, 1)
+                                       if self.clock_skew is not None else None),
+                "platform": dict(self.platform_info),
+                "schedule_offset_seconds": self.schedule_offset,
                 "configuration": {"version": cfg.version if cfg else None,
                                   "schedule": str(cfg.schedule) if cfg else None,
                                   "entra_configured": bool(cfg and cfg.entra),
@@ -828,7 +896,7 @@ class Daemon:
             try:
                 if not self.lease_ready.is_set():
                     try:
-                        self.lease_seconds = self.platform.activate()
+                        info = self.platform.activate()
                     except pc.LicenseInUse as exc:
                         self._lease_problem("license_in_use", exc)
                         self.threads_stop.wait(self.s.retry_interval)
@@ -844,6 +912,7 @@ class Daemon:
                         backoff = min(backoff * 2, self.s.retry_interval)
                         continue
                     backoff = 30
+                    self._lease_info(info)
                     with self.lock:
                         self.lease_status = "held"
                         self.lease_last_renewed = utcnow()
@@ -851,14 +920,15 @@ class Daemon:
                     self.lease_ready.set()
                     self.log.info(f"Lease taken (instance {self.instance_id}, "
                                   f"{self.lease_seconds} s, renewed every "
-                                  f"{self.s.renew_interval} s)")
+                                  f"{int(max(5, min(self.s.renew_interval, self.lease_seconds / 3)))} s)")
                     self.write_status()
+                    self.health_now.set()   # the configuration comes with the health check
                     continue
                 lease = self.lease_seconds or pc.DEFAULT_LEASE_SECONDS
                 if self.threads_stop.wait(max(5, min(self.s.renew_interval, lease / 3))):
                     break
                 try:
-                    self.platform.renew()
+                    self._lease_info(self.platform.renew())
                     with self.lock:
                         self.lease_last_renewed = utcnow()
                         if self.lease_error:
@@ -882,6 +952,21 @@ class Daemon:
                 self.log.exception("Unexpected error in the lease thread")
                 self.threads_stop.wait(30)
 
+    def _lease_info(self, info):
+        """Lease length and clock skew from an activation or renewal."""
+        if info is None:
+            return
+        self.lease_seconds = info.seconds
+        if info.clock_skew is not None:
+            warn = (abs(info.clock_skew) > CLOCK_SKEW_WARN_SECONDS
+                    and (self.clock_skew is None
+                         or abs(self.clock_skew) <= CLOCK_SKEW_WARN_SECONDS))
+            self.clock_skew = info.clock_skew
+            if warn:
+                self.log.warning(f"This machine's clock is {abs(info.clock_skew):.0f} s "
+                                 f"{'ahead of' if info.clock_skew > 0 else 'behind'} the "
+                                 f"platform's: check its time synchronisation (NTP)")
+
     def _lease_problem(self, status, exc):
         with self.lock:
             repeated = self.lease_status == status and self.lease_error == str(exc)
@@ -892,23 +977,90 @@ class Daemon:
         self.write_status()
 
     def health_loop(self):
+        """Every health_interval (and at once when asked, e.g. after the lease
+        is taken): status.json, and in FortifyData mode the health check,
+        whose answer carries the configuration."""
         while not self.threads_stop.is_set():
             try:
                 self.refresh_db_snapshot()
                 report = self.health_report()
                 self.write_status(report)
-                try:
-                    self.platform.report_health(report)
-                    if self._last_health_error:
-                        self.log.info("Health reports reach the platform again")
-                    self._last_health_error = None
-                except pc.PlatformError as exc:
-                    if str(exc) != self._last_health_error:
-                        self.log.warning(f"Health report not delivered: {exc}")
-                    self._last_health_error = str(exc)
+                if self.platform.needs_lease and not self.lease_ready.is_set():
+                    pass  # the health check waits for the activation
+                else:
+                    try:
+                        response = self.platform.exchange_health(report)
+                        if self._last_health_error:
+                            self.log.info("Health checks reach the platform again")
+                        self._last_health_error = None
+                        if response is not None:
+                            self.apply_platform_response(response)
+                    except pc.CollectorRemoved as exc:
+                        self._health_problem(exc)
+                        with self.lock:
+                            old = self.platform_info.get("status")
+                            self.platform_info = dict(self.platform_info,
+                                                      status="DECOMMISSIONED")
+                        if old != "DECOMMISSIONED":
+                            self.log.warning(f"Platform: {exc}")
+                            self.wake.set()
+                    except pc.LicenseRefused as exc:
+                        self._health_problem(exc)
+                        if self.config is None:
+                            self._config_problem("license_refused", str(exc))
+                    except pc.PlatformError as exc:
+                        self._health_problem(exc)
             except Exception:
                 self.log.exception("Unexpected error in the health thread")
-            self.threads_stop.wait(self.s.health_interval)
+            self.health_now.wait(self.s.health_interval)
+            self.health_now.clear()
+
+    def _health_problem(self, exc):
+        if str(exc) != self._last_health_error:
+            self.log.warning(f"Health check failed: {exc}"
+                             + (" -- carrying on with the configuration already received"
+                                if self.config is not None else ""))
+        self._last_health_error = str(exc)
+
+    def apply_platform_response(self, response):
+        """[1.1.0] The platform's answer to a health check is the current truth
+        for the configuration (document 05): a usable one replaces the old
+        one, a missing or unusable one stops the runs."""
+        info = {"config_version": (response.config_version if response.config is not None
+                                   else None),
+                "status": response.status, "target_version": response.target_version,
+                "auto_upgrade": response.auto_upgrade, "image": response.image_name,
+                "update_available": bool(response.target_version
+                                         and response.target_version != VERSION)}
+        with self.lock:
+            old_status = self.platform_info.get("status")
+            self.platform_info = info
+        if response.status != old_status:
+            self.log.info(f"Platform: collector status {response.status}")
+        if info["update_available"] and response.target_version != self._last_target_logged:
+            self.log.info(f"Platform: version {response.target_version} is available (running "
+                          f"{VERSION}; automatic upgrade "
+                          f"{'on' if response.auto_upgrade else 'off'}, image "
+                          f"{response.image_name})")
+        self._last_target_logged = response.target_version
+        if response.cacheable is not None:
+            try:
+                write_json_atomic(self.s.state_dir / CONFIG_CACHE_FILE, response.cacheable,
+                                  mode=0o600)
+            except OSError as exc:
+                self.log.warning(f"Cannot cache the configuration: {exc}")
+        if response.config is not None:
+            self._accept_config(response.config)
+        else:
+            with self.lock:
+                self.config = None
+                self.config_fingerprint = None
+            self._config_problem("not_configured" if response.not_configured
+                                 else "config_error", response.config_error)
+        self.config_received.set()
+        self.wake.set()
+
+    # --- configuration --------------------------------------------------------
 
     # --- configuration --------------------------------------------------------
 
@@ -922,18 +1074,27 @@ class Daemon:
         return hmac.new(self._fp_key, text.encode("utf-8"), hashlib.sha256).hexdigest()
 
     def refresh_config(self):
-        """Fetches the run configuration. Returns True when one is usable."""
+        """A usable run configuration? Local mode reads it now; in FortifyData
+        mode it is the one the last health check brought (the health thread
+        keeps it current). Returns True when one is usable."""
+        if self.platform.config_via_health:
+            if self.config is not None:
+                return True
+            if not self.config_error:
+                self.set_state("waiting_for_configuration",
+                               "waiting for the platform's answer to the health check"
+                               + (" (" + self._last_health_error + ")"
+                                  if self._last_health_error else ""))
+            return False
         try:
             cfg = self.platform.fetch_config()
         except pc.ConfigError as exc:
             self._config_problem("config_error", str(exc))
             return False
-        except pc.LicenseRefused as exc:
-            self._config_problem("license_refused", str(exc))
-            return False
-        except pc.PlatformError as exc:
-            self._config_problem("platform_unreachable", str(exc))
-            return False
+        self._accept_config(cfg)
+        return True
+
+    def _accept_config(self, cfg):
         fingerprint = self._fingerprint(cfg)
         with self.lock:
             old, old_fp = self.config, self.config_fingerprint
@@ -954,15 +1115,16 @@ class Daemon:
                 self.log.info("The configuration changed since the last run failed: running "
                               "again now")
                 self.next_due = utcnow()
-        return True
 
     def _config_problem(self, state, message):
         with self.lock:
             repeated = self.config_error == message
             self.config_error = message
+            running = self.current_step is not None
         if not repeated:
             self.log.error(f"Configuration: {message}")
-        self.set_state(state, message)
+        if not running:   # a run in progress keeps its state; the next tick shows this
+            self.set_state(state, message)
 
     def _configuration_changed(self, old, new):
         now = utcnow()
@@ -974,7 +1136,7 @@ class Daemon:
             self.next_due = now
         elif str(old.schedule) != str(new.schedule) and self.next_due is not None \
                 and self.next_due > now:
-            self.next_due = next_occurrence(new.schedule, now)
+            self.next_due = self.next_slot(new.schedule, now)
             self.log.info(f"Schedule changed to {new.schedule}: next run "
                           f"{local_text(self.next_due, new.schedule)}")
 
@@ -986,10 +1148,9 @@ class Daemon:
 
     # --- scheduling -----------------------------------------------------------
 
-    def initial_due(self, now):
-        schedule = self.config.schedule
+    def initial_due(self, now, schedule):
         last_attempt = parse_iso(self.persist.get("last_attempt_started"))
-        missed = previous_occurrence(schedule, now)
+        missed = self.previous_slot(schedule, now)
         if last_attempt is None:
             self.log.info("No run has been started yet: running now")
             return now
@@ -997,11 +1158,15 @@ class Daemon:
             self.log.info(f"The run scheduled for {local_text(missed, schedule)} was missed "
                           f"(last run started {local_text(last_attempt, schedule)}): running now")
             return now
-        return next_occurrence(schedule, now)
+        return self.next_slot(schedule, now)
 
     def wait(self, seconds):
-        """Sleeps, waking early on a stop request. True when stopping."""
-        return self.stop_event.wait(max(0.0, seconds))
+        """Sleeps, waking early on a stop request or a platform answer (so a
+        status or configuration change shows at once). True when stopping."""
+        if not self.stop_event.is_set():
+            self.wake.wait(max(0.0, seconds))
+            self.wake.clear()
+        return self.stop_event.is_set()
 
     def run_forever(self):
         threads = [threading.Thread(target=self.health_loop, name="health", daemon=True)]
@@ -1033,14 +1198,24 @@ class Daemon:
             self.lease_ready.wait(5)
             return
         now = utcnow()
+        status = (self.platform_info.get("status") or "").upper()
+        if status in pc.STOPPED_STATUSES:
+            self.set_state("collector_" + status.lower(),
+                           f"the platform reports this collector as {status}: no scans run")
+            self.wait(300)
+            return
         if (self.config is None or self.config_fetched_at is None
                 or (now - self.config_fetched_at).total_seconds()
                 >= self.config_refresh_interval()):
             if not self.refresh_config():
-                self.wait(self.s.retry_interval)
+                # In FortifyData mode the next health answer wakes the loop.
+                self.wait(300 if self.platform.config_via_health else self.s.retry_interval)
                 return
+        cfg = self.config   # one snapshot: the health thread may replace it
+        if cfg is None:
+            return
         if self.next_due is None:
-            self.next_due = self.initial_due(now)
+            self.next_due = self.initial_due(now, cfg.schedule)
         if now >= self.next_due:
             # Fresh configuration (and secrets) for the run itself.
             if (now - self.config_fetched_at).total_seconds() > 60 and not self.refresh_config():
@@ -1050,8 +1225,8 @@ class Daemon:
             if outcome == DEFERRED:
                 self.wait(self.s.retry_interval)
             elif outcome != INTERRUPTED:
-                self.next_due = next_occurrence(self.config.schedule, utcnow())
-                self.log.info(f"Next run: {local_text(self.next_due, self.config.schedule)}")
+                self.next_due = self.next_slot(cfg.schedule, utcnow())
+                self.log.info(f"Next run: {local_text(self.next_due, cfg.schedule)}")
             return
         push_due = parse_iso(self.persist.get("push_retry_due"))
         if push_due is not None and not self.push_enabled:
@@ -1062,7 +1237,7 @@ class Daemon:
         if push_due is not None and now >= push_due:
             self.push_only("retry of a failed push")
             return
-        self.set_state("waiting", f"next run {local_text(self.next_due, self.config.schedule)}")
+        self.set_state("waiting", f"next run {local_text(self.next_due, cfg.schedule)}")
         until = [self.next_due, now + timedelta(seconds=self.config_refresh_interval())]
         if push_due is not None:
             until.append(push_due)
@@ -1074,6 +1249,9 @@ class Daemon:
         """One complete run with the current configuration. Returns the
         outcome."""
         cfg = self.config
+        if cfg is None:
+            self.log.warning("No usable configuration: the run is postponed")
+            return DEFERRED
         started = utcnow()
         previous_attempt = self.persist.get("last_attempt_started")
         with self.lock:
@@ -1413,6 +1591,7 @@ class Daemon:
                 continue
             self.stop_reason = signal.Signals(data[0]).name
             self.stop_event.set()
+            self.wake.set()
             with self.lock:
                 child = self.child
             if child is not None:
@@ -1448,6 +1627,7 @@ class Daemon:
             self.log.info(f"Stopping ({self.stop_reason})")
         self.set_state("stopping", self.stop_reason or "")
         self.threads_stop.set()
+        self.health_now.set()
         for t in threads:
             t.join(timeout=self.s.request_timeout + 5)
         if self.platform is not None and self.platform.needs_lease and self.lease_ready.is_set():
@@ -1571,8 +1751,8 @@ def main(argv=None):
                 return EXIT_CONFIG
             log.info(f"Run configuration: {cfg.summary()}")
         else:
-            log.info("FortifyData mode: the run configuration comes from the platform after "
-                     "activation and is not checked here")
+            log.info("FortifyData mode: the run configuration comes with the platform's answer "
+                     "to the health check after activation and is not checked here")
         log.info("Configuration OK")
         return EXIT_OK
 
@@ -1598,6 +1778,11 @@ def run_once_and_exit(daemon):
                 if daemon.lease_status in ("license_refused", "license_in_use"):
                     break
         if daemon.lease_ready.is_set() and not daemon.stop_event.is_set():
+            if daemon.platform.config_via_health:
+                # The configuration comes with the first health check after
+                # the activation.
+                daemon.health_now.set()
+                daemon.config_received.wait(2 * daemon.s.request_timeout + 10)
             if daemon.refresh_config():
                 outcome = daemon.run_once()
     finally:
