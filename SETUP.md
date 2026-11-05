@@ -437,7 +437,8 @@ Each secret is therefore taken from the first of these that is set:
 | AD bind password (LDAP and SYSVOL) | `--password` | `AD_BIND_PASSWORD` | `AD_BIND_PASSWORD_FILE` | `adprofiler.py` |
 | Entra App Registration client secret | `--app-secret` | `ENTRA_APP_SECRET` | `ENTRA_APP_SECRET_FILE` | `entra_graph_collector.py` |
 | PostgreSQL password | `--pg-password` | `PGPASSWORD` | `PGPASSWORD_FILE` | all three |
-| FortifyData API key | `--api-key` | `FD_API_KEY` | `--api-key-file` (option) | `adaudit.py --push` |
+| FortifyData activation key | `--activation-key` | `FD_ACTIVATION_KEY` | `FD_ACTIVATION_KEY_FILE` | `adaudit.py --push` |
+| Older FortifyData API key | `--api-key` | `FD_API_KEY` | `--api-key-file` (option) | `adaudit.py --push` |
 
 - Set either the variable or its `_FILE` variant, not both (the script
   refuses to start).
@@ -471,22 +472,34 @@ python3 adaudit.py --pg-host db --pg-user adprofiler --pg-dbname adprofiler
 **Optional -- push the results to FortifyData:**
 
 `adaudit.py` can send each run to the FortifyData platform instead of
-(or as well as) handing over the workbook. Add `--push`:
+(or as well as) handing over the workbook. Add `--push`, with the
+**activation key** the FortifyData portal shows when the AD integration is
+enabled (one string, copied as is):
 
 ```
-export FD_API_URL=us                 # or eu, test, or a full https:// URL
-export FD_COMPANY_ID=<company id from FortifyData>
-python3 adaudit.py --pg-host <host> --pg-user <user> --pg-dbname <db> \
-  --push --api-key-file ~/adprofiler/fd_api_key.txt
+export FD_ACTIVATION_KEY_FILE=~/adprofiler/fd_activation_key.txt   # chmod 600
+python3 adaudit.py --pg-host <host> --pg-user <user> --pg-dbname <db> --push
 ```
 
-- **Credentials are given at run time**, never stored in the database:
-  `--api-url` / `--api-company-id` / `--api-key`, or the environment
-  variables `FD_API_URL` / `FD_COMPANY_ID` / `FD_API_KEY`, or for the key
-  a file (`--api-key-file`, first line; `chmod 600` it). With none of
-  those, an interactive run prompts for the key. `--api-key` on the
-  command line works but is visible in shell history and process
-  listings.
+- **The activation key is all that is needed** (adaudit.py 1.0.8): it
+  carries the license, the FortifyData company id and the region, which
+  picks the server. Give it as `FD_ACTIVATION_KEY`, as the file named by
+  `FD_ACTIVATION_KEY_FILE` (first line; a mounted secret or `/dev/fd/N`
+  also works), or `--activation-key` (visible in process listings). An
+  interactive run without one prompts for it. It is checked before
+  anything is sent, and never stored in the database or logged; the log
+  shows the company id and server it selected. `--api-url` /
+  `FD_API_URL` (`us`, `eu`, `test` or an `https://` URL) still overrides
+  the server; `--api-company-id` / `FD_COMPANY_ID`, if set, must match
+  the key's company.
+- **The older API key still works for now:** `--api-key`, `FD_API_KEY` or
+  `--api-key-file`, together with `--api-url` (`FD_API_URL`) and
+  `--api-company-id` (`FD_COMPANY_ID`). A warning says it is being
+  replaced. Give one or the other, not both.
+- **A refused key stops the push** and the runs stay queued (exit status
+  `5`): `401` means the key is unknown or malformed, or the AD integration
+  was switched off for the company in the portal; retrying will not help
+  until that is fixed.
 - **What is sent:** the run's findings (with their evidence), the
   result of every check, the newest run's user / computer / group /
   subnet inventory, and the list of checks. No passwords or other
@@ -496,8 +509,9 @@ python3 adaudit.py --pg-host <host> --pg-user <user> --pg-dbname <db> \
   exits normally, and keeps the runs queued; the next push after
   approval sends them all.
 - **Other refusals stop the push** with a message that says what to
-  fix, and the runs stay queued: the API key is not granted the company
-  id (`KEY_NOT_SCOPED`: check `--api-company-id` and the key), the
+  fix, and the runs stay queued: the key is not valid for the company id
+  (`KEY_NOT_SCOPED`: with an activation key, remove `--api-company-id`
+  / `FD_COMPANY_ID`; with an API key, check them and the key), the
   domain was disabled by FortifyData (`DOMAIN_DISABLED`), or the
   installation is not registered under this company id
   (`DOMAIN_NOT_RESOLVED`: wrong company id, or registered under another

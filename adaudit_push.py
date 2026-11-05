@@ -55,6 +55,27 @@ WHAT LEAVES THE NETWORK
     detail larger than DETAIL_MAX_BYTES is trimmed (largest lists first) and
     marked "_truncated"; the full evidence stays in the local database.
 
+AUTHENTICATION [adaudit.py 1.0.8]
+    The activation key the client copies from the FortifyData portal is
+    base64 of {"k": <license key>, "e": <environment>}. The license key is
+    <8-digit company id>.<b64 "AD_AUDIT_COLLECTOR">.<b64 "AD_AUDIT">.<b64
+    agent UUID>; it is sent unchanged as "Authorization: LicenseKey <key>",
+    the company id in the request paths comes from it (zero padding
+    removed), and "e" picks the API server from API_SERVERS (absent: the
+    default environment, DEFAULT_ENVIRONMENT). parse_activation_key() checks
+    the shape, the integration and collector types and the agent UUID, so a
+    wrong key is reported before anything is sent. Both base64 alphabets
+    (standard and URL-safe), with or without padding, are accepted; a bare
+    license key (the "k" value alone) is accepted too and uses the default
+    environment. The older per-company API key ("Authorization: ApiKey") is
+    still accepted until the platform stops taking it.
+
+    A 401 means the key is unknown or malformed, or the AD audit
+    integration is switched off for the company; it stops the push (the
+    runs stay queued), like KEY_NOT_SCOPED. With an activation key, a 403
+    without a reason is a refusal too: the rule below that reads it as
+    "waiting for approval" applies only to the API key, for the older API.
+
 REFUSALS
     The API answers every refusal with {"reason": ...}. DOMAIN_PENDING (a new
     installation awaiting approval) keeps the runs queued and exits normally;
@@ -62,8 +83,9 @@ REFUSALS
     RUN_NOT_RECEIVING and INVALID_PAYLOAD stop the push with a message saying
     what to fix (the runs stay queued); RUN_ALREADY_COMPLETE means an earlier
     attempt finished the run and only the reply was lost, so it is marked
-    pushed; COUNT_MISMATCH closes the run PARTIAL and it is re-sent. A 403
-    with no reason (an older API) is read as waiting for approval.
+    pushed; COUNT_MISMATCH closes the run PARTIAL and it is re-sent. With
+    the API key only, a 403 with no reason (an older API) is read as waiting
+    for approval.
 
 BATCHES
     At most 2,000 findings or 5,000 inventory rows per request, and at most
@@ -79,10 +101,13 @@ DRY RUN
     left unchanged. No API credentials are needed.
 """
 
+import base64
+import binascii
 import gzip
 import hashlib
 import json
 import random
+import re
 import time
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -99,6 +124,15 @@ API_SERVERS = {
     "us": "https://api.fortifydata.com",
     "eu": "https://api.eu.fortifydata.com",
 }
+
+# [adaudit.py 1.0.8] The activation key (see AUTHENTICATION above).
+# An absent "e" means this environment. Document 01 does not name it; "us"
+# is the assumption pending confirmation from the platform developer.
+DEFAULT_ENVIRONMENT = "us"
+LICENSE_INTEGRATION_KEY = "AD_AUDIT_COLLECTOR"
+LICENSE_COLLECTOR_TYPE = "AD_AUDIT"
+# A key is a few hundred characters; anything far larger is not a key.
+ACTIVATION_KEY_MAX_CHARS = 8192
 
 # The API's own caps (contract 1.0). Request bodies are gzipped.
 FINDINGS_PER_BATCH = 2000
@@ -139,6 +173,120 @@ def run_uuid_for(client_id, evidence_run_id):
     return uuid.uuid5(RUN_UUID_NAMESPACE, f"{client_id}:{evidence_run_id}")
 
 
+# ============================================================================
+# Activation key and license key [adaudit.py 1.0.8]
+# ============================================================================
+
+class LicenseKeyError(ValueError):
+    """The activation or license key is malformed. The message never contains
+    the key."""
+
+
+class License:
+    """A parsed license: the key to send, its company id, agent UUID and the
+    environment name ("e", or None when the activation key has none)."""
+
+    def __init__(self, license_key, company_id, agent_id, environment):
+        self.license_key = license_key
+        self.company_id = company_id
+        self.agent_id = agent_id
+        self.environment = environment
+
+    @property
+    def environment_or_default(self):
+        return self.environment or DEFAULT_ENVIRONMENT
+
+    def __repr__(self):  # never show the key itself
+        return (f"License(company_id={self.company_id}, agent_id={self.agent_id}, "
+                f"environment={self.environment!r})")
+
+
+_B64_STANDARD = re.compile(r"^[A-Za-z0-9+/]*={0,2}$")
+_B64_URLSAFE = re.compile(r"^[A-Za-z0-9_-]*={0,2}$")
+
+
+def _b64decode_any(text, what):
+    """Decodes standard or URL-safe base64, with or without padding. Strict:
+    any other character, or a mix of the two alphabets, is an error."""
+    text = text.strip()
+    if not text:
+        raise LicenseKeyError(f"{what} is empty")
+    if _B64_STANDARD.match(text):
+        normalized = text
+    elif _B64_URLSAFE.match(text):
+        normalized = text.replace("-", "+").replace("_", "/")
+    else:
+        raise LicenseKeyError(f"{what} is not base64")
+    normalized = normalized.rstrip("=")
+    normalized += "=" * (-len(normalized) % 4)
+    try:
+        return base64.b64decode(normalized, validate=True)
+    except (binascii.Error, ValueError):
+        raise LicenseKeyError(f"{what} is not valid base64")
+
+
+def parse_license_key(license_key):
+    """Checks a license key and returns License (environment None)."""
+    if not isinstance(license_key, str) or not license_key.strip():
+        raise LicenseKeyError("the license key is empty")
+    license_key = license_key.strip()
+    parts = license_key.split(".")
+    if len(parts) != 4:
+        raise LicenseKeyError(f"the license key has {len(parts)} dot-separated part(s), not 4")
+    company, integration, collector, agent = parts
+    if not re.fullmatch(r"[0-9]{8}", company):
+        raise LicenseKeyError("the license key's company id is not 8 digits")
+    company_id = int(company)
+    if company_id <= 0:
+        raise LicenseKeyError("the license key's company id is 0")
+    try:
+        integration_text = _b64decode_any(integration, "the integration part").decode("utf-8")
+        collector_text = _b64decode_any(collector, "the collector-type part").decode("utf-8")
+        agent_text = _b64decode_any(agent, "the agent part").decode("utf-8")
+    except UnicodeDecodeError:
+        raise LicenseKeyError("a part of the license key is not text")
+    if integration_text != LICENSE_INTEGRATION_KEY:
+        raise LicenseKeyError(f"the license key is for integration \"{integration_text[:40]}\", "
+                              f"not {LICENSE_INTEGRATION_KEY}")
+    if collector_text != LICENSE_COLLECTOR_TYPE:
+        raise LicenseKeyError(f"the license key is for collector type \"{collector_text[:40]}\", "
+                              f"not {LICENSE_COLLECTOR_TYPE}")
+    try:
+        agent_id = uuid.UUID(agent_text.strip())
+    except ValueError:
+        raise LicenseKeyError("the license key's agent part is not a UUID")
+    return License(license_key, company_id, agent_id, None)
+
+
+def parse_activation_key(text):
+    """The activation key from the portal (base64 of {"k": ..., "e": ...}),
+    or a bare license key. Returns License; raises LicenseKeyError."""
+    if not isinstance(text, str) or not text.strip():
+        raise LicenseKeyError("the activation key is empty")
+    text = text.strip()
+    if len(text) > ACTIVATION_KEY_MAX_CHARS:
+        raise LicenseKeyError("the activation key is far too long to be one")
+    if text.count(".") == 3 and re.match(r"^[0-9]{8}\.", text):
+        return parse_license_key(text)  # a bare license key
+    raw = _b64decode_any(text, "the activation key")
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise LicenseKeyError("the activation key does not decode to JSON")
+    if not isinstance(data, dict):
+        raise LicenseKeyError("the activation key does not decode to a JSON object")
+    lic = parse_license_key(data.get("k"))
+    environment = data.get("e")
+    if environment is not None and not isinstance(environment, str):
+        raise LicenseKeyError("the activation key's environment (\"e\") is not text")
+    environment = (environment or "").strip().lower() or None
+    if environment is not None and environment not in API_SERVERS:
+        raise LicenseKeyError(f"the activation key names environment \"{environment[:40]}\"; "
+                              f"known: {', '.join(sorted(API_SERVERS))}")
+    lic.environment = environment
+    return lic
+
+
 class PushError(Exception):
     """The push could not continue; the session stops here and the next
     invocation retries from the oldest unpushed run. `reason` is the API's
@@ -163,8 +311,11 @@ class RunAlreadyComplete(PushError):
 # {"reason": "..."} with every refusal (HTTP 400, 403, 404, 409). A reason not
 # listed here is reported as it came.
 REFUSAL_TEXT = {
-    "KEY_NOT_SCOPED": "the API key is not granted this company id (403). Check --api-company-id "
-                      "(FD_COMPANY_ID) and the key. The runs stay queued until that is fixed.",
+    "KEY_NOT_SCOPED": "the key is not valid for this company id (403): the company id in the "
+                      "request does not match the key's. With an activation key the company id "
+                      "comes from the key -- remove --api-company-id / FD_COMPANY_ID if it is "
+                      "set; with an API key, check --api-company-id (FD_COMPANY_ID) and the key. "
+                      "Retrying will not help. The runs stay queued until that is fixed.",
     "DOMAIN_DISABLED": "FortifyData has disabled this domain (403). That is a deliberate decision "
                        "on their side: contact FortifyData. The runs stay queued.",
     "DOMAIN_NOT_RESOLVED": "the API has no domain with this installation's client_id under this "
@@ -176,7 +327,15 @@ REFUSAL_TEXT = {
     "INVALID_PAYLOAD": "the API rejected the request as invalid (400): a required field is "
                        "missing or malformed. Check the payload with --push-dry-run.",
 }
-STATUS_TEXT = {400: "rejected as invalid", 403: "refused", 404: "not found", 409: "conflict",
+STATUS_TEXT = {400: "rejected as invalid",
+               401: "the key was refused (401): it is unknown or malformed, or the AD audit "
+                    "integration is switched off for this company in the FortifyData portal. "
+                    "Retrying will not help; the runs stay queued until the key or the "
+                    "integration is fixed",
+               403: "refused (403) with no reason given. Check that the AD audit integration "
+                    "is enabled for this company in the FortifyData portal, or contact "
+                    "FortifyData; the runs stay queued",
+               404: "not found", 409: "conflict",
                413: "request body too large (the API refuses a body that inflates past 64 MB)"}
 
 
@@ -187,13 +346,16 @@ def reason_of(body):
     return None
 
 
-def refusal_error(status, body, what, opening=False):
+def refusal_error(status, body, what, opening=False, unexplained_403_is_pending=True):
     """The exception for an API refusal. `opening`: this was open run, where an
-    unexplained 403 (the pre-reason API) still means "waiting for approval"."""
+    unexplained 403 (the pre-reason API) still means "waiting for approval" --
+    [adaudit.py 1.0.8] only when unexplained_403_is_pending, i.e. with the old
+    API key; with an activation key it is a refusal like any other."""
     reason = reason_of(body)
     if reason == "RUN_ALREADY_COMPLETE":
         return RunAlreadyComplete(f"{what}: the API already holds this run as complete.", reason)
-    if reason == "DOMAIN_PENDING" or (reason is None and opening and status == 403):
+    if reason == "DOMAIN_PENDING" or (reason is None and opening and status == 403
+                                      and unexplained_403_is_pending):
         return AwaitingApproval(
             "the API refused the run (403): the domain is waiting for approval at FortifyData "
             "(always the case for the first run from a new installation). Runs stay queued.",
@@ -303,9 +465,15 @@ class ApiClient:
     response is returned instead; nothing is sent."""
 
     def __init__(self, base_url, company_id, api_key, log, compress=True, timeout=120,
-                 dry_run_dir=None):
+                 dry_run_dir=None, auth_scheme="ApiKey"):
+        """[adaudit.py 1.0.8] auth_scheme "LicenseKey" (api_key is then the
+        license key from the activation key) or "ApiKey" (the older
+        per-company API key)."""
+        if auth_scheme not in ("ApiKey", "LicenseKey"):
+            raise ValueError(f"unknown auth scheme {auth_scheme!r}")
         self.base_url = base_url.rstrip("/")
         self.company_id = company_id
+        self.auth_scheme = auth_scheme
         self.log = log
         self.compress = compress
         self.timeout = timeout
@@ -317,7 +485,7 @@ class ApiClient:
             self._requests = requests
             self.session = requests.Session()
             self.session.headers.update({
-                "Authorization": f"ApiKey {api_key}",
+                "Authorization": f"{auth_scheme} {api_key}",
                 "Content-Type": "application/json",
                 "User-Agent": "adaudit-push",
             })
@@ -400,7 +568,8 @@ class ApiClient:
         status, body = self.request("POST", f"/api/v2/adaudit/runs/{self.company_id}", payload,
                                     "open run")
         if status not in (200, 201) or body is None:
-            raise refusal_error(status, body, "open run", opening=True)
+            raise refusal_error(status, body, "open run", opening=True,
+                                unexplained_403_is_pending=(self.auth_scheme == "ApiKey"))
         server = str(body.get("schema_version") or "")
         if server and server.split(".")[0] != CONTRACT_VERSION.split(".")[0]:
             raise PushError(f"the API speaks contract {server}; this adaudit.py was built for "
@@ -430,6 +599,8 @@ class ApiClient:
         status, body = self.request("PUT", "/api/v2/adaudit/plugins/catalogue", payload,
                                     "plugin catalogue")
         if status != 200 or body is None:
+            if status == 401:
+                raise PushError("plugin catalogue: " + STATUS_TEXT[401] + ".")
             raise PushError(f"plugin catalogue rejected (HTTP {status}).")
         return body
 

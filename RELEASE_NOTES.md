@@ -6,6 +6,29 @@ Changes on the `development` branch, which collects the work towards
 running the scripts unattended under a supervising process (scheduled runs
 in a container). They are not in `release` yet.
 
+### Push authentication by activation key (2026-11-05)
+
+adaudit.py 1.0.8, `adaudit_push.py` (contract 1.0, unchanged). No schema or
+plugin change.
+
+- **The push authenticates with the activation key** the client copies from
+  the FortifyData portal (the platform's documents 01 and 03): give it as
+  `FD_ACTIVATION_KEY`, the file named by `FD_ACTIVATION_KEY_FILE`, or
+  `--activation-key`. It is checked before anything is sent, sent as
+  `Authorization: LicenseKey <license key>`, and supplies the company id for
+  the request paths and the environment that picks the server. Request
+  paths, payloads and batching are unchanged.
+- Two details are assumptions until the platform developer confirms them:
+  an activation key without an environment means `us`, and both base64
+  alphabets (with or without padding) are accepted.
+- **A 401** (key unknown or malformed, or the AD integration switched off)
+  stops the push with a message saying so; the runs stay queued (exit 5).
+  With the activation key, a 403 without a reason is a refusal, no longer
+  read as "waiting for approval" (kept for the older API key only).
+- **The older API key still works**, with a warning, until the platform
+  stops accepting it. An interactive run without any key now prompts for the
+  activation key.
+
 ### Ready for a supervising process (2026-11-05)
 
 adprofiler.py 1.0.8, entra_graph_collector.py 1.0.6, adaudit.py 1.0.7, new
