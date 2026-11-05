@@ -6,11 +6,13 @@ up. The collector runs unattended in your network, and only ever reads.
 
 ## 1. What the collector needs
 
-| What | Used by | Needed |
+| What | For | Needed |
 |---|---|---|
-| An **AD service account** (section 2) | `adprofiler.py`, Active Directory and Group Policy collection | Always |
-| An **Entra ID App Registration** (section 3) | `entra_graph_collector.py`, Entra ID collection | Only if Entra ID is to be assessed |
-| **Network access** (section 4) | the collector host | Always |
+| An **AD service account** (section 2) | Reading Active Directory and Group Policy | Always |
+| An **Entra ID App Registration** (section 3) | Reading Entra ID | Only if Entra ID is to be assessed |
+| **Network access** (section 4) | The machine the collector runs on | Always |
+
+Section 5 lists the details to provide once these are set up.
 
 The collector never writes to Active Directory or Entra ID. It never
 stores passwords, LAPS passwords, gMSA passwords, KDS root keys or the AD
@@ -41,19 +43,18 @@ service accounts:
 1. **New → User.**
    - **Logon name:** for example `svc_adaudit`.
    - **UPN suffix:** keep the domain's own DNS name, for example
-     `svc_adaudit@corp.example.com`, not an alternative suffix. The Group
-     Policy step takes the domain from it.
+     `svc_adaudit@corp.example.com`, not an alternative UPN suffix.
 2. **Password:** a long random one, at least 25 characters.
    - Clear *User must change password at next logon*.
-   - Either let the password expire on your normal schedule and update the
-     collector when you change it (section 5.3), or set *Password never
+   - Either let the password expire on your normal schedule and provide
+     the new one when you change it (section 5.2), or set *Password never
      expires* if your service-account policy allows it.
 3. **Account tab:**
    - **Set:** *Account is sensitive and cannot be delegated*.
    - **Leave clear:** *Smart card is required for interactive logon*.
    - **Logon hours and "Log On To":** leave unrestricted.
 4. **Do not add the account to Protected Users.** Its members cannot use
-   NTLM, which the Group Policy (SYSVOL) step uses by default.
+   NTLM, which reading the Group Policy files uses by default.
 
 Or with PowerShell (ActiveDirectory module):
 
@@ -127,9 +128,6 @@ $c = Get-Credential "CORP\svc_adaudit"
 Get-ADFineGrainedPasswordPolicy -Credential $c -Filter * | Select-Object Name
 ```
 
-The collector's log also says so: it warns when it sees no deleted
-objects, and notes when it sees no fine-grained password policy.
-
 ### 2.4 Group Policy content (SYSVOL)
 
 The collector also reads the Group Policy files in the domain controller's
@@ -137,9 +135,8 @@ SYSVOL and NETLOGON shares (read-only, over SMB). Every domain user can read
 them by default, so nothing needs granting, with one exception.
 
 **GPOs with security filtering.** Where *Authenticated Users* was removed
-from a GPO's delegation, the account cannot read that GPO at all. The GPO
-is then left out of the assessment, and the collector's log counts it as an
-unresolved GPO link. To include it:
+from a GPO's delegation, the account cannot read that GPO at all, and the
+GPO is left out of the assessment. To include it:
 1. In **Group Policy Management**, open the GPO → **Delegation**.
 2. Add the service account with **Read**.
 
@@ -178,7 +175,7 @@ from AdminSDHolder within about an hour.
 
 ### 2.7 How the collector connects
 
-- **Use LDAPS (TCP 636).** This is the collector's default.
+- **Use LDAPS (TCP 636).**
   - **Why:** the collector signs in with a username and password, which
     plain LDAP (389) would send unencrypted. Where the domain controllers
     require LDAP signing (common in hardened domains, and the default for
@@ -192,17 +189,18 @@ from AdminSDHolder within about an hour.
   domain that also hosts AD-integrated DNS. Name it by its fully qualified
   name, for example `dc01.corp.example.com`.
 - **Group Policy files:** SMB on TCP 445 to the same domain controller,
-  with NTLM. If NTLM is denied there, the collector can use Kerberos
-  instead (`sysvol_kerberos = true`, which also needs TCP/UDP 88 and the
-  domain controller's fully qualified name).
+  with NTLM. If NTLM is denied on the domain controllers, the collector
+  can use Kerberos instead. Kerberos also needs TCP/UDP 88 to the domain
+  controller, and the domain controller named by its fully qualified
+  name. Say so when you provide the details (section 5).
 - **Use the same account for every collection.** Changing the account, or
   its rights, between collections makes objects look changed when they are
   not.
 
 ## 3. The Entra ID App Registration (Entra ID collection)
 
-The Entra ID collector signs in as an **App Registration** with a client
-secret (OAuth 2.0 client credentials). It uses only **application
+The collector signs in to Entra ID as an **App Registration** with a
+client secret (OAuth 2.0 client credentials). It uses only **application
 permissions** of Microsoft Graph, and every one of them is read-only except
 one optional, opt-in permission (see below). It only sends read requests. No
 user signs in, and no one is prompted.
@@ -246,7 +244,7 @@ Graph application permissions needs *Privileged Role Administrator* or
      calendar reminder to renew it.
    - Copy the secret's **Value** immediately; it is shown only once. You
      need the *Value*, not the *Secret ID*.
-7. Give the three values to the collector (section 5):
+7. Keep the three values for section 5:
    - the tenant ID;
    - the application (client) ID;
    - the client secret value.
@@ -270,8 +268,8 @@ says `Application` for every permission.
 | `Directory.Read.All` | Groups and members, permission grants, domains, licences, directory settings, partner contracts, administrative units, devices | – |
 
 **Optional.** Each one unlocks more checks; grant only those you want.
-Without one, or without its licence, the collector records why, and the
-checks that need it are reported as *not assessed*: never as a pass.
+Without one, or without its licence, the checks that need it are reported
+as *not assessed*: never as a pass.
 
 | Permission | What it unlocks | Licence needed |
 |---|---|---|
@@ -286,16 +284,15 @@ checks that need it are reported as *not assessed*: never as a pass.
 
 **About `OnPremisesPublishingProfiles.ReadWrite.All`.** Microsoft offers
 no read-only permission for the pass-through authentication agents. The
-collector reads them only when this is switched on
-(`include_pta_agents = true`), and even then it only reads. The permission
-itself, however, would allow changes. Grant it only if that is acceptable
-to you; without it, this one source is recorded as skipped.
+collector reads them only if you ask for it when you provide the details
+(section 5), and even then it only reads. The permission itself, however,
+would allow changes. Grant it only if that is acceptable to you.
 
 ### 3.3 Alternative: create it with PowerShell
 
 The same registration with the Microsoft Graph PowerShell SDK
 (`Install-Module Microsoft.Graph -Scope CurrentUser`), run by a Global
-Administrator or Privileged Role Administrator. The script looks up each
+Administrator or Privileged Role Administrator. It looks up each
 permission by name, so no permission IDs are typed by hand.
 
 ```powershell
@@ -341,13 +338,12 @@ your app → API permissions**): every permission must have Type
 
 ### 3.4 Keeping it working
 
-- **Secret expiry.** When the client secret expires, the Entra ID
-  collection fails with an `AADSTS7000222` error.
-  - **Effect:** the daemon still evaluates and pushes the Active Directory
-    data, and reports the Entra failure in its health report. The Entra ID
-    checks are not assessed until the secret is replaced.
-  - **Fix:** create a new secret before the old one expires, give it to the
-    collector, then delete the old one.
+- **Secret expiry.** When the client secret expires, Entra ID can no
+  longer be read (error `AADSTS7000222`).
+  - **Effect:** Active Directory is still assessed as usual. The Entra ID
+    checks are reported as not assessed until the secret is replaced.
+  - **Fix:** create a new secret before the old one expires, provide it
+    (section 5.2), then delete the old one.
 - **Permissions added later.** Admin consent covers only the permissions
   present when it was granted. After adding a permission, select **Grant
   admin consent** again.
@@ -363,58 +359,41 @@ The collector only makes outbound connections; nothing connects to it.
 |---|---|---|
 | The domain controller | TCP 636 (LDAPS), or 389 | Active Directory |
 | The domain controller | TCP 445 (SMB) | Group Policy files |
-| The domain controller | TCP/UDP 88 | Only with `sysvol_kerberos = true` |
+| The domain controller | TCP/UDP 88 | Only if NTLM is blocked (section 2.7) |
 | Your DNS servers | 53 | Resolving the domain controller |
 | `login.microsoftonline.com`, `graph.microsoft.com` | TCP 443 | Entra ID collection |
 | The FortifyData API (`api.fortifydata.com`, or your region's) | TCP 443 | Sending results |
 
 An outbound web proxy is supported for the last two rows. If it inspects
-TLS, its CA certificate must be given to the collector.
+TLS, provide its CA certificate too (section 5).
 
-## 5. Giving the details to the collector
+## 5. The details to provide
 
-### 5.1 With the collector's own configuration (local mode)
+### 5.1 What to provide
 
-In the installation directory (see `CONTAINER.md`):
+Once the account and, if wanted, the App Registration are set up, provide
+these values. Enter them in the FortifyData portal, or as your installation
+instructions describe. Never send a password or secret by email.
 
-| Value | Where |
+| Value | Example |
 |---|---|
-| Domain controller name | `config/collector.toml`, `[ad] dc_host` |
-| Service account name (`svc_adaudit@corp.example.com` or `CORP\svc_adaudit`) | `[ad] username` |
-| Service account password | the file `secrets/ad_bind_password` |
-| Domain DNS name | `[ad] domain_fqdn` |
-| CA certificate (PEM) of the domain controller's LDAPS certificate | a file in `config/`, named in `[ad] ca_cert_file` |
-| Entra tenant ID and application (client) ID | `[entra] tenant_id`, `[entra] app_id` |
-| Entra client secret | the file `secrets/entra_app_secret` |
+| The domain controller's fully qualified name | `dc01.corp.example.com` |
+| The domain's DNS name | `corp.example.com` |
+| The service account's name | `svc_adaudit@corp.example.com` or `CORP\svc_adaudit` |
+| The service account's password | |
+| The CA certificate that issued the domain controller's LDAPS certificate (PEM or Base-64 `.cer` file) | |
+| Whether NTLM is blocked on the domain controllers (section 2.7) | |
+| *Entra ID only:* the Directory (tenant) ID and Application (client) ID | |
+| *Entra ID only:* the client secret value | |
+| *Entra ID only:* whether to read pass-through authentication agents (section 3.2) | |
+| *Only behind a TLS-inspecting proxy:* the proxy's CA certificate | |
 
-Write each secret on the first line of its file, for example:
+### 5.2 Changing a password or secret
 
-```
-printf '%s\n' 'the password' > secrets/ad_bind_password
-```
+When you change the service account's password or replace the client
+secret, provide the new value the same way. It is used from the next
+collection on, with nothing to restart.
 
-Then check the configuration with:
-
-```
-docker compose run --rm collector --check-config
-```
-
-### 5.2 Through the FortifyData portal
-
-When the collector is connected to the FortifyData platform, the same
-values are entered in the portal. The collector receives them encrypted to
-its own key.
-
-### 5.3 Changing a password or secret
-
-Write the new value to its file, or enter it in the portal. The collector
-reads it again before its next run, with no restart. If the previous run
-failed because of the old value, the collector notices the change within a
-few minutes and runs again.
-
-The collector reports a failed sign-in in its health report:
-- AD: `LDAP bind failed`;
-- Entra ID: `AADSTS…` errors.
-
-It does not retry a wrong password over and over, so it will not lock the
-account out.
+A collection that fails because of a wrong or expired password is reported
+as such. The collector does not retry a wrong password over and over, so
+it will not lock the account out.

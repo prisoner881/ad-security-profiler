@@ -84,7 +84,7 @@ Maintainers check pull requests against these conventions.
   - `collector_daemon.py` passes secrets to the scripts only through pipes (`<VAR>_FILE=/dev/fd/N`), never as options or environment values. A script's exit status is the daemon's only signal, so a new exit status, or a new secret, needs a matching change in the daemon.
   - The image version appears in `Dockerfile` (`VERSION`), `docker/compose.yaml` and `docker/install.sh` (the default image tag), and `CONTAINER.md`; raise them together with `collector_daemon.py`'s `VERSION`. A new top-level file the scripts need must also be added to the `COPY` lines in `Dockerfile`.
   - New optional reads must not stop a run when they fail.
-  - A new AD read that an ordinary domain user cannot do, or a new Graph permission, needs a matching entry in `PERMISSIONS.md` (the client's setup guide) and, for Graph, in SETUP.md's permission table.
+  - A new AD read that an ordinary domain user cannot do, or a new Graph permission, needs a matching entry in `PERMISSIONS.md` (the client's setup guide) and, for Graph, in SETUP.md's permission table. `PERMISSIONS.md` is written for the client's administrators: it says what to set up and why, never which script, option, file or setting uses it. Keep its section numbers stable; adprofiler.py's messages, SETUP.md and CONTAINER.md refer to them.
 
 ## Reporting security issues
 
