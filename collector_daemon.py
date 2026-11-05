@@ -2,13 +2,13 @@
 collector_daemon.py -- runs the AD/Entra collection, evaluation and push
 every day, unattended, and reports its health
 ==============================================================================
-VERSION: 1.0.2
+VERSION: 1.0.3
 
 The long-running process of a client installation. It starts, and from then
 on never exits by itself: it is stopped (SIGTERM, e.g. `docker stop`) or the
 machine goes down. Everything it does is logged, and everything it knows
 about its own state is in a status file and the health report. See
-DAEMON.md for the design, the configuration file and the deployment notes.
+docs/DAEMON.md for the design, the configuration file and the deployment notes.
 
 What it does, in a loop:
 
@@ -78,6 +78,8 @@ it exits on its own. A wrong AD or Entra setting is not one of them: the
 daemon keeps running, reports it and retries.
 
 CHANGELOG:
+    1.0.3  No change of its own: the version of the collector image, whose
+           schema_setup.py (1.1) no longer ships migration files up to v50.
     1.0.2  A failed Entra collection no longer blocks the evaluation and
            push of a successful AD collection: adaudit.py (1.0.9) runs with
            --skip-entra, so the Entra checks are NOT ASSESSED (their open
@@ -119,7 +121,7 @@ from pathlib import Path
 import platform_client as pc
 import secret_input
 
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -1488,7 +1490,7 @@ def healthcheck(settings):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description=f"collector_daemon.py {VERSION} -- runs the AD/Entra collection, "
-                    f"evaluation and push daily and reports health. See DAEMON.md.")
+                    f"evaluation and push daily and reports health. See docs/DAEMON.md.")
     parser.add_argument("--config", default=os.environ.get("ADAUDIT_DAEMON_CONFIG"),
                         help="TOML configuration file (env ADAUDIT_DAEMON_CONFIG).")
     mode = parser.add_mutually_exclusive_group()

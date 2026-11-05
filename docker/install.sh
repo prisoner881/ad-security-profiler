@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # install.sh -- creates (or updates) a collector installation directory.
-# See CONTAINER.md.
+# See docs/CONTAINER.md.
 #
 #   docker/install.sh [DIR]          default DIR: /opt/fortifydata-collector
 #
@@ -18,7 +18,7 @@ set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIR="${1:-/opt/fortifydata-collector}"
-IMAGE_DEFAULT="fortifydata-ad-collector:1.0.2"
+IMAGE_DEFAULT="fortifydata-ad-collector:1.0.3"
 
 umask 077
 
@@ -50,7 +50,7 @@ fi
 # .env: only when there is none.
 if [ ! -f "$DIR/.env" ]; then
     cat > "$DIR/.env" <<EOF
-# Read by docker compose (see CONTAINER.md).
+# Read by docker compose (see docs/CONTAINER.md).
 COLLECTOR_IMAGE=${COLLECTOR_IMAGE:-$IMAGE_DEFAULT}
 POSTGRES_IMAGE=${POSTGRES_IMAGE:-postgres:17-trixie}
 COLLECTOR_UID=$OWNER_UID

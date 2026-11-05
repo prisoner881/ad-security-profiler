@@ -2,7 +2,7 @@
 """
 schema_setup.py -- creates or upgrades the ad_intel database schema, unattended
 ==============================================================================
-VERSION: 1.0
+VERSION: 1.1
 
 adprofiler.py, entra_graph_collector.py and adaudit.py refuse to run against a
 schema other than the one they were built for, and until now the schema could
@@ -16,9 +16,17 @@ script does it:
       (two functions use MERGE ... RETURNING merge_action()).
     - Existing schema: reads its version (max(version_number) in
       ad_intel.schema_migration_history) and applies every
-      schema_migration_vNN.sql above it, oldest first, up to the newest file
-      shipped next to this script.
+      schema_migration_vNN.sql above it, oldest first, up to the version
+      schema_init.sql installs.
     - Already current: does nothing.
+
+[1.1] The migration files up to v50 were removed: a production installation
+starts from an empty database. The target version is now the one
+schema_init.sql records, and migration files are optional -- a later schema
+change ships as schema_migration_v51.sql (and onward) next to it, and this
+script applies those to an existing database as before. A database older
+than the target with no migration files to bring it there is refused: create
+a new, empty database instead.
 
 Each file is sent to the server as one batch. A file without its own
 BEGIN/COMMIT then runs as one implicit transaction, applied completely or not
@@ -35,12 +43,15 @@ guessed at.
 
 Refused, with a message saying what to do by hand:
     - a database whose ad_intel schema has no schema_migration_history table
-      (older than v31: apply the migrations by hand, see SETUP.md);
+      (older than v31);
+    - [1.1] a database older than schema_init.sql's version when the
+      migration files to bring it there are not shipped (create a new,
+      empty database);
     - a database whose schema is newer than the files shipped here (upgrade
       the scripts instead);
     - an ad_intel schema that exists but is empty or incomplete;
-    - a schema_init.sql that is not for the newest migration's version (an
-      incomplete or mixed set of files).
+    - a migration file newer than schema_init.sql's version (a mixed set of
+      files).
 
 The partition maintenance functions are SECURITY DEFINER: run this as the
 role that owns the schema (normally the role the scripts connect as). A
@@ -86,7 +97,7 @@ except ImportError:
 import run_lock
 import secret_input
 
-VERSION = "1.0"
+VERSION = "1.1"
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -149,26 +160,26 @@ signal.signal(signal.SIGTERM, handle_sigterm)
 
 
 def find_files(schema_dir):
-    """(schema_init path, {version: migration path}, newest version). Checks
-    that schema_init.sql is for the newest migration's version."""
+    """(schema_init path, {version: migration path}, target version). [1.1]
+    The target is the version schema_init.sql installs; migration files are
+    optional, and none may be newer than it."""
     init_path = schema_dir / "schema_init.sql"
     if not init_path.is_file():
         raise SetupError(f"{init_path} not found (--schema-dir points at the wrong directory?)")
+    m = FRESH_INSTALL_VERSION.search(init_path.read_text(encoding="utf-8"))
+    if not m:
+        raise SetupError(f"{init_path} does not record the version it installs")
+    target = int(m.group(1))
     migrations = {}
     for path in schema_dir.iterdir():
         m = MIGRATION_NAME.match(path.name)
         if m and path.is_file():
             migrations[int(m.group(1))] = path
-    if not migrations:
-        raise SetupError(f"no schema_migration_vNN.sql files in {schema_dir}")
-    newest = max(migrations)
-    m = FRESH_INSTALL_VERSION.search(init_path.read_text(encoding="utf-8"))
-    if not m:
-        raise SetupError(f"{init_path} does not record the version it installs")
-    if int(m.group(1)) != newest:
-        raise SetupError(f"{init_path} installs schema v{m.group(1)}, but the newest migration "
-                         f"file is v{newest}: the schema files are incomplete or mixed")
-    return init_path, migrations, newest
+    newer = sorted(v for v in migrations if v > target)
+    if newer:
+        raise SetupError(f"{init_path} installs schema v{target}, but there is a migration file "
+                         f"for v{newer[-1]}: the schema files are incomplete or mixed")
+    return init_path, migrations, target
 
 
 def sql_for_server(path):
@@ -250,8 +261,9 @@ def apply_file(args, password, path, expect_version):
 
 def run(args, password):
     init_path, migrations, newest = find_files(args.schema_dir)
-    log(f"Schema files in {args.schema_dir}: schema_init.sql (v{newest}) and migrations "
-        f"v{min(migrations)}-v{newest}.")
+    log(f"Schema files in {args.schema_dir}: schema_init.sql (v{newest})"
+        + (f" and migrations v{min(migrations)}-v{max(migrations)}." if migrations else
+           "; no migration files (a new database only, or one already at this version)."))
     conn = connect(args, password)
     try:
         state, current, owner_is_me = database_state(conn)
@@ -262,8 +274,8 @@ def run(args, password):
     if state == "untracked":
         raise SetupError(
             "the database has an ad_intel schema without schema_migration_history: it is older "
-            f"than v{FIRST_TRACKED_VERSION}, or incomplete. It cannot be upgraded automatically; "
-            "see SETUP.md (Troubleshooting).")
+            f"than v{FIRST_TRACKED_VERSION}, or incomplete. It cannot be upgraded; create a new, "
+            f"empty database and run this script against it.")
 
     if state == "empty":
         if args.check:
@@ -292,8 +304,11 @@ def run(args, password):
     pending = list(range(current + 1, newest + 1))
     missing = [v for v in pending if v not in migrations]
     if missing:
-        raise SetupError("migration file(s) missing: "
-                         + ", ".join(f"schema_migration_v{v}.sql" for v in missing))
+        raise SetupError(
+            f"the database is at schema v{current}, and this release installs v{newest} but "
+            "ships no migration for " + ", ".join(f"v{v}" for v in missing) + ": it cannot "
+            "upgrade this database. Create a new, empty database and run this script against "
+            "it (the earlier migration files were removed; see docs/RELEASE_NOTES.md).")
     if args.check:
         log(f"Check: the database is at schema v{current}; would apply "
             + ", ".join(f"v{v}" for v in pending) + ".")

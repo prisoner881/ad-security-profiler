@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1
 #
 # The collector image: collector_daemon.py with the scripts, schema files
-# and plugins. See CONTAINER.md.
+# and plugins. See docs/CONTAINER.md.
 #
-#   docker build -t fortifydata-ad-collector:1.0.2 .
+#   docker build -t fortifydata-ad-collector:1.0.3 .
 #
 # PYTHON_IMAGE can point at a mirror of the same official image when Docker
 # Hub is rate-limited, e.g.
@@ -22,7 +22,7 @@ RUN python -m venv /opt/venv \
 
 # --- the image ---------------------------------------------------------------
 FROM ${PYTHON_IMAGE}
-ARG VERSION=1.0.2
+ARG VERSION=1.0.3
 LABEL org.opencontainers.image.title="FortifyData AD/Entra audit collector" \
       org.opencontainers.image.description="collector_daemon.py: daily AD and Entra ID collection, evaluation and push" \
       org.opencontainers.image.version="${VERSION}" \
@@ -30,8 +30,8 @@ LABEL org.opencontainers.image.title="FortifyData AD/Entra audit collector" \
 
 COPY --from=deps /opt/venv /opt/venv
 WORKDIR /opt/collector
-COPY *.py *.sql requirements.txt RELEASE_NOTES.md DAEMON.md CONTAINER.md PERMISSIONS.md \
-     collector_daemon.example.toml ./
+COPY *.py *.sql requirements.txt collector_daemon.example.toml ./
+COPY docs/ docs/
 COPY plugins/ plugins/
 
 # Compiled once here: the root filesystem is read-only at run time, and the

@@ -1,18 +1,19 @@
 -- ============================================================================
 -- adprofiler / adaudit / entra_graph_collector -- Consolidated Schema Init
 --
--- The complete schema, current through schema_migration_v50.sql, for a
--- brand-new, empty database (PostgreSQL 17 or later). An existing database
--- is upgraded with the schema_migration_vNN.sql files instead;
--- schema_setup.py picks the right one of the two. A fresh install and an
--- upgrade produce the same schema. The fresh-install row in
+-- The complete schema (v50) for a brand-new, empty database (PostgreSQL 17
+-- or later); schema_setup.py applies it. The fresh-install row in
 -- schema_migration_history (near the end) records the version.
 --
 -- HISTORY OF THIS FILE
 --   It was first built at v28, replacing schema.sql and migrations v2-v28,
 --   as follows. Every later migration (v29-v50) has been folded in by hand:
 --   changed objects in place (marked [vNN]) and new ones in a "vNN
---   ADDITIONS" section near the end.
+--   ADDITIONS" section near the end. The migration files themselves were
+--   removed from the repository after v50, since a production installation
+--   starts from this file; comments below that name one (for its full
+--   story) refer to the git history. A later schema change ships as
+--   schema_migration_v51.sql (and onward) and is folded in here as well.
 --
 -- HOW THIS WAS BUILT
 --   1. A fresh database was built from schema.sql + all 27 migrations,
@@ -50,9 +51,10 @@
 --   PostgreSQL 17 has been required since (schema_setup.py checks it).
 --
 -- VERIFIED SINCE
---   On PostgreSQL 17, a database created from this file and one upgraded
---   with the migration files are compared schema-for-schema (pg_dump
---   --schema-only) before a schema version is released.
+--   On PostgreSQL 17, through v50, a database created from this file and
+--   one upgraded with the migration files were compared schema-for-schema
+--   (pg_dump --schema-only) before each schema version was released. Do
+--   the same for every migration from v51 on.
 -- ============================================================================
 
 \restrict OOcQP0WMkT0AsbNush24UiP3dWhgPaYpJef3WNchs34wML8TNbcq16wxfqY5N5C

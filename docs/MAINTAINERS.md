@@ -8,7 +8,7 @@ This file lists the people responsible for **ad-security-profiler** and explains
 - `run_lock.py`, the run lock shared by the three scripts
 - `secret_input.py`, how the three scripts read passwords and secrets
 - the finding plugins in `plugins/`
-- the PostgreSQL schema (`schema_init.sql` and the `schema_migration_vNN.sql` files), with `schema_setup.py`, which applies them unattended
+- the PostgreSQL schema (`schema_init.sql`, and from v51 on the `schema_migration_vNN.sql` files), with `schema_setup.py`, which applies them unattended
 - `collector_daemon.py`, the unattended daemon that runs the scripts daily, with `platform_client.py` (the FortifyData platform side)
 - the container packaging (`Dockerfile`, `docker/`)
 
@@ -24,15 +24,15 @@ Each area lists the files it covers. Any change to an area needs approval from o
 
 | Area | Files | Maintainers |
 |---|---|---|
-| AD collector | `adprofiler.py`, `sysvol_collector.py`, `changelog.txt` | @prisoner881 |
+| AD collector | `adprofiler.py`, `sysvol_collector.py`, `docs/changelog.txt` | @prisoner881 |
 | Entra ID collector | `entra_graph_collector.py` | @prisoner881 |
 | Plugin runner and reporting | `adaudit.py`, `adaudit_push.py` | @prisoner881 |
 | Run lock and secret input | `run_lock.py`, `secret_input.py` | @prisoner881 |
-| Finding and inventory plugins | `plugins/`, `COMPLIANCE_TAGS.md` | @prisoner881 |
+| Finding and inventory plugins | `plugins/`, `docs/COMPLIANCE_TAGS.md` | @prisoner881 |
 | Database schema | `schema_init.sql`, `schema_migration_v*.sql`, `schema_setup.py` | @prisoner881 |
-| Collector daemon | `collector_daemon.py`, `platform_client.py`, `collector_daemon.example.toml`, `DAEMON.md` | @prisoner881 |
-| Container packaging | `Dockerfile`, `.dockerignore`, `docker/`, `CONTAINER.md` | @prisoner881 |
-| Documentation | `SETUP.md`, `RELEASE_NOTES.md`, `MAINTAINERS.md`, `DAEMON.md`, `CONTAINER.md`, `PERMISSIONS.md` | @prisoner881 |
+| Collector daemon | `collector_daemon.py`, `platform_client.py`, `collector_daemon.example.toml`, `docs/DAEMON.md` | @prisoner881 |
+| Container packaging | `Dockerfile`, `.dockerignore`, `docker/`, `docs/CONTAINER.md` | @prisoner881 |
+| Documentation | `docs/SETUP.md`, `docs/RELEASE_NOTES.md`, `docs/MAINTAINERS.md`, `docs/DAEMON.md`, `docs/CONTAINER.md`, `docs/PERMISSIONS.md` | @prisoner881 |
 
 ## Maintainer responsibilities
 
@@ -64,10 +64,12 @@ Maintainers:
 Maintainers check pull requests against these conventions.
 
 - **Schema changes:**
-  - Every schema change ships as a new `schema_migration_vNN.sql` and is also folded into `schema_init.sql`. A fresh install and an upgrade must produce the same schema.
+  - `schema_init.sql` is the complete current schema; a production installation starts from it on an empty database. The migration files up to v50 were removed (they remain in the git history).
+  - From v51 on, every schema change ships as a new `schema_migration_vNN.sql` (so installed databases can be upgraded) and is also folded into `schema_init.sql`. A fresh install and an upgrade must produce the same schema.
   - `EXPECTED_SCHEMA_VERSION` in `adprofiler.py` and `REQUIRED_SCHEMA_VERSION` in `adaudit.py` are raised to match.
   - Migrations are never edited after release.
-  - `schema_setup.py` takes the newest `schema_migration_vNN.sql` as the target and checks that `schema_init.sql`'s fresh-install row records that same version; keep the two in step. A migration must insert its own row into `schema_migration_history` (the script checks it), and must not contain psql meta-commands (only pg_dump's `\restrict`/`\unrestrict` lines in `schema_init.sql` are skipped).
+  - `schema_setup.py` takes the version `schema_init.sql`'s fresh-install row records as the target, and refuses a migration file newer than it; raise that row with every migration. A migration must insert its own row into `schema_migration_history` (the script checks it), and must not contain psql meta-commands (only pg_dump's `\restrict`/`\unrestrict` lines in `schema_init.sql` are skipped).
+- **Documentation** lives in `docs/`. A script's message or comment names a document by its path (`docs/PERMISSIONS.md`); documents refer to one another by file name alone.
 - **Versioning:**
   - Each script carries its own `VERSION`, and changes are recorded in its docstring or in `changelog.txt`.
   - Plugins carry their own `version` and `revision_date`, plus a `[vX.Y]` note in the docstring explaining what changed.

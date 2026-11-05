@@ -9,6 +9,14 @@ the script's own docstring now keeps a one-line summary per entry, this
 file keeps the complete detail (root causes, what was verified, why a
 decision was made a particular way) for anyone who wants it.
 
+    1.0.10 - The schema migration files up to v50 were removed (a
+             production installation starts from an empty database; see
+             schema_setup.py 1.1). The messages for a database that is
+             behind, untracked, or missing this month's partitions no
+             longer name migration files: they say to run schema_setup.py
+             (or SELECT ad_intel.run_partition_maintenance(); as the schema
+             owner), or to create a new, empty database. No other change.
+
     1.0.9 - Clearer about the two rights a plain domain user lacks (new
             PERMISSIONS.md, the client's setup guide):
             - The capability probe's message for CN=Deleted Objects named a
