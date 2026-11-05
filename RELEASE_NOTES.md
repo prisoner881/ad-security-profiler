@@ -6,6 +6,54 @@ Changes on the `development` branch, which collects the work towards
 running the scripts unattended under a supervising process (scheduled runs
 in a container). They are not in `release` yet.
 
+### Entra failures, integrity check, permissions guide (2026-11-05)
+
+adprofiler.py 1.0.9, adaudit.py 1.0.9, entra_graph_collector.py 1.0.7,
+collector_daemon.py 1.0.2, schema v50 (`schema_migration_v50.sql`), new
+`PERMISSIONS.md`. Collector image 1.0.2.
+
+- **A failed Entra collection no longer blocks the AD results.** The daemon
+  evaluates and pushes the AD data, and the run ends with a warning.
+  - **New option:** `adaudit.py --skip-entra` makes the Entra checks NOT
+    ASSESSED and does not run them against the older Entra data kept in
+    the database. Their open findings stay open.
+  - **The bug it avoids:** evaluating anyway would have assessed the last
+    successful Entra collection as if it were current. adaudit.py already
+    handled SYSVOL data this way.
+  - **When Entra is not configured,** the daemon also passes
+    `--skip-entra`.
+- **The database integrity check works.**
+  - **What it does:** `check_scd2_integrity()` finds objects and edges with
+    more than one current row, which would be a collector bug.
+  - **What was wrong:** it failed for every caller (unqualified table
+    names), its ACL key was incomplete (false duplicates), and it covered 7
+    of the 36 history tables.
+  - **Schema v50** fixes all three. The daemon runs the check after every
+    collection and reports any duplicate in its health report.
+  - adprofiler.py 1.0.9 and adaudit.py 1.0.9 require v50, which the daemon
+    (`schema_setup.py`) applies automatically.
+- **`PERMISSIONS.md`** is the client's setup guide:
+  - the AD service account (`adprofiler.py`): what it needs, and how to
+    grant the two rights an ordinary domain user lacks;
+  - the Entra ID App Registration: portal steps, a PowerShell alternative,
+    every Graph permission and what it unlocks;
+  - network access.
+- **adprofiler.py 1.0.9 says when those two rights are missing.**
+  - AD answers an account that may not list `CN=Deleted Objects` with an
+    empty list, not an error. So 0 visible deleted objects now logs a
+    warning, and 0 visible fine-grained password policies logs a note.
+  - The capability probe no longer names a "View Deleted Objects"
+    extended right, which does not exist.
+  - SETUP.md no longer suggests dropping `--ssl`: plain LDAP sends the
+    password unencrypted and fails wherever LDAP signing is required.
+- `entra_graph_collector.py` 1.0.7 is named for what it collects ("Microsoft
+  Entra ID collector", no longer "email collector"). `schema_init.sql`'s
+  header is brought up to date.
+
+Upgrading: replace the scripts; `schema_setup.py` (or the daemon) applies v50.
+Without the daemon: `psql -f schema_migration_v50.sql`, or run
+`schema_setup.py`.
+
 ### Container packaging (2026-11-05)
 
 collector_daemon.py 1.0.1; new `Dockerfile`, `.dockerignore`, `docker/`

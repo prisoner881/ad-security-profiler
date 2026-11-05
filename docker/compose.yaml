@@ -39,7 +39,7 @@ services:
     logging: *logging
 
   collector:
-    image: ${COLLECTOR_IMAGE:-fortifydata-ad-collector:1.0.1}
+    image: ${COLLECTOR_IMAGE:-fortifydata-ad-collector:1.0.2}
     restart: unless-stopped
     init: true
     # The owner of ./secrets, ./config and ./data (install.sh sets these).

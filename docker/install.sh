@@ -18,7 +18,7 @@ set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIR="${1:-/opt/fortifydata-collector}"
-IMAGE_DEFAULT="fortifydata-ad-collector:1.0.1"
+IMAGE_DEFAULT="fortifydata-ad-collector:1.0.2"
 
 umask 077
 

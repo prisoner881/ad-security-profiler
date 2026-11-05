@@ -58,8 +58,8 @@ day-to-day operation.
 From the repository root:
 
 ```
-docker build -t fortifydata-ad-collector:1.0.1 .
-docker save fortifydata-ad-collector:1.0.1 | gzip > fortifydata-ad-collector-1.0.1.tar.gz
+docker build -t fortifydata-ad-collector:1.0.2 .
+docker save fortifydata-ad-collector:1.0.2 | gzip > fortifydata-ad-collector-1.0.2.tar.gz
 ```
 
 - **Size:** the image is about 320 MB, about 75 MB compressed.
@@ -101,10 +101,15 @@ On a Linux host with Docker Engine and the compose plugin:
 2. **Load the image**, if you received it as a file:
 
    ```
-   docker load -i fortifydata-ad-collector-1.0.1.tar.gz
+   docker load -i fortifydata-ad-collector-1.0.2.tar.gz
    ```
 
-3. **Configure** `config/collector.toml`:
+3. **Prepare the accounts.** The client's administrators set up the AD
+   service account and, if Entra ID is assessed, the App Registration.
+   Hand them `PERMISSIONS.md`, which also lists the network access the
+   collector needs.
+
+4. **Configure** `config/collector.toml`:
    - the schedule;
    - `[ad]`: DC, account, domain;
    - optionally `[entra]`;
@@ -113,13 +118,13 @@ On a Linux host with Docker Engine and the compose plugin:
    For LDAPS verification, put the CA certificate in `config/` and set
    `ca_cert_file = "/config/<file>.pem"`.
 
-4. **Write the secrets**, one per file, on the first line:
+5. **Write the secrets**, one per file, on the first line:
 
    ```
    printf '%s\n' 'the bind password' > secrets/ad_bind_password
    ```
 
-5. **Check, then start:**
+6. **Check, then start:**
 
    ```
    cd /opt/fortifydata-collector

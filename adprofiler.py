@@ -4,7 +4,7 @@
  adprofiler.py -- Active Directory Security & Compliance Profiler (Collector)
 ================================================================================
 
-VERSION: 1.0.8
+VERSION: 1.0.9
 
 PURPOSE:
     Connects to an on-premise Active Directory Domain Controller via LDAP,
@@ -194,7 +194,7 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
-VERSION = "1.0.8"
+VERSION = "1.0.9"
 
 # [v0.7.7] The oldest collector version whose stored derived fields
 # (parsed / typed columns computed from raw attributes) are current. A
@@ -2028,12 +2028,21 @@ def run_capability_probe(conn, base_dn):
             "passed": True,
             "detail": f"OK ({visible} deleted object(s) currently visible)",
         }
+        if visible == 0:
+            # [v1.0.9] AD answers an account that may not list the container
+            # with an empty result, not an error, so this cannot fail the
+            # probe; but a domain with no deleted object at all is rare.
+            log_warn("No deleted objects are visible. Unless nothing has ever been deleted in "
+                     "this domain, the bind account cannot list CN=Deleted Objects: deletions "
+                     "are then never recorded, and deleted accounts keep being reported. Grant "
+                     "it List Contents and Read Property there (PERMISSIONS.md, section 2.3).")
     except (LDAPException, LDAPCollectionError) as exc:
         results["view_deleted_objects"] = {
             "passed": False,
             "detail": (
-                f"{exc} -- grant the 'View Deleted Objects' (Deleted Object "
-                "CONTROL_ACCESS) extended right (see PERMISSIONS.md)."
+                f"{exc} -- grant the bind account List Contents and Read Property on "
+                "CN=Deleted Objects (dsacls /takeownership, then /G <account>:LCRP; "
+                "PERMISSIONS.md, section 2.3)."
             ),
         }
 
@@ -2261,7 +2270,7 @@ REQUIRED_IDENTITY_COLUMNS = {
 # the structural check remains the backstop for a schema altered
 # outside the approved migration files, where the version number could
 # claim to be current while the actual structure doesn't match it.
-EXPECTED_SCHEMA_VERSION = 49  # [v1.0.5] v49: partition functions in UTC (v48: ad_gpo_sysvol.first_read_run_id)
+EXPECTED_SCHEMA_VERSION = 50  # [v1.0.9] v50: check_scd2_integrity() fixed (v49: partition functions in UTC)
 
 
 def check_schema_version(pg_conn):
@@ -6197,6 +6206,14 @@ def main():
                 )
                 collect_fgpp_applies_to(ldap_conn, cur, client_id, run_id,
                                          dn_to_guid, fgpp_entries, stats, run_timestamp)
+                if not fgpp_entries:
+                    # [v1.0.9] By default only Domain Admins may read PSOs, and
+                    # an unreadable PSO is simply not returned.
+                    log_info("No Fine-Grained Password Policy is visible. If the domain has "
+                             "any, the bind account cannot read them (by default only Domain "
+                             "Admins can), and every user is assessed against the default "
+                             "domain policy: grant read on the Password Settings Container "
+                             "(PERMISSIONS.md, section 2.3).")
             except LDAPException as exc:
                 log_warn(f"Fine-Grained Password Policy collection failed (non-fatal): {exc}")
 

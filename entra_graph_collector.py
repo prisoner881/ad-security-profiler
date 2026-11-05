@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """
-entra_graph_collector.py -- Microsoft Entra ID / Graph API Email Collector
+entra_graph_collector.py -- Microsoft Entra ID collector (Microsoft Graph)
 
-VERSION: 1.0.6
+VERSION: 1.0.7
 
 CHANGELOG:
+    1.0.7 - Named for what it collects: "Microsoft Entra ID collector"
+            (banner, --help, this docstring) instead of "email collector",
+            the name from when it read only mail attributes. The
+            permission list is now kept in PERMISSIONS.md (client-facing
+            setup of the App Registration). No behaviour change.
     1.0.6 - For running under a scheduler or container daemon: SIGTERM (what
             `docker stop`, systemd and a supervising process send) is handled
             like Ctrl-C -- the partial-run report says which tables were
@@ -201,14 +206,20 @@ CHANGELOG:
             entirely.
 
 WHAT THIS IS
-    Harvests user email data (mail, proxyAddresses, and related fields)
-    from Microsoft Graph for a client whose email is hosted in Exchange
-    Online -- fully cloud-only, or hybrid with identity synced from
-    on-prem AD but mailboxes living entirely in the cloud. Overwhelmingly
-    the common case today: on-prem mail/proxyAddresses is only populated
-    when something local (classic Exchange Hybrid, or the newer Exchange
-    attribute writeback feature) actively writes it there, and most
-    environments no longer have that.
+    [1.0.7] The Microsoft Entra ID collector. Over Microsoft Graph, with an
+    App Registration's application permissions (read-only), it reads the
+    tenant's identity security configuration into the same database as
+    adprofiler.py: users (with their on-prem link and mail attributes),
+    directory roles and PIM, groups, applications and service principals
+    with their permission grants, Conditional Access and the other tenant
+    policies, licences, domains and federation, sign-in and risk data
+    where licensed, and more (see the sources in run_optional_sources()).
+    adaudit.py's Entra plugins evaluate it.
+
+    It began (0.1) as a reader of user mail attributes (mail,
+    proxyAddresses) for tenants whose mailboxes are in Exchange Online,
+    where on-prem AD no longer holds them; hence older notes below that
+    speak of "email data".
 
 WHY THIS IS A SEPARATE SCRIPT, NOT A MODE ON adprofiler.py
     adprofiler.py is, and should stay, a single-purpose LDAP collector:
@@ -226,6 +237,9 @@ WHY THIS IS A SEPARATE SCRIPT, NOT A MODE ON adprofiler.py
     tell at a glance which is which. Two scripts, one shared database.
 
 CREDENTIAL SETUP (done once, by the client, in their own Entra tenant)
+    [1.0.7] The client-facing, current version of these steps, with every
+    permission and what it unlocks, is PERMISSIONS.md. The notes below are
+    the history of how the list grew.
     1. Register an application in the Entra admin center (Entra ID ->
        App registrations -> New registration). Any name/redirect URI is
        fine -- this app is never used interactively.
@@ -341,7 +355,7 @@ PG_DBNAME = "adprofiler"
 PG_USER = None
 PG_PASSWORD = None
 
-VERSION = "1.0.6"
+VERSION = "1.0.7"
 
 # [v0.5.0] Retry policy shared by every Graph/token request (see
 # _send_with_retry()). 429 and transient 5xx responses, plus network
@@ -1668,7 +1682,7 @@ def resolve_client_id(pg_conn, domain_fqdn=None, client_id_override=None):
         raise CollectorAbort(
             f"No client found for domain_fqdn='{domain_fqdn}' (case-insensitive "
             "match attempted). This script enriches an existing client record "
-            "with cloud email data -- run adprofiler.py against this domain's "
+            "with Entra ID data -- run adprofiler.py against this domain's "
             "on-prem AD at least once first, so there's a client row (and "
             "object_sid values) to correlate Graph users against. If "
             "adprofiler.py has already been run, double-check this value "
@@ -3723,7 +3737,8 @@ def parse_args():
     checked.
     """
     parser = argparse.ArgumentParser(
-        description="entra_graph_collector.py -- Microsoft Graph email collector, v" + VERSION,
+        description="entra_graph_collector.py -- Microsoft Entra ID collector (Microsoft Graph), v"
+                    + VERSION,
     )
     parser.add_argument("--tenant-id", default=None,
                          help="Entra ID tenant ID (GUID) or verified domain name. "
@@ -3889,7 +3904,7 @@ def main():
         log_fh.close()
     atexit.register(_restore_stdout)
 
-    log_header(f"entra_graph_collector.py v{VERSION} -- Microsoft Graph Email Collector")
+    log_header(f"entra_graph_collector.py v{VERSION} -- Microsoft Entra ID Collector")
     log_info(f"Mirroring console output to {log_filename}")
 
     global PG_HOST, PG_PORT, PG_DBNAME, PG_USER, PG_PASSWORD

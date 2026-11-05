@@ -9,6 +9,28 @@ the script's own docstring now keeps a one-line summary per entry, this
 file keeps the complete detail (root causes, what was verified, why a
 decision was made a particular way) for anyone who wants it.
 
+    1.0.9 - Clearer about the two rights a plain domain user lacks (new
+            PERMISSIONS.md, the client's setup guide):
+            - The capability probe's message for CN=Deleted Objects named a
+              "View Deleted Objects" extended right that does not exist. It
+              now says List Contents and Read Property (dsacls).
+            - AD answers an account without that right with an empty list,
+              which passes the probe, so 0 visible deleted objects now logs
+              a warning: deletions would never be recorded.
+            - 0 visible Fine-Grained Password Policies logs a note: by
+              default only Domain Admins can read them.
+            Needs schema v50 (schema_migration_v50.sql; schema_setup.py
+            applies it). v50 repairs
+            check_scd2_integrity(), the database's check that no object or
+            edge has more than one current row: it failed with "relation
+            ... does not exist" for every caller (unqualified table names,
+            no search_path of its own), its acl_edge key left out
+            object_type_guid (two ACEs differing only in object type were
+            reported as duplicates), and it covered 7 of the 36 tables this
+            script keeps history in. It now covers all of them, keyed as
+            this script diffs them, per client. collector_daemon.py runs it
+            after every collection and reports any duplicate.
+
     1.0.8 - For running under a scheduler or container daemon:
             - SIGTERM (what `docker stop`, systemd and a supervising process
               send) is handled like Ctrl-C: the transaction is rolled back,
