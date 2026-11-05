@@ -2,7 +2,7 @@
 """
 schema_setup.py -- creates or upgrades the ad_intel database schema, unattended
 ==============================================================================
-VERSION: 1.2
+VERSION: 1.3
 
 adprofiler.py, entra_graph_collector.py and adaudit.py refuse to run against a
 schema other than the one they were built for, and until now the schema could
@@ -32,6 +32,13 @@ chain must be complete: v51, v52, ... up to the target, no gap.
       is (a client may skip updates: v50 to v55 applies v51-v55 in one run).
     - Already current: does nothing.
     - Older than the baseline (v50): refused; create a new, empty database.
+
+[1.3] Before it migrates an existing database, with --backup-dir DIR, it
+saves the database with pg_dump (custom format) to
+DIR/adprofiler-v<from>-before-v<to>-<UTC time>.dump (mode 0600) and keeps the
+newest --backup-keep (default 3). If the backup fails, no migration is
+applied. A new database and a current one need no backup. The image carries
+pg_dump (PostgreSQL 17 client); restoring is described in docs/CONTAINER.md.
 
 A migration whose header has the line
 
@@ -97,8 +104,9 @@ import atexit
 import os
 import re
 import signal
+import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 try:
@@ -110,7 +118,7 @@ except ImportError:
 import run_lock
 import secret_input
 
-VERSION = "1.2"
+VERSION = "1.3"
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -289,6 +297,65 @@ def apply_file(args, password, path, expect_version):
         conn.close()
 
 
+BACKUP_NAME = re.compile(r"^adprofiler-v\d+-before-v\d+-\d{8}T\d{6}Z\.dump$")
+
+
+def backup_database(args, password, current, target):
+    """[1.3] pg_dump of the whole database before migrating it. Returns the
+    file's path; raises SetupError (and nothing is migrated) on failure. The
+    password reaches pg_dump only in its environment (PGPASSWORD), never on
+    its command line."""
+    backup_dir = args.backup_dir
+    try:
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(backup_dir, 0o700)
+    except OSError as exc:
+        raise SetupError(f"cannot use the backup directory {backup_dir}: {exc}; no migration "
+                         f"was applied")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    path = backup_dir / f"adprofiler-v{current}-before-v{target}-{stamp}.dump"
+    partial = path.with_name(path.name + ".partial")
+    env = dict(os.environ)
+    if password:
+        env["PGPASSWORD"] = password
+    env.pop("PGPASSWORD_FILE", None)
+    cmd = [args.pg_dump, "--format=custom", "--no-password", "--file", str(partial),
+           "--host", args.pg_host, "--port", str(args.pg_port), "--username", args.pg_user,
+           "--dbname", args.pg_dbname]
+    log(f"Backing up the database (schema v{current}) before migrating it to v{target}: "
+        f"{path}")
+    old_umask = os.umask(0o077)
+    try:
+        result = subprocess.run(cmd, env=env, stdin=subprocess.DEVNULL, capture_output=True,
+                                text=True)
+    except OSError as exc:
+        raise SetupError(f"cannot run {args.pg_dump} ({exc.strerror or exc}): the backup was "
+                         f"not taken and no migration was applied")
+    finally:
+        os.umask(old_umask)
+    if result.returncode != 0:
+        try:
+            partial.unlink()
+        except OSError:
+            pass
+        detail = (result.stderr or result.stdout or "").strip().splitlines()
+        raise SetupError(f"the backup failed (pg_dump exit {result.returncode}: "
+                         f"{(detail[-1] if detail else 'no output')[:300]}); no migration was "
+                         f"applied")
+    os.replace(partial, path)
+    size = path.stat().st_size
+    log(f"Backup written ({size // 1024 // 1024} MB).")
+    backups = sorted((p for p in backup_dir.iterdir() if BACKUP_NAME.match(p.name)),
+                     key=lambda p: p.name.split("-")[-1])
+    for old in backups[:-args.backup_keep] if args.backup_keep > 0 else []:
+        try:
+            old.unlink()
+            log(f"Removed the older backup {old.name}.")
+        except OSError as exc:
+            log(f"[WARN] Cannot remove the older backup {old.name}: {exc}")
+    return path
+
+
 def apply_migrations(args, password, migrations, versions, fresh=False):
     """Applies the migrations, in order. A migration that needs a full
     rescan is recorded as soon as it has applied, so that a later failure in
@@ -372,6 +439,10 @@ def run(args, password):
     if not owner_is_me:
         log("[WARN] The connecting role does not own the ad_intel schema. Migrations that "
             "replace the partition maintenance functions should run as the owner.")
+    if args.backup_dir is not None:
+        backup_database(args, password, current, target)
+    else:
+        log("[NOTE] No backup is taken before migrating (no --backup-dir).")
     log(f"The database is at schema v{current}; applying {len(pending)} migration(s).")
     apply_migrations(args, password, migrations, pending)
     log(f"The database is now at schema v{target}.")
@@ -392,6 +463,14 @@ def parse_args():
                         metavar="DIR",
                         help="Directory holding schema_init.sql (the v50 baseline) and the "
                              "migrations/ folder. Default: this script's directory.")
+    parser.add_argument("--backup-dir", type=Path, default=None, metavar="DIR",
+                        help="[1.3] Before migrating an existing database, save it with pg_dump "
+                             "to DIR (collector_daemon.py passes <state_dir>/backups). Without it "
+                             "no backup is taken.")
+    parser.add_argument("--backup-keep", type=int, default=3, metavar="N",
+                        help="Backups to keep in --backup-dir (default 3; older ones are removed).")
+    parser.add_argument("--pg-dump", default="pg_dump", metavar="PATH",
+                        help="The pg_dump program (PostgreSQL 17 or later). Default: pg_dump.")
     parser.add_argument("--rescan-file", type=Path, default=None, metavar="FILE",
                         help="[1.2] Create FILE when an applied migration needs one adprofiler.py "
                              "run with --full-rescan (collector_daemon.py passes this).")

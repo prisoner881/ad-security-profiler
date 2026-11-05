@@ -2,7 +2,7 @@
 collector_daemon.py -- runs the AD/Entra collection, evaluation and push
 every day, unattended, and reports its health
 ==============================================================================
-VERSION: 1.1.0
+VERSION: 1.2.0
 
 The long-running process of a client installation. It starts, and from then
 on never exits by itself: it is stopped (SIGTERM, e.g. `docker stop`) or the
@@ -83,6 +83,12 @@ it exits on its own. A wrong AD or Entra setting is not one of them: the
 daemon keeps running, reports it and retries.
 
 CHANGELOG:
+    1.2.0  The version reported to the platform (health report, User-Agent)
+           is the image's build version, COLLECTOR_VERSION (1.2.0, or
+           1.2.0-dev.7 for a development build), when set. schema_setup.py
+           is run with --backup-dir <state_dir>/backups: a pg_dump of the
+           database before any migration of its schema (schema_setup.py
+           1.3). A "v" in front of targetVersion is ignored when comparing.
     1.1.0  The platform's real collector API (platform_client.py 2.0,
            documents 04 and 05): the configuration comes with the health
            check (no separate fetch), the last answer is cached without its
@@ -143,7 +149,27 @@ from pathlib import Path
 import platform_client as pc
 import secret_input
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
+
+
+def strip_v(version):
+    """[1.2.0] "v1.2.0" -> "1.2.0": the image tags carry a "v", the version we
+    report does not, and targetVersion may come in either form."""
+    text = str(version).strip()
+    return text[1:] if text[:1] in ("v", "V") else text
+
+
+def image_version():
+    """[1.2.0] The version this installation reports to the platform: the
+    image's COLLECTOR_VERSION (set at build time from the release tag: 1.2.0,
+    or 1.2.0-dev.7 for a development build; a leading "v" is dropped), else
+    this module's VERSION. The platform compares it with targetVersion, so it
+    must be semver."""
+    text = strip_v(os.environ.get("COLLECTOR_VERSION") or "")
+    if re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?", text):
+        return text
+    return VERSION
+
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -199,6 +225,7 @@ FINGERPRINT_KEY_FILE = "fingerprint.key"
 INSTANCE_FILE = "instance_id"
 CA_CERT_FILE = "ldaps_ca.pem"
 RESCAN_FILE = "full_rescan_needed"
+BACKUP_DIR = "backups"       # [1.2.0] schema_setup.py's pre-migration pg_dumps
 CONFIG_CACHE_FILE = "platform_config.json"   # [1.1.0] the last health response, no secrets
 SCHEDULE_OFFSET_MAX_SECONDS = 1800           # [1.1.0] up to 30 minutes after the set time
 CLOCK_SKEW_WARN_SECONDS = 120
@@ -571,7 +598,7 @@ class Daemon:
                                     "activation_key_file, or FD_ACTIVATION_KEY(_FILE)")
             try:
                 self.platform = pc.FortifyDataPlatform(
-                    lic, key_text, self.instance_id, VERSION, api_url=self.s.api_url,
+                    lic, key_text, self.instance_id, image_version(), api_url=self.s.api_url,
                     ca_bundle=str(self.s.ca_bundle) if self.s.ca_bundle else None,
                     timeout=self.s.request_timeout, log=self.log)
             except pc.ConfigError as exc:
@@ -661,7 +688,8 @@ class Daemon:
         return new
 
     def _script_versions(self):
-        versions = {"collector_daemon": VERSION, "platform_client": pc.VERSION}
+        versions = {"image": image_version(), "collector_daemon": VERSION,
+                    "platform_client": pc.VERSION}
         for step, script in SCRIPTS.items():
             path = self.s.scripts_dir / script
             if not path.exists():
@@ -707,7 +735,7 @@ class Daemon:
                 "generated_at": iso(utcnow()),
                 # [1.1.0] The version the platform records, and the
                 # configuration version this daemon runs (document 04, 5.2).
-                "version": VERSION,
+                "version": image_version(),
                 "configVersion": self.platform_info.get("config_version",
                                                         cfg.version if cfg else None),
                 "instance_id": self.instance_id,
@@ -1031,7 +1059,7 @@ class Daemon:
                 "status": response.status, "target_version": response.target_version,
                 "auto_upgrade": response.auto_upgrade, "image": response.image_name,
                 "update_available": bool(response.target_version
-                                         and response.target_version != VERSION)}
+                                         and strip_v(response.target_version) != image_version())}
         with self.lock:
             old_status = self.platform_info.get("status")
             self.platform_info = info
@@ -1039,7 +1067,7 @@ class Daemon:
             self.log.info(f"Platform: collector status {response.status}")
         if info["update_available"] and response.target_version != self._last_target_logged:
             self.log.info(f"Platform: version {response.target_version} is available (running "
-                          f"{VERSION}; automatic upgrade "
+                          f"{image_version()}; automatic upgrade "
                           f"{'on' if response.auto_upgrade else 'off'}, image "
                           f"{response.image_name})")
         self._last_target_logged = response.target_version
@@ -1313,7 +1341,9 @@ class Daemon:
 
         # 1. Schema
         rescan_file = self.s.state_dir / RESCAN_FILE
-        result = step("schema_setup", self.db_args() + ["--rescan-file", str(rescan_file)],
+        result = step("schema_setup", self.db_args() + ["--rescan-file", str(rescan_file),
+                                                         "--backup-dir",
+                                                         str(self.s.state_dir / BACKUP_DIR)],
                       db_secrets)
         if (end := stopped_or_locked(result)) is not None:
             return end
@@ -1712,7 +1742,8 @@ def parse_args(argv=None):
 def main(argv=None):
     args = parse_args(argv)
     if args.version:
-        print(f"collector_daemon.py {VERSION} (platform_client.py {pc.VERSION})")
+        print(f"collector_daemon.py {VERSION} (platform_client.py {pc.VERSION}; reports "
+              f"version {image_version()})")
         return EXIT_OK
     log = setup_logging()
     try:

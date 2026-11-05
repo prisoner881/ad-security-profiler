@@ -76,6 +76,8 @@ Maintainers check pull requests against these conventions.
     - a fresh install (the baseline plus the whole chain);
     - an upgrade from every earlier released version, with data;
     - the two schemas compared with `pg_dump --schema-only`.
+
+    `tests/test_schema_setup.py` does the first and the third on every CI run (a v50 database upgraded through the repository's chain must equal a fresh install); the upgrade with data from each released version is still done by hand.
 - **Documentation** lives in `docs/`. A script's message or comment names a document by its path (`docs/PERMISSIONS.md`); documents refer to one another by file name alone.
 - **Versioning:**
   - Each script carries its own `VERSION`, and changes are recorded in its docstring or in `changelog.txt`.
@@ -91,9 +93,43 @@ Maintainers check pull requests against these conventions.
   - Secrets are never stored. That includes passwords, LAPS and gMSA passwords, KDS root keys and the AD FS DKM key.
   - Secrets the scripts need are read through `secret_input.py` (option, environment variable, `_FILE`, prompt) and are never logged.
   - `collector_daemon.py` passes secrets to the scripts only through pipes (`<VAR>_FILE=/dev/fd/N`), never as options or environment values. A script's exit status is the daemon's only signal, so a new exit status, or a new secret, needs a matching change in the daemon.
-  - The image version appears in `Dockerfile` (`VERSION`), `docker/compose.yaml` and `docker/install.sh` (the default image tag), and `CONTAINER.md`; raise them together with `collector_daemon.py`'s `VERSION`. A new top-level file the scripts need must also be added to the `COPY` lines in `Dockerfile`.
+  - The image's version is `collector_daemon.py`'s `VERSION`; CI stamps it into the image (see "Releasing"). The default image tag in `docker/compose.yaml` and `docker/install.sh` is `v` plus that version, and `tests/test_versions.py` checks they agree. A new top-level file the scripts need must also be added to the `COPY` lines in `Dockerfile`.
   - New optional reads must not stop a run when they fail.
   - A new AD read that an ordinary domain user cannot do, or a new Graph permission, needs a matching entry in `PERMISSIONS.md` (the client's setup guide) and, for Graph, in SETUP.md's permission table. `PERMISSIONS.md` is written for the client's administrators: it says what to set up and why, never which script, option, file or setting uses it. Keep its section numbers stable; adprofiler.py's messages, SETUP.md and CONTAINER.md refer to them.
+
+## Tests
+
+From the repository root, with the dependencies installed:
+
+```
+python -m unittest discover -s tests -t . -v
+```
+
+The schema tests need a PostgreSQL 17 server and a role that may create databases (`ADPROFILER_TEST_PGHOST`, `_PGPORT`, `_PGUSER`, `_PGPASSWORD`; see `tests/test_schema_setup.py`), and `pg_dump` 17 for the backup and comparison tests. Without them those tests are skipped. CI runs everything. A pull request that changes behaviour adds or updates a test.
+
+## Releasing
+
+The image is `fortifydata/collector-ad` on Docker Hub, for `linux/amd64` and `linux/arm64`. It is built, tested and pushed only by `.github/workflows/collector-image.yml`, in FortifyData's repository, which holds the Docker Hub credentials (secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`). Nobody pushes images by hand. In a repository without those secrets (a personal copy) the workflow still tests and builds, and skips the push with a warning.
+
+| Event | What CI does | Tags pushed |
+|---|---|---|
+| A pull request | runs the tests; builds both architectures and smoke-tests them | none |
+| A push to `development` | the same, then pushes | `vX.Y.Z-dev.N` (N: the CI run number) and `develop` |
+| A tag `vX.Y.Z` | the same, then pushes; the tag must equal `collector_daemon.py`'s `VERSION` | `vX.Y.Z` and `latest` |
+
+X.Y.Z is `collector_daemon.py`'s `VERSION`. The version the image reports to the platform is the tag without the `v` (`1.2.0`, `1.2.0-dev.17`), so the platform's `targetVersion` for a release is `1.2.0`. A development build sorts before its release (`1.2.0-dev.17` < `1.2.0` in semver).
+
+**Smoke tests.** Before anything is pushed, each architecture's image is run (arm64 under QEMU emulation): it must report the version it was built as, `pg_dump` 17 must run, and the native libraries (psycopg2, cryptography, impacket's crypto) must import. The unit tests also run inside the amd64 image, read-only, as the image's user.
+
+**To release X.Y.Z:**
+1. On `development`: set `VERSION = "X.Y.Z"` in `collector_daemon.py`, and the default image tag `vX.Y.Z` in `docker/compose.yaml` and `docker/install.sh`; add the release to `RELEASE_NOTES.md`. CI's development builds are then `vX.Y.Z-dev.N`.
+2. Test a development build (`vX.Y.Z-dev.N`) in FortifyData's environment.
+3. Merge `development` into `release`.
+4. Tag the merge commit on `release` `vX.Y.Z` and push the tag. CI pushes `vX.Y.Z` and `latest`.
+5. Set the new version as the collectors' `targetVersion` on the platform; the Collector Manager takes it from there.
+6. On `development`, raise `VERSION` to the next version (step 1), so later development builds sort after this release.
+
+A tag is never moved or reused. A mistake is fixed by the next patch version.
 
 ## Reporting security issues
 

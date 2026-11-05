@@ -13,3 +13,5 @@ venv
 *.xlsx
 docker/
 Dockerfile
+tests/
+.github/

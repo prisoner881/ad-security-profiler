@@ -6,6 +6,46 @@ Changes on the `development` branch, which collects the work towards
 running the scripts unattended under a supervising process (scheduled runs
 in a container). They are not in `release` yet.
 
+### Image pipeline: name, version, both architectures, backups (2026-11-05)
+
+collector_daemon.py 1.2.0, schema_setup.py 1.3, image 1.2.0. Schema
+unchanged (v50).
+
+- **The image is `fortifydata/collector-ad`** on Docker Hub, for
+  `linux/amd64` and `linux/arm64`:
+  - releases `vX.Y.Z` and `latest`;
+  - development builds `vX.Y.Z-dev.N` and `develop`.
+  `docker/compose.yaml` and `install.sh` default to `v1.2.0`.
+- **The image reports the version it was built as.**
+  - CI passes `COLLECTOR_VERSION` (`1.2.0`, or `1.2.0-dev.17`).
+  - The daemon reports it as the health report's `version`, in the
+    User-Agent and in `--version`. Outside an image it reports its own
+    `VERSION`.
+  - A `v` in `targetVersion` is ignored when comparing.
+- **CI** (`.github/workflows/collector-image.yml`, for FortifyData's
+  repository):
+  - runs the tests;
+  - builds both architectures and smoke-tests each one;
+  - pushes development builds from `development` and releases from a
+    `vX.Y.Z` tag, which must match `VERSION`.
+  The release process is in `MAINTAINERS.md`.
+- **A backup before every schema migration.**
+  - `schema_setup.py --backup-dir` dumps the database with `pg_dump`
+    before migrating it, to `<state_dir>/backups/` (mode `0600`). The
+    newest 3 are kept.
+  - If the backup fails, nothing is migrated.
+  - The image now includes the PostgreSQL 17 client tools.
+  - The restore steps are in `CONTAINER.md`, section 5.
+- **Tests** (`tests/`):
+  - activation keys;
+  - the schedule across daylight-saving changes;
+  - the health-check configuration mapping;
+  - the image version;
+  - every plugin loading;
+  - with a PostgreSQL 17 server, the schema chain: fresh, upgrade with
+    skipped versions, the refusals, the backup and its restore, and an
+    upgraded schema compared with a fresh one.
+
 ### The platform's real collector API (2026-11-05)
 
 collector_daemon.py 1.1.0, platform_client.py 2.0, adaudit.py 1.0.11
