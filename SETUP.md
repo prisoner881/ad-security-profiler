@@ -144,16 +144,25 @@ other scripts (section 7, "Passwords and secrets without a terminal").
   with an empty database already created for this project, plus the
   hostname/IP, port, database name, username, and password to connect
   to it.
-- **A domain controller hostname or IP**, and a service/bind account
-  with read access to Active Directory (a low-privileged domain user
-  account is sufficient -- nothing administrative is required).
+- **A domain controller hostname or IP**, and a service/bind account:
+  an ordinary domain user (nothing administrative), **plus two read
+  delegations a Domain Admin grants once** -- on `CN=Deleted Objects`
+  and on the Password Settings Container. Without them a run still
+  succeeds, but deleted accounts are never recorded as deleted and
+  fine-grained password policies are invisible. `PERMISSIONS.md`
+  (section 2) gives the exact steps, what not to grant, and how to
+  check the account; hand it to the client's AD administrator.
 - **Optional, for Group Policy content (`--sysvol`)**: TCP 445 (SMB)
   from this machine to the same domain controller, in addition to
-  LDAP/LDAPS. No extra account or permission is needed -- the same
-  bind account reads the SYSVOL and NETLOGON shares, which every domain
-  user can read by default. See "Collecting Group Policy content" below.
+  LDAP/LDAPS. The same bind account reads the SYSVOL and NETLOGON
+  shares, which every domain user can read by default; GPOs with
+  security filtering need the account added with Read
+  (`PERMISSIONS.md`, section 2.4). See "Collecting Group Policy content"
+  below.
 - **If Entra ID collection is also wanted**: an App Registration's
-  tenant ID, application (client) ID, and client secret, with the
+  tenant ID, application (client) ID, and client secret (step-by-step
+  setup for the client's Entra administrator: `PERMISSIONS.md`, section
+  3), with the
   Graph API permissions already granted and admin-consented
   (`User.Read.All`, `RoleManagement.Read.Directory`, `Policy.Read.All`,
   `Application.Read.All`, `Directory.Read.All`). **These must be
@@ -247,8 +256,12 @@ python3 adprofiler.py \
 ```
 
 You'll be prompted for the AD bind password and the PostgreSQL
-password if you didn't pass `--password`/`--pg-password`. Drop `--ssl`
-if your domain controller doesn't have LDAPS configured.
+password if you didn't pass `--password`/`--pg-password`. Keep `--ssl`:
+without it the bind password crosses the network unencrypted, and a
+domain controller that requires LDAP signing refuses the connection
+(this collector binds with a password, so LDAPS is its only way in).
+Use plain LDAP only on a lab domain controller that has no LDAPS
+certificate.
 
 With `--ssl` the connection is encrypted, but the domain controller's
 certificate is not checked unless you add `--ca-cert <file.pem>`: a PEM file
@@ -279,9 +292,12 @@ Group Policy Preferences passwords (MS14-025).
   stored: only the fact that one is present, the account it is for, and
   for scripts the pattern name and line number.
 - If an administrator removed "Authenticated Users" read access from a
-  GPO (security filtering), the bind account can't read that GPO's
-  folder; the report lists such GPOs (plugin 9021) and evaluates the
-  rest. Grant the bind account read on them if you want them covered.
+  GPO (security filtering), the bind account usually can't read that
+  GPO at all (neither its AD object nor its folder): it is left out,
+  and the collector's log counts its links as unresolved. Plugin 9021
+  lists only GPOs whose folder is unreadable while their AD object is
+  readable. Grant the bind account Read on them in GPMC (Delegation
+  tab) if you want them covered (`PERMISSIONS.md`, section 2.4).
 - Reading every GPO folder and searching scripts for passwords looks
   like an attacker's reconnaissance, so endpoint or identity monitoring
   tools may raise an alert. Tell the security team before the run, or
@@ -610,8 +626,11 @@ by `docker/install.sh`. See `CONTAINER.md`.
     (not with `--sysvol-kerberos`, which needs the DC's FQDN).
   - `invalidCredentials` with `data 52e`: wrong password; `775`: account
     locked out; `532`: password expired; `533`: account disabled.
-  - Otherwise, try without `--ssl` if LDAPS isn't confirmed to be
-    configured on that DC.
+  - `strongerAuthRequired`: the DC requires LDAP signing; use `--ssl`
+    (LDAPS on 636). The DC needs a server-authentication certificate.
+  - A TLS or connection error with `--ssl`: LDAPS is not set up on that
+    DC (no certificate). Ask for one rather than dropping `--ssl`: plain
+    LDAP sends the password unencrypted (`PERMISSIONS.md`, section 2.7).
 - **`adprofiler.py` reports "Database schema is behind" (or "ahead,"
   or "predates schema version tracking")**: this means the database's
   schema doesn't match what this version of the script expects --

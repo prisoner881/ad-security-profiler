@@ -2,7 +2,7 @@
 """
 adaudit.py -- AD Security & Compliance Plugin Runner
 ======================================================
-VERSION: 1.0.8
+VERSION: 1.0.9
 
 Companion to adprofiler.py. Where adprofiler.py collects AD data,
 adaudit.py analyzes it: discovers every plugin file in plugins/, runs each
@@ -25,6 +25,15 @@ DESIGN:
       as: (status, object_guid, stig_severity, stig_reference,
       tool_severity, tool_reference, fd_severity, summary, detail).
       Zero rows returned = clean pass, nothing to report.
+    - [v1.0.9] --skip-entra: the Entra ID data was not collected for this
+      evaluation (entra_graph_collector.py failed or was not run), so the
+      Entra plugins are NOT ASSESSED and their queries are not run -- as for
+      SYSVOL data not read by the evaluated run (v1.0.1): the Entra data in
+      the database is kept from the last successful collection and would
+      otherwise be evaluated as current. Their open findings stay open.
+      collector_daemon.py passes it when the AD collection succeeded and
+      the Entra one did not. Needs schema v50 (check_scd2_integrity()
+      repaired; nothing a plugin reads changed).
     - [v1.0.8] Push authentication by activation key (the platform's
       document 03). The key the client copies from the FortifyData portal
       -- --activation-key, FD_ACTIVATION_KEY, or the file named by
@@ -343,7 +352,7 @@ import adaudit_push
 import run_lock  # [v1.0.2] one run at a time, see run_lock.py
 import secret_input  # [v1.0.6] secrets from the environment, a file or a prompt
 
-VERSION = "1.0.8"
+VERSION = "1.0.9"
 
 # [test-candidate-branch] Always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
@@ -744,7 +753,7 @@ def connect_postgres():
 # (plugins 2044-2046, 4021, 11001), v48 ad_gpo_sysvol.first_read_run_id
 # (plugin 11021; v47 changed no plugin input), v49
 # entra_change_baseline.previous_run_at (plugin 11027).
-REQUIRED_SCHEMA_VERSION = 49
+REQUIRED_SCHEMA_VERSION = 50
 
 # [v0.9.0] Data sources a client may not have collected: (table/view names a
 # plugin query mentions, probe returning TRUE when the client has the data,
@@ -843,7 +852,14 @@ def _marker_matches(marker, query):
     return bool(marker.search(query)) if hasattr(marker, "search") else marker in query
 
 
-def compute_not_assessed_ids(conn, client_id, run_id, finding_plugins):
+def is_entra_plugin(plugin):
+    """[v1.0.9] Reads Entra ID data: an entra_* table or view, or declares
+    Entra data sources (requires_sources)."""
+    return bool(OPTIONAL_DATA_SOURCES[0][0][0].search(plugin["query"])
+                or plugin.get("requires_sources"))
+
+
+def compute_not_assessed_ids(conn, client_id, run_id, finding_plugins, skip_entra=False):
     """plugin_ids that cannot assess anything for this client because their
     source data was not collected: [v0.8.0] Entra plugins with no Entra data
     at all, [v0.9.0] SYSVOL plugins when SYSVOL was never collected
@@ -855,9 +871,14 @@ def compute_not_assessed_ids(conn, client_id, run_id, finding_plugins):
     Returns (not_assessed_ids, skip_ids): [v1.0.1] skip_ids is the subset
     whose query must not run at all (absent skip_query data, e.g. SYSVOL not
     read by run_id). A plugin with PLUGIN["sysvol_optional"] assesses
-    without SYSVOL and is in neither set because of it."""
+    without SYSVOL and is in neither set because of it. [v1.0.9] With
+    skip_entra (--skip-entra) every Entra plugin is in both sets."""
     not_assessed_ids = set()
     skip_ids = set()
+    if skip_entra:
+        entra_ids = {p["plugin_id"] for p in finding_plugins if is_entra_plugin(p)}
+        not_assessed_ids |= entra_ids
+        skip_ids |= entra_ids
     with conn.cursor() as cur:
         for markers, probe, skip_query in OPTIONAL_DATA_SOURCES:
             cur.execute(probe, {"c": client_id, "r": run_id})
@@ -1916,6 +1937,11 @@ def main():
     parser.add_argument("--no-excel", action="store_true",
                          help="[v1.0.7] Do not write the Excel workbook (the console "
                               "report, the findings history and any push are unchanged).")
+    parser.add_argument("--skip-entra", action="store_true",
+                         help="[v1.0.9] The Entra ID data was not collected for this evaluation "
+                              "(the Entra collection failed or was not run): the Entra checks "
+                              "are NOT ASSESSED and not run against older Entra data; their "
+                              "open findings stay open.")
     parser.add_argument("--version", action="store_true")
     parser.add_argument("--pg-host", default=None,
                          help="PostgreSQL server hostname or IP. Required unless --version is given.")
@@ -2120,11 +2146,19 @@ def main():
         # [v0.9.2] Worked out before the plugins run (it depends only on which
         # data was collected), so a plugin that cannot assess anything this run
         # leaves its open findings open instead of closing them as remediated.
-        not_assessed_ids, skip_ids = compute_not_assessed_ids(conn, client_id, run_id, finding_plugins)
-        if skip_ids:
+        not_assessed_ids, skip_ids = compute_not_assessed_ids(conn, client_id, run_id,
+                                                              finding_plugins,
+                                                              skip_entra=args.skip_entra)
+        entra_skipped = ({p["plugin_id"] for p in finding_plugins if is_entra_plugin(p)}
+                         if args.skip_entra else set())
+        if entra_skipped:
+            log(f"--skip-entra: the Entra ID data was not collected for this evaluation: "
+                f"{len(entra_skipped)} Entra check(s) are NOT ASSESSED and were not run against "
+                f"older Entra data.")
+        if skip_ids - entra_skipped:
             log(f"SYSVOL (Group Policy content) was not read by this collection run "
-                f"(adprofiler.py --sysvol): {len(skip_ids)} Group Policy check(s) are NOT ASSESSED "
-                f"and were not run against older Group Policy data.")
+                f"(adprofiler.py --sysvol): {len(skip_ids - entra_skipped)} Group Policy check(s) "
+                f"are NOT ASSESSED and were not run against older Group Policy data.")
         not_assessed_kept = 0
         plugin_errors = {}
 

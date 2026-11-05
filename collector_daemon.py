@@ -2,7 +2,7 @@
 collector_daemon.py -- runs the AD/Entra collection, evaluation and push
 every day, unattended, and reports its health
 ==============================================================================
-VERSION: 1.0.1
+VERSION: 1.0.2
 
 The long-running process of a client installation. It starts, and from then
 on never exits by itself: it is stopped (SIGTERM, e.g. `docker stop`) or the
@@ -34,10 +34,14 @@ What it does, in a loop:
            entra_graph_collector.py Entra collection (when configured)
            adaudit.py [--push]      evaluation, then push of every unpushed
                                     run (when an activation key is set)
-       A later step runs only after the earlier ones exit 0. When a
-       collection step fails, the evaluation is skipped (it would assess
-       stale or partial data) and adaudit.py --push-only still delivers any
-       earlier run that is waiting. Exit 75 (another run holds the run lock)
+       When schema_setup.py or adprofiler.py fails, the evaluation is
+       skipped (it would assess stale or partial data) and adaudit.py
+       --push-only still delivers any earlier run that is waiting. When
+       only the Entra collection fails (or Entra is not configured), the AD
+       data is evaluated and pushed, with the Entra checks NOT ASSESSED
+       (adaudit.py --skip-entra) rather than evaluated against older Entra
+       data. After a collection the database's integrity check runs
+       (duplicate current rows: a collector bug). Exit 75 (another run holds the run lock)
        postpones the whole run by 5 minutes. A push that fails (exit 5) is
        retried with --push-only every hour.
     5. Health: every 5 minutes a report (state, lease, last run and each
@@ -74,6 +78,14 @@ it exits on its own. A wrong AD or Entra setting is not one of them: the
 daemon keeps running, reports it and retries.
 
 CHANGELOG:
+    1.0.2  A failed Entra collection no longer blocks the evaluation and
+           push of a successful AD collection: adaudit.py (1.0.9) runs with
+           --skip-entra, so the Entra checks are NOT ASSESSED (their open
+           findings kept) instead of evaluated against the Entra data of the
+           last successful collection; the run ends "warning". --skip-entra
+           is also passed when Entra is not configured. After a collection,
+           check_scd2_integrity() (schema v50) is run; a duplicate current
+           row is logged and reported in the health report ("integrity").
     1.0.1  --check-config no longer takes the one-process lock and logs only
            to standard error, so a configuration can be checked while the
            daemon runs (docker compose run --rm collector --check-config).
@@ -107,7 +119,7 @@ from pathlib import Path
 import platform_client as pc
 import secret_input
 
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -651,6 +663,7 @@ class Daemon:
                          "retry_due": self.persist.get("push_retry_due"),
                          "backlog": self.db_snapshot.get("push_backlog")},
                 "database": dict(self.db_snapshot),
+                "integrity": self.persist.get("integrity"),
                 "disk_free_bytes": self._disk_free(),
                 "health_interval_seconds": self.s.health_interval,
             }
@@ -724,6 +737,41 @@ class Daemon:
                 conn.close()
         with self.lock:
             self.db_snapshot = snap
+
+    def check_integrity(self):
+        """[1.0.2] After a collection: ad_intel.check_scd2_integrity() (schema
+        v50) -- no object or edge may have more than one current row. A
+        duplicate is a collector bug: it is logged and reported, and the run
+        is not failed for it (the data is still usable)."""
+        result = {"checked_at": iso(utcnow())}
+        try:
+            conn = self.db_connect()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT max(version_number) FROM "
+                                "ad_intel.schema_migration_history;")
+                    if (cur.fetchone()[0] or 0) < 50:
+                        return
+                    cur.execute("SELECT source_table, count(*), min(natural_key) FROM "
+                                "ad_intel.check_scd2_integrity() GROUP BY 1 ORDER BY 1;")
+                    rows = cur.fetchall()
+            finally:
+                conn.close()
+        except Exception as exc:
+            result["error"] = (str(exc).strip().splitlines() or [exc.__class__.__name__])[0][:300]
+            self.log.warning(f"Integrity check could not run: {result['error']}")
+        else:
+            result["duplicates"] = {table: count for table, count, _example in rows}
+            if rows:
+                self.log.warning(
+                    "Integrity check: keys with more than one current row (a collector bug; "
+                    "please report it): " + "; ".join(
+                        f"{table}: {count} (e.g. {example})" for table, count, example in rows))
+            else:
+                self.log.info("Integrity check: no duplicate current rows")
+        with self.lock:
+            self.persist["integrity"] = result
+        self.save_persist()
 
     def push_backlog(self):
         """Evaluation runs not yet accepted by the API, or None if unknown."""
@@ -1053,6 +1101,8 @@ class Daemon:
         level = logging.INFO if outcome == OK else logging.WARNING
         self.log.log(level, f"=== Run {outcome}" + (f": {note}" if note else "")
                      + f" ({int((finished - started).total_seconds())} s)")
+        if any(s.step == "adprofiler" and s.rc == RC_OK for s in steps):
+            self.check_integrity()
         self.prune_old_files()
         self.refresh_db_snapshot()
         self.write_status()
@@ -1090,14 +1140,18 @@ class Daemon:
         if result.rc != RC_OK:
             collection_failed = f"adprofiler failed: {result.summary}"
 
-        # 3. Entra
+        # 3. Entra. [1.0.2] A failure no longer blocks the evaluation of the
+        # AD data: adaudit.py --skip-entra then shows the Entra checks as NOT
+        # ASSESSED instead of evaluating the Entra data kept from the last
+        # successful collection as current.
+        entra_problem = None
         if cfg.entra and not collection_failed:
             target, problem = self.entra_client_args(cfg)
             if problem:
                 now = utcnow()
                 steps.append(StepResult("entra", None, now, now, problem))
                 self.log.error(f"[entra] not run: {problem}")
-                collection_failed = f"entra not run: {problem}"
+                entra_problem = f"Entra collection not run: {problem}"
             else:
                 args = ["--tenant-id", cfg.entra.tenant_id, "--app-id", cfg.entra.app_id] + target
                 if cfg.entra.include_pta_agents:
@@ -1107,7 +1161,7 @@ class Daemon:
                 if (end := stopped_or_locked(result)) is not None:
                     return end
                 if result.rc != RC_OK:
-                    collection_failed = f"entra_graph_collector failed: {result.summary}"
+                    entra_problem = f"Entra collection failed: {result.summary}"
 
         # 4. Evaluation and push
         if collection_failed:
@@ -1125,6 +1179,14 @@ class Daemon:
         args = ["--report-dir", str(self.s.report_dir)]
         if not self.s.excel:
             args.append("--no-excel")
+        if entra_problem or not cfg.entra:
+            # Not collected in this run (failed, or not configured): any
+            # Entra data in the database is older and must not be evaluated
+            # as current.
+            args.append("--skip-entra")
+            if entra_problem:
+                self.log.warning(f"{entra_problem}; evaluating the AD data, with the Entra "
+                                 f"checks NOT ASSESSED")
         secrets = dict(db_secrets)
         if self.push_enabled:
             args += ["--push"] + self.push_args()
@@ -1144,14 +1206,17 @@ class Daemon:
                     self._schedule_push_retry(
                         f"{backlog} evaluation run(s) still waiting to be pushed"
                         if backlog else "the push may not have completed")
+        entra_note = f"{entra_problem}; Entra checks not assessed" if entra_problem else ""
         if result.rc == RC_OK:
-            return OK, ""
+            return (WARNING, entra_note) if entra_problem else (OK, "")
         if result.rc == RC_ADAUDIT_INCOMPLETE:
-            return WARNING, "adaudit: the evaluation is incomplete (some plugins failed)"
+            return WARNING, "; ".join(filter(None, [
+                "adaudit: the evaluation is incomplete (some plugins failed)", entra_note]))
         if result.rc == RC_ADAUDIT_PUSH_FAILED:
             self._schedule_push_retry()
-            return WARNING, f"evaluated, but the push failed: {result.summary}"
-        return FAILED, f"adaudit failed: {result.summary}"
+            return WARNING, "; ".join(filter(None, [
+                f"evaluated, but the push failed: {result.summary}", entra_note]))
+        return FAILED, "; ".join(filter(None, [f"adaudit failed: {result.summary}", entra_note]))
 
     def _push_step(self, steps, label):
         result = self.run_step(label, ["--push-only"] + self.push_args() + self.db_args(),

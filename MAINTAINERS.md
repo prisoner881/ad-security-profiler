@@ -32,7 +32,7 @@ Each area lists the files it covers. Any change to an area needs approval from o
 | Database schema | `schema_init.sql`, `schema_migration_v*.sql`, `schema_setup.py` | @prisoner881 |
 | Collector daemon | `collector_daemon.py`, `platform_client.py`, `collector_daemon.example.toml`, `DAEMON.md` | @prisoner881 |
 | Container packaging | `Dockerfile`, `.dockerignore`, `docker/`, `CONTAINER.md` | @prisoner881 |
-| Documentation | `SETUP.md`, `RELEASE_NOTES.md`, `MAINTAINERS.md`, `DAEMON.md`, `CONTAINER.md` | @prisoner881 |
+| Documentation | `SETUP.md`, `RELEASE_NOTES.md`, `MAINTAINERS.md`, `DAEMON.md`, `CONTAINER.md`, `PERMISSIONS.md` | @prisoner881 |
 
 ## Maintainer responsibilities
 
@@ -84,6 +84,7 @@ Maintainers check pull requests against these conventions.
   - `collector_daemon.py` passes secrets to the scripts only through pipes (`<VAR>_FILE=/dev/fd/N`), never as options or environment values. A script's exit status is the daemon's only signal, so a new exit status, or a new secret, needs a matching change in the daemon.
   - The image version appears in `Dockerfile` (`VERSION`), `docker/compose.yaml` and `docker/install.sh` (the default image tag), and `CONTAINER.md`; raise them together with `collector_daemon.py`'s `VERSION`. A new top-level file the scripts need must also be added to the `COPY` lines in `Dockerfile`.
   - New optional reads must not stop a run when they fail.
+  - A new AD read that an ordinary domain user cannot do, or a new Graph permission, needs a matching entry in `PERMISSIONS.md` (the client's setup guide) and, for Graph, in SETUP.md's permission table.
 
 ## Reporting security issues
 

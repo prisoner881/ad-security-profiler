@@ -1,12 +1,18 @@
 -- ============================================================================
 -- adprofiler / adaudit / entra_graph_collector -- Consolidated Schema Init
 --
--- Replaces schema.sql + schema_migration_v2.sql through v28.sql (27
--- sequential migrations, several with one-time-only logic that has no
--- meaning for a database that has never existed before) with a single
--- file representing final schema state as of migration v28. Intended
--- for the Docker deployment: run once against a genuinely empty
--- database, not layered onto an already-migrated one.
+-- The complete schema, current through schema_migration_v50.sql, for a
+-- brand-new, empty database (PostgreSQL 17 or later). An existing database
+-- is upgraded with the schema_migration_vNN.sql files instead;
+-- schema_setup.py picks the right one of the two. A fresh install and an
+-- upgrade produce the same schema. The fresh-install row in
+-- schema_migration_history (near the end) records the version.
+--
+-- HISTORY OF THIS FILE
+--   It was first built at v28, replacing schema.sql and migrations v2-v28,
+--   as follows. Every later migration (v29-v50) has been folded in by hand:
+--   changed objects in place (marked [vNN]) and new ones in a "vNN
+--   ADDITIONS" section near the end.
 --
 -- HOW THIS WAS BUILT
 --   1. A fresh database was built from schema.sql + all 27 migrations,
@@ -36,24 +42,17 @@
 --      presence explicitly rather than assuming pg_dump captured
 --      everything needed.
 --
--- WHAT'S BEEN VERIFIED, AND WHAT HASN'T
---   Every table, index, constraint, type, and every function OTHER
---   than the two named above has been executed end-to-end against a
---   fresh PostgreSQL 16 database: the full mock LDAP collector harness
---   (test_harness.py) ran its complete write path successfully, and
---   the full 143-plugin adaudit.py regression ran clean against the
---   result -- both against a database built from ONLY this file, not
---   incrementally migrated.
+-- WHAT WAS VERIFIED AT v28 (kept for the record)
+--   Everything except upsert_directory_object() and set_current_version()
+--   was run end-to-end on a fresh PostgreSQL 16 database (the mock LDAP
+--   harness and the then 143-plugin adaudit.py regression). Those two use
+--   PostgreSQL 17's MERGE ... RETURNING, which PostgreSQL 16 cannot run;
+--   PostgreSQL 17 has been required since (schema_setup.py checks it).
 --
---   upsert_directory_object() and set_current_version() could NOT be
---   executed in this sandbox -- PG17 isn't available here, and PG16
---   genuinely cannot run MERGE...RETURNING (confirmed directly: it
---   fails with "syntax error at or near RETURNING" at CALL time, not
---   CREATE time, since CREATE FUNCTION doesn't validate a LANGUAGE sql
---   body's contents). Both were copied character-for-character from
---   the real schema.sql, but their actual execution against real
---   PG17 -- via an actual adprofiler.py run against a real DC -- is
---   the one thing only your Docker environment can confirm.
+-- VERIFIED SINCE
+--   On PostgreSQL 17, a database created from this file and one upgraded
+--   with the migration files are compared schema-for-schema (pg_dump
+--   --schema-only) before a schema version is released.
 -- ============================================================================
 
 \restrict OOcQP0WMkT0AsbNush24UiP3dWhgPaYpJef3WNchs34wML8TNbcq16wxfqY5N5C
@@ -192,37 +191,157 @@ COMMENT ON DOMAIN ad_intel.usn_bigint IS 'Non-negative AD update sequence number
 -- Name: check_scd2_integrity(); Type: FUNCTION; Schema: ad_intel; Owner: -
 --
 
-CREATE FUNCTION ad_intel.check_scd2_integrity() RETURNS TABLE(source_table text, natural_key text, open_row_count bigint)
+-- [v50] Schema-qualified, fixed search_path, every history table (see
+-- schema_migration_v50.sql).
+CREATE FUNCTION ad_intel.check_scd2_integrity()
+    RETURNS TABLE(source_table text, natural_key text, open_row_count bigint)
     LANGUAGE sql
+    STABLE
+    SET search_path = ad_intel, pg_temp
     AS $$
-    SELECT 'directory_object_version', object_guid::TEXT, count(*)
-    FROM directory_object_version WHERE valid_to IS NULL
-    GROUP BY object_guid HAVING count(*) > 1
+    SELECT 'directory_object_version', client_id::text || ':' || object_guid::text, count(*)
+    FROM ad_intel.directory_object_version WHERE valid_to IS NULL
+    GROUP BY client_id, object_guid HAVING count(*) > 1
     UNION ALL
-    SELECT 'ad_user', object_guid::TEXT, count(*)
-    FROM ad_user WHERE valid_to IS NULL
-    GROUP BY object_guid HAVING count(*) > 1
+    SELECT 'ad_adfs_dkm_object', client_id::text || ':' || object_guid::text, count(*)
+    FROM ad_intel.ad_adfs_dkm_object WHERE valid_to IS NULL
+    GROUP BY client_id, object_guid HAVING count(*) > 1
     UNION ALL
-    SELECT 'ad_group', object_guid::TEXT, count(*)
-    FROM ad_group WHERE valid_to IS NULL
-    GROUP BY object_guid HAVING count(*) > 1
+    SELECT 'ad_cert_oid', client_id::text || ':' || object_guid::text, count(*)
+    FROM ad_intel.ad_cert_oid WHERE valid_to IS NULL
+    GROUP BY client_id, object_guid HAVING count(*) > 1
     UNION ALL
-    SELECT 'ad_computer', object_guid::TEXT, count(*)
-    FROM ad_computer WHERE valid_to IS NULL
-    GROUP BY object_guid HAVING count(*) > 1
+    SELECT 'ad_cert_template', client_id::text || ':' || object_guid::text, count(*)
+    FROM ad_intel.ad_cert_template WHERE valid_to IS NULL
+    GROUP BY client_id, object_guid HAVING count(*) > 1
     UNION ALL
-    SELECT 'group_member_edge', group_guid::TEXT || '/' || member_guid::TEXT, count(*)
-    FROM group_member_edge WHERE valid_to IS NULL
-    GROUP BY group_guid, member_guid HAVING count(*) > 1
+    SELECT 'ad_computer', client_id::text || ':' || object_guid::text, count(*)
+    FROM ad_intel.ad_computer WHERE valid_to IS NULL
+    GROUP BY client_id, object_guid HAVING count(*) > 1
     UNION ALL
-    SELECT 'acl_edge', object_guid::TEXT || '/' || trustee_sid || '/' || ace_type::TEXT
-                        || '/' || access_mask::TEXT, count(*)
-    FROM acl_edge WHERE valid_to IS NULL
-    GROUP BY object_guid, trustee_sid, ace_type, access_mask HAVING count(*) > 1
+    SELECT 'ad_display_specifier', client_id::text || ':' || object_guid::text, count(*)
+    FROM ad_intel.ad_display_specifier WHERE valid_to IS NULL
+    GROUP BY client_id, object_guid HAVING count(*) > 1
     UNION ALL
-    SELECT 'spn_edge', object_guid::TEXT || '/' || spn, count(*)
-    FROM spn_edge WHERE valid_to IS NULL
-    GROUP BY object_guid, spn HAVING count(*) > 1;
+    SELECT 'ad_dns_zone', client_id::text || ':' || object_guid::text, count(*)
+    FROM ad_intel.ad_dns_zone WHERE valid_to IS NULL
+    GROUP BY client_id, object_guid HAVING count(*) > 1
+    UNION ALL
+    SELECT 'ad_domain', client_id::text || ':' || object_guid::text, count(*)
+    FROM ad_intel.ad_domain WHERE valid_to IS NULL
+    GROUP BY client_id, object_guid HAVING count(*) > 1
+    UNION ALL
+    SELECT 'ad_enrollment_service', client_id::text || ':' || object_guid::text, count(*)
+    FROM ad_intel.ad_enrollment_service WHERE valid_to IS NULL
+    GROUP BY client_id, object_guid HAVING count(*) > 1
+    UNION ALL
+    SELECT 'ad_fgpp', client_id::text || ':' || object_guid::text, count(*)
+    FROM ad_intel.ad_fgpp WHERE valid_to IS NULL
+    GROUP BY client_id, object_guid HAVING count(*) > 1
+    UNION ALL
+    SELECT 'ad_foreign_security_principal', client_id::text || ':' || object_guid::text, count(*)
+    FROM ad_intel.ad_foreign_security_principal WHERE valid_to IS NULL
+    GROUP BY client_id, object_guid HAVING count(*) > 1
+    UNION ALL
+    SELECT 'ad_gpo', client_id::text || ':' || object_guid::text, count(*)
+    FROM ad_intel.ad_gpo WHERE valid_to IS NULL
+    GROUP BY client_id, object_guid HAVING count(*) > 1
+    UNION ALL
+    SELECT 'ad_group', client_id::text || ':' || object_guid::text, count(*)
+    FROM ad_intel.ad_group WHERE valid_to IS NULL
+    GROUP BY client_id, object_guid HAVING count(*) > 1
+    UNION ALL
+    SELECT 'ad_kds_root_key', client_id::text || ':' || object_guid::text, count(*)
+    FROM ad_intel.ad_kds_root_key WHERE valid_to IS NULL
+    GROUP BY client_id, object_guid HAVING count(*) > 1
+    UNION ALL
+    SELECT 'ad_ntauth_store', client_id::text || ':' || object_guid::text, count(*)
+    FROM ad_intel.ad_ntauth_store WHERE valid_to IS NULL
+    GROUP BY client_id, object_guid HAVING count(*) > 1
+    UNION ALL
+    SELECT 'ad_ou', client_id::text || ':' || object_guid::text, count(*)
+    FROM ad_intel.ad_ou WHERE valid_to IS NULL
+    GROUP BY client_id, object_guid HAVING count(*) > 1
+    UNION ALL
+    SELECT 'ad_pki_certificate_store', client_id::text || ':' || object_guid::text, count(*)
+    FROM ad_intel.ad_pki_certificate_store WHERE valid_to IS NULL
+    GROUP BY client_id, object_guid HAVING count(*) > 1
+    UNION ALL
+    SELECT 'ad_schema_object', client_id::text || ':' || object_guid::text, count(*)
+    FROM ad_intel.ad_schema_object WHERE valid_to IS NULL
+    GROUP BY client_id, object_guid HAVING count(*) > 1
+    UNION ALL
+    SELECT 'ad_site', client_id::text || ':' || object_guid::text, count(*)
+    FROM ad_intel.ad_site WHERE valid_to IS NULL
+    GROUP BY client_id, object_guid HAVING count(*) > 1
+    UNION ALL
+    SELECT 'ad_subnet', client_id::text || ':' || object_guid::text, count(*)
+    FROM ad_intel.ad_subnet WHERE valid_to IS NULL
+    GROUP BY client_id, object_guid HAVING count(*) > 1
+    UNION ALL
+    SELECT 'ad_trust', client_id::text || ':' || object_guid::text, count(*)
+    FROM ad_intel.ad_trust WHERE valid_to IS NULL
+    GROUP BY client_id, object_guid HAVING count(*) > 1
+    UNION ALL
+    SELECT 'ad_user', client_id::text || ':' || object_guid::text, count(*)
+    FROM ad_intel.ad_user WHERE valid_to IS NULL
+    GROUP BY client_id, object_guid HAVING count(*) > 1
+    UNION ALL
+    SELECT 'acl_edge', client_id::text || ':' || concat_ws('/', coalesce(object_guid::text, '-'), coalesce(trustee_sid::text, '-'), coalesce(ace_type::text, '-'), coalesce(access_mask::text, '-'), coalesce(object_type_guid::text, '-')), count(*)
+    FROM ad_intel.acl_edge WHERE valid_to IS NULL
+    GROUP BY client_id, object_guid, trustee_sid, ace_type, access_mask, object_type_guid HAVING count(*) > 1
+    UNION ALL
+    SELECT 'cert_template_enabled_edge', client_id::text || ':' || concat_ws('/', coalesce(ca_guid::text, '-'), coalesce(template_guid::text, '-')), count(*)
+    FROM ad_intel.cert_template_enabled_edge WHERE valid_to IS NULL
+    GROUP BY client_id, ca_guid, template_guid HAVING count(*) > 1
+    UNION ALL
+    SELECT 'delegation_edge', client_id::text || ':' || concat_ws('/', coalesce(source_guid::text, '-'), coalesce(target_guid::text, '-'), coalesce(delegation_type::text, '-')), count(*)
+    FROM ad_intel.delegation_edge WHERE valid_to IS NULL
+    GROUP BY client_id, source_guid, target_guid, delegation_type HAVING count(*) > 1
+    UNION ALL
+    SELECT 'fgpp_applies_to_edge', client_id::text || ':' || concat_ws('/', coalesce(pso_guid::text, '-'), coalesce(target_guid::text, '-')), count(*)
+    FROM ad_intel.fgpp_applies_to_edge WHERE valid_to IS NULL
+    GROUP BY client_id, pso_guid, target_guid HAVING count(*) > 1
+    UNION ALL
+    SELECT 'gmsa_password_reader_edge', client_id::text || ':' || concat_ws('/', coalesce(gmsa_guid::text, '-'), coalesce(trustee_sid::text, '-')), count(*)
+    FROM ad_intel.gmsa_password_reader_edge WHERE valid_to IS NULL
+    GROUP BY client_id, gmsa_guid, trustee_sid HAVING count(*) > 1
+    UNION ALL
+    SELECT 'gpo_link_edge', client_id::text || ':' || concat_ws('/', coalesce(container_guid::text, '-'), coalesce(gpo_guid::text, '-')), count(*)
+    FROM ad_intel.gpo_link_edge WHERE valid_to IS NULL
+    GROUP BY client_id, container_guid, gpo_guid HAVING count(*) > 1
+    UNION ALL
+    SELECT 'gpo_preference_item_edge', client_id::text || ':' || concat_ws('/', coalesce(gpo_guid::text, '-'), coalesce(scope::text, '-'), coalesce(preference_type::text, '-'), coalesce(item_uid::text, '-')), count(*)
+    FROM ad_intel.gpo_preference_item_edge WHERE valid_to IS NULL
+    GROUP BY client_id, gpo_guid, scope, preference_type, item_uid HAVING count(*) > 1
+    UNION ALL
+    SELECT 'gpo_setting_edge', client_id::text || ':' || concat_ws('/', coalesce(gpo_guid::text, '-'), coalesce(scope::text, '-'), coalesce(source::text, '-'), coalesce(section::text, '-'), coalesce(setting_key::text, '-')), count(*)
+    FROM ad_intel.gpo_setting_edge WHERE valid_to IS NULL
+    GROUP BY client_id, gpo_guid, scope, source, section, setting_key HAVING count(*) > 1
+    UNION ALL
+    SELECT 'group_member_edge', client_id::text || ':' || concat_ws('/', coalesce(group_guid::text, '-'), coalesce(member_guid::text, '-')), count(*)
+    FROM ad_intel.group_member_edge WHERE valid_to IS NULL
+    GROUP BY client_id, group_guid, member_guid HAVING count(*) > 1
+    UNION ALL
+    SELECT 'rbcd_unresolved_trustee_edge', client_id::text || ':' || concat_ws('/', coalesce(trustee_sid::text, '-'), coalesce(target_guid::text, '-')), count(*)
+    FROM ad_intel.rbcd_unresolved_trustee_edge WHERE valid_to IS NULL
+    GROUP BY client_id, trustee_sid, target_guid HAVING count(*) > 1
+    UNION ALL
+    SELECT 'rodc_prp_edge', client_id::text || ':' || concat_ws('/', coalesce(rodc_guid::text, '-'), coalesce(principal_guid::text, '-'), coalesce(relation::text, '-')), count(*)
+    FROM ad_intel.rodc_prp_edge WHERE valid_to IS NULL
+    GROUP BY client_id, rodc_guid, principal_guid, relation HAVING count(*) > 1
+    UNION ALL
+    SELECT 'spn_edge', client_id::text || ':' || concat_ws('/', coalesce(object_guid::text, '-'), coalesce(spn::text, '-')), count(*)
+    FROM ad_intel.spn_edge WHERE valid_to IS NULL
+    GROUP BY client_id, object_guid, spn HAVING count(*) > 1
+    UNION ALL
+    SELECT 'sysvol_script_edge', client_id::text || ':' || concat_ws('/', coalesce(share::text, '-'), coalesce(file_path::text, '-')), count(*)
+    FROM ad_intel.sysvol_script_edge WHERE valid_to IS NULL
+    GROUP BY client_id, share, file_path HAVING count(*) > 1
+    UNION ALL
+    SELECT 'unresolved_delegation_target_edge', client_id::text || ':' || concat_ws('/', coalesce(source_guid::text, '-'), coalesce(target_spn::text, '-')), count(*)
+    FROM ad_intel.unresolved_delegation_target_edge WHERE valid_to IS NULL
+    GROUP BY client_id, source_guid, target_spn HAVING count(*) > 1;
 $$;
 
 
@@ -230,7 +349,14 @@ $$;
 -- Name: FUNCTION check_scd2_integrity(); Type: COMMENT; Schema: ad_intel; Owner: -
 --
 
-COMMENT ON FUNCTION ad_intel.check_scd2_integrity() IS 'Returns any natural key with more than one currently-open SCD2 row. Should always return zero rows; a non-empty result indicates a loader bug (failed to close out a prior row before opening a new one).';
+COMMENT ON FUNCTION ad_intel.check_scd2_integrity() IS
+    'Returns every natural key with more than one currently open row (valid_to IS NULL) in a '
+    'table adprofiler.py keeps history in: directory_object_version and the typed object tables '
+    '(one open row per client and object_guid) and the edge tables (one open row per client and '
+    'the key adprofiler.py diffs that table on). Should always return no rows; a row means a loader '
+    'bug (a prior row not closed before a new one was opened). natural_key is <client_id>:<key>, '
+    'a NULL key column shown as -. Callable from any search_path (schema v50); collector_daemon.py '
+    'runs it after every collection run.';
 
 
 --
@@ -5740,6 +5866,13 @@ COMMENT ON COLUMN ad_intel.entra_change_baseline.previous_run_at IS
 
 
 -- ============================================================================
+-- v50 ADDITIONS -- see schema_migration_v50.sql. (check_scd2_integrity() is
+-- schema-qualified, sets its own search_path and covers every history table;
+-- applied in place above.)
+-- ============================================================================
+
+
+-- ============================================================================
 -- v31 ADDITIONS -- schema version tracking.
 -- ============================================================================
 
@@ -5753,7 +5886,7 @@ CREATE TABLE schema_migration_history (
 -- pretense of having stepped through intermediate versions that were
 -- never actually separately applied to this database.
 INSERT INTO schema_migration_history (version_number, description) VALUES
-    (49, 'Fresh install via schema_init.sql, consolidated through v49');
+    (50, 'Fresh install via schema_init.sql, consolidated through v50');
 
 -- ============================================================================
 -- PARTITIONED TABLE REGISTRY + INITIAL PARTITION CREATION

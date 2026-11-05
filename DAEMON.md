@@ -51,19 +51,32 @@ SIGTERM/SIGINT → stop the running step → release the lease → exit 0
 |---|---|---|
 | 1 | `schema_setup.py` | `0` next step; `1` run failed, nothing else runs (database problem) |
 | 2 | `adprofiler.py --dc-host … --username … [--ssl] [--port] [--ca-cert] [--sysvol …]` | `0` next step; `1` collection failed (see below) |
-| 3 | `entra_graph_collector.py --tenant-id … --app-id … --domain-fqdn …` or `--client-id …`; only when Entra is configured | `0` next step; `1` collection failed |
-| 4 | `adaudit.py --report-dir … --no-excel [--push]` | `0` ok; `3` ok with a warning (the evaluation is incomplete; adaudit.py reports this before a failed push, so the daemon checks for runs still waiting and schedules the push retry); `5` evaluated but the push failed, so `--push-only` is retried every hour; `1` run failed |
+| 3 | `entra_graph_collector.py --tenant-id … --app-id … --domain-fqdn …` or `--client-id …`; only when Entra is configured | `0` next step; `1` the AD data is still evaluated, with the Entra checks not assessed (see below) |
+| 4 | `adaudit.py --report-dir … --no-excel [--push] [--skip-entra]` | `0` ok; `3` ok with a warning (the evaluation is incomplete; adaudit.py reports this before a failed push, so the daemon checks for runs still waiting and schedules the push retry); `5` evaluated but the push failed, so `--push-only` is retried every hour; `1` run failed |
 | any | | `75` (the run lock is held, e.g. by someone running a script by hand): the whole run is postponed by `retry_interval` (5 min). `130` after a stop request: the run stops. `130` without one (someone else signalled the step): the run failed. |
 
-**When a collection fails, the evaluation is skipped.** Evaluating stale or
-partial data would produce misleading findings. Instead,
-`adaudit.py --push-only` delivers any earlier run that is still waiting.
-This is skipped when the database says nothing is waiting.
+**When the AD collection fails, the evaluation is skipped.** This also
+applies when `schema_setup.py` fails. Evaluating stale or partial data
+would produce misleading findings. Instead, `adaudit.py --push-only`
+delivers any earlier run that is still waiting. This is skipped when the
+database says nothing is waiting.
 
-This follows the scripts' contract: a later step runs only after the
-earlier ones exit `0`. It also applies to an Entra failure, which blocks
-the evaluation of AD data that did succeed. This is a deliberate choice;
-revisit it if Entra failures turn out to be frequent.
+**When only the Entra collection fails, the AD data is still evaluated and
+pushed.** It runs with `adaudit.py --skip-entra`:
+- the Entra checks are **NOT ASSESSED** and their queries are not run;
+- their open findings stay open, neither closed nor confirmed.
+
+Otherwise the Entra data in the database, kept from the last successful
+collection, would be evaluated as if it were current. The run ends
+`warning`, with the Entra error in its note. `--skip-entra` is also passed
+when Entra is not configured, so Entra data left from an earlier
+configuration is never evaluated as current.
+
+**Integrity check.** After every successful AD collection the daemon runs
+the database's `check_scd2_integrity()` (schema v50). It finds any object
+or edge with more than one current row, which would be a collector bug. A
+finding is logged as a warning and reported in the health report
+(`integrity`); the run is not failed for it.
 
 **Entra target.** Without `ad.domain_fqdn`, the Entra step uses the
 `client_id` of the only domain in the database. With no domain or with
@@ -257,6 +270,8 @@ report to the platform. The report contains:
 - **push:** on or off, number of evaluation runs waiting, next retry;
 - **database:** reachable, schema version, size, partitions missing for
   the current month, Entra sources that could not be read;
+- **integrity:** the result of the last integrity check (tables with
+  duplicate current rows, or none);
 - **free disk space** for the state and log directories.
 
 `collector_daemon.py --config FILE --healthcheck` exits `0` while
@@ -337,7 +352,12 @@ a mock of the platform (the provisional endpoints plus the ingest API).
 - a secret in the daemon's environment does not reach a child;
 - the catch-up run on first start, and no extra run after a restart;
 - the scheduled time fires on the minute;
-- a failed collection skips the evaluation and runs push-only;
+- a failed AD collection skips the evaluation and runs push-only;
+- a failed Entra collection still evaluates and pushes the AD data, with
+  `--skip-entra`, and the run ends `warning`; `--skip-entra` is also passed
+  when Entra is not configured;
+- the integrity check runs after a collection and reports a planted
+  duplicate;
 - no retry without a configuration change, and an immediate retry after a
   password change in the mock portal;
 - SIGTERM during a step, both a step that stops cleanly and one that
@@ -372,7 +392,6 @@ a mock of the platform (the provisional endpoints plus the ingest API).
   answers (questions document, sections 3 to 5): paths, payloads, status
   codes, the encryption scheme, the health payload, whether the lease is
   held around the clock, and rate limits.
-- **Entra failure blocks the evaluation of good AD data.** See section 1.
 - **Spreading the run times.** Runs could be spread across clients, for
   example with a random delay within a window, if the platform wants its
   load spread.
