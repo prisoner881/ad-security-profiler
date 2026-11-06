@@ -36,22 +36,21 @@ decision was made a particular way) for anyone who wants it.
             object_type_guid (two ACEs differing only in object type were
             reported as duplicates), and it covered 7 of the 36 tables this
             script keeps history in. It now covers all of them, keyed as
-            this script diffs them, per client. collector_daemon.py runs it
-            after every collection and reports any duplicate.
+            this script diffs them, per client. Run it after a collection
+            to check the history.
 
-    1.0.8 - For running under a scheduler or container daemon:
-            - SIGTERM (what `docker stop`, systemd and a supervising process
-              send) is handled like Ctrl-C: the transaction is rolled back,
+    1.0.8 - Stopping and logs:
+            - SIGTERM (what `kill` and service managers send) is handled
+              like Ctrl-C: the transaction is rolled back,
               the sync_run row is marked 'aborted' ("Interrupted (SIGTERM)."),
               exit 130. Without a handler the process was killed outright and
               its sync_run row, committed separately at the start, stayed
               'running'. A repeated SIGTERM is ignored so the rollback can
               finish. A signal that arrives while a database statement or a
-              blocking LDAP call is running takes effect when it returns, so
-              a supervisor should allow a generous stop timeout.
+              blocking LDAP call is running takes effect when it returns.
             - --log-dir DIR puts the log file in DIR (created if missing;
-              default: the current directory), so a supervisor can keep every
-              run's log together.
+              default: the current directory), to keep every run's log
+              together.
             - New companion script schema_setup.py creates the schema on an
               empty database or applies the missing migrations, without psql
               (see SETUP.md). No schema change.
@@ -63,13 +62,10 @@ decision was made a particular way) for anyone who wants it.
             named by AD_BIND_PASSWORD_FILE, else a hidden prompt when
             standard input is a terminal; the PostgreSQL password likewise
             from --pg-password, PGPASSWORD, PGPASSWORD_FILE or the prompt.
-            Why: a scheduler or container has no terminal, so getpass raised
-            EOFError (a traceback), leaving only the command-line options,
-            which show in `ps` output and a container's recorded command.
-            The _FILE variants read the first line of a mounted Docker or
-            Kubernetes secret, or of /dev/fd/N, so a supervising process can
-            hand a secret over an inherited pipe without it touching disk,
-            a command line or an environment. Without a terminal, a missing
+            Why: without a terminal getpass raised EOFError (a traceback),
+            leaving only the command-line options, which show in `ps`
+            output. The _FILE variants read the first line of a file.
+            Without a terminal, a missing
             bind password stops the run with exit 1 and a message naming the
             variables; a missing PostgreSQL password is left to libpq
             (~/.pgpass, PGPASSFILE, or a password-less method), which
@@ -310,7 +306,7 @@ decision was made a particular way) for anyone who wants it.
 
     0.7.4 - Requires schema v43 (schema_migration_v43.sql). No collection
             change: v43 only adds adaudit.py's run lifecycle, plugin roster
-            and push state (adaudit.py 0.10.0, adaudit_push.py), but
+            and plugin roster (adaudit.py 0.10.0), but
             adprofiler.py checks for an exact schema version.
 
     0.7.3 - Requires schema v42 (schema_migration_v42.sql). No collection

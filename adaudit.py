@@ -2,12 +2,19 @@
 """
 adaudit.py -- AD Security & Compliance Plugin Runner
 ======================================================
-VERSION: 1.0.11
+VERSION: 1.0.11+standalone
 
 Companion to adprofiler.py. Where adprofiler.py collects AD data,
 adaudit.py analyzes it: discovers every plugin file in plugins/, runs each
 against the most recent successful collection, and reports PASS/WARN/FAIL
-findings.
+findings, on the console and in an Excel workbook.
+
+STANDALONE EDITION:
+    This edition is run by hand, interactively, and its results are the
+    console report and the Excel workbook (adaudit-findings_<timestamp>
+    .xlsx, always written). It sends nothing anywhere. Evaluation runs are
+    recorded in control_evidence_run with push_status 'skipped'; the
+    schema's other push columns are unused.
 
 DESIGN:
     - A "plugin" is a standalone .py file in plugins/, containing one
@@ -25,13 +32,6 @@ DESIGN:
       as: (status, object_guid, stig_severity, stig_reference,
       tool_severity, tool_reference, fd_severity, summary, detail).
       Zero rows returned = clean pass, nothing to report.
-    - [v1.0.11] The activation key's environment ("e") is the platform's
-      environment name, as the platform developer confirmed: only prod (US
-      production; "us" is never issued), eu and test have a usable API
-      server. A key without "e" is refused (no server is guessed); for any
-      other environment, or a bare license key, the API URL must be given
-      (--api-url / FD_API_URL), else it is refused. --api-url takes prod /
-      eu / test as shortcuts (was test / us / eu).
     - [v1.0.10] The schema migration files up to v50 were removed; the
       message for a database older than REQUIRED_SCHEMA_VERSION says to run
       schema_setup.py, or to create a new, empty database. No other change.
@@ -41,64 +41,32 @@ DESIGN:
       SYSVOL data not read by the evaluated run (v1.0.1): the Entra data in
       the database is kept from the last successful collection and would
       otherwise be evaluated as current. Their open findings stay open.
-      collector_daemon.py passes it when the AD collection succeeded and
-      the Entra one did not. Needs schema v50 (check_scd2_integrity()
+      Use it when the AD collection succeeded and the Entra one did not.
+      Needs schema v50 (check_scd2_integrity()
       repaired; nothing a plugin reads changed).
-    - [v1.0.8] Push authentication by activation key (the platform's
-      document 03). The key the client copies from the FortifyData portal
-      -- --activation-key, FD_ACTIVATION_KEY, or the file named by
-      FD_ACTIVATION_KEY_FILE (a mounted secret or /dev/fd/N) -- is checked
-      before anything is sent; it supplies the license key, sent as
-      "Authorization: LicenseKey <key>", the company id for the request
-      paths, and the environment that picks the API server (absent: us,
-      pending confirmation). --api-url / FD_API_URL still override the
-      server; --api-company-id / FD_COMPANY_ID, if set, must match the key.
-      A 401 (key unknown or malformed, or the integration switched off)
-      stops the push with a message saying so; the runs stay queued, exit
-      5. With the activation key, a 403 without a reason is a refusal, not
-      "waiting for approval" (that reading is kept for the older API key
-      only). The older API key still works, with a warning, until the
-      platform stops accepting it. An interactive run with no key now
-      prompts for the activation key.
-    - [v1.0.7] For running under a scheduler or container daemon: SIGTERM
-      (`docker stop`, systemd, a supervising process) is handled like
-      Ctrl-C -- the evaluation run is marked aborted and never pushed,
-      exit 130; it used to kill the process and leave the run 'running'.
-      A signal that arrives during a database query takes effect when the
-      query returns. --log-dir DIR also writes the console output to
-      DIR/adaudit-results_<timestamp>.log; --report-dir DIR says where the
-      Excel workbook goes; --no-excel skips the workbook (the console
-      report, the findings history and the push are unchanged) -- an
-      unattended run whose results are pushed has no reader for it, and it
-      is the slowest step on a large directory.
-    - [v1.0.6] Secrets without a terminal (secret_input.py). The
-      PostgreSQL password is taken from --pg-password, else PGPASSWORD,
-      else the file named by PGPASSWORD_FILE (first line; a mounted Docker
-      or Kubernetes secret, or /dev/fd/N for a pipe from a supervising
-      process), else a hidden prompt when there is a terminal; with none of
-      them and no terminal, libpq is left to use ~/.pgpass, PGPASSFILE or a
-      password-less method (getpass raised EOFError). PGPASSWORD was
-      ignored before: the script always prompted. The FortifyData API key
-      is unchanged (--api-key, FD_API_KEY, --api-key-file -- which also
-      accepts /dev/fd/N -- or the prompt). Where each secret came from is
-      printed, never the value.
+    - [v1.0.7] SIGTERM is handled like Ctrl-C -- the evaluation run is
+      marked aborted, exit 130; it used to kill the process and leave the
+      run 'running'. A signal that arrives during a database query takes
+      effect when the query returns. --log-dir DIR also writes the console
+      output to DIR/adaudit-results_<timestamp>.log; --report-dir DIR says
+      where the Excel workbook goes.
+    - [v1.0.6] Secrets (secret_input.py). The PostgreSQL password is taken
+      from --pg-password, else PGPASSWORD, else the file named by
+      PGPASSWORD_FILE (first line), else a hidden prompt when there is a
+      terminal; with none of them and no terminal, libpq is left to use
+      ~/.pgpass, PGPASSFILE or a password-less method (getpass raised
+      EOFError). PGPASSWORD was ignored before: the script always
+      prompted. Where each secret came from is printed, never the value.
     - [v1.0.5] A finding whose STIG or tool reference changed gets a new
-      version (it kept the reference it was first recorded with). Push: a
-      finding that was fixed and came back is sent with the date it came
-      back as detected_at, not the date it was first ever seen. Needs schema
-      v49 (plugin 11027).
-    - [v1.0.4] The open findings a NOT ASSESSED plugin keeps (they are
-      pushed as unchanged) count like any other open finding: they are
-      listed under the plugin in the console report and the workbook, make
-      its controls failing or warning on the compliance sheets, and count
-      for --fail-on. They used to be left out, so the exit status and
-      totals disagreed with what was pushed. Needs schema v48 (plugins
-      11021, 11027, 11029).
-    - [v1.0.3] Push (adaudit_push.py): change labels are relative to the
-      last run the API was sent -- skipped and expired runs no longer count
-      as the previous run. A finding fixed during a skipped run used to be
-      REMEDIATED only in that run, so the API kept it open for good.
-    - [v1.0.2] One run at a time: every mode that uses the database takes
+      version (it kept the reference it was first recorded with). Needs
+      schema v49 (plugin 11027).
+    - [v1.0.4] The open findings a NOT ASSESSED plugin keeps count like any
+      other open finding: they are listed under the plugin in the console
+      report and the workbook, make its controls failing or warning on the
+      compliance sheets, and count for --fail-on. They used to be left out,
+      so the exit status and totals disagreed with the findings history.
+      Needs schema v48 (plugins 11021, 11027, 11029).
+    - [v1.0.2] One run at a time: every run takes
       the run lock shared with adprofiler.py and entra_graph_collector.py
       (run_lock.py) right after the PostgreSQL settings are read, so an
       evaluation never sees a collection half-committed and two
@@ -138,22 +106,6 @@ DESIGN:
       SYSVOL subscription columns and the users' Java attributes.
     - [v0.10.4] Requires schema v44 (adprofiler.py 0.8.0): plugins 1052,
       4038, 4039 and 9040-9042 read the columns and SYSVOL data it adds.
-    - [v0.10.3] Push, following the API's engine notes of 14 October 2026.
-      The API now says why it refuses a request, and the push acts on it:
-      a key not granted the company id (KEY_NOT_SCOPED) or a disabled
-      domain (DOMAIN_DISABLED) stops with a message saying what to fix,
-      where both used to be read as "waiting for approval" and queued
-      silently for ever; only DOMAIN_PENDING means waiting. A run the API
-      already holds as complete (RUN_ALREADY_COMPLETE: the reply to a
-      successful "complete" was lost and the retry was refused) is marked
-      pushed, not PARTIAL. Inventory is sent only when all four object
-      types are present: the API removes every stored object of a type
-      that a run with any inventory rows did not send, so a missing
-      inventory plugin (file absent or failed to load) would have wiped
-      that type -- subnets, for example. Batches are also closed at 16 MB
-      of JSON, because the API refuses a request body over 64 MB however
-      few items it holds, and over-long text fields on a finding are
-      shortened (with a warning) instead of being rejected by the API.
     - [v0.10.2] Findings closed this run (change status remediated) are no
       longer shown as open. The console printed them as "[FAIL] ...
       [REMEDIATED]" under an "[ OK ]" plugin heading, and the workbook
@@ -161,8 +113,8 @@ DESIGN:
       Status = FAIL filter included closed findings. The console now marks
       them "[ OK ] ... [REMEDIATED]" with their last evidence labelled as
       such; the workbook gives them Status REMEDIATED, a green fill, and
-      lists them after the open findings of their plugin. Counts, the
-      compliance tabs and the push were already correct.
+      lists them after the open findings of their plugin. Counts and the
+      compliance tabs were already correct.
     - [v0.10.1] A plugin that could not assess anything because its source
       data was not collected (no Entra / SYSVOL data, or a required Entra
       source unreadable) is now shown as [N/A ] in the console and counted
@@ -170,25 +122,14 @@ DESIGN:
       instead of [ OK ] / PASS. Entra plugins are recognised by a FROM / JOIN
       on an Entra table, not by the substring "entra_" anywhere in the
       query: AD-only plugin 11016 (detail key all_entra_whfb) was shown as
-      not assessed on clients without Entra data. Dry-run pushes now say
-      what was written instead of "sent" / "accepted".
-    - [v0.10.0] Requires schema v43. Pushes results to the FortifyData AD
-      audit ingest API (adaudit_push.py; --push, --push-only, --push-run,
-      --push-skip, --push-dry-run; credentials at runtime via --api-url /
-      --api-company-id / --api-key[-file] or FD_API_URL / FD_COMPANY_ID /
-      FD_API_KEY, or a prompt). The unit pushed is an evaluation run:
-      complete, unfiltered runs are sent oldest first, reconstructed from
-      control_evidence_fact with change labels derived from history, plus
-      the run's plugin roster, so a backlog replays exactly as it would have
-      been sent live. Each run now has a lifecycle (control_evidence_run
-      .status 'running' -> 'complete', or 'aborted' if interrupted -- never
-      pushed) and a stored roster (control_evidence_run_plugin: each finding
-      plugin's pass / warn / fail / error / not_assessed result), which the
-      API needs so an errored or not-assessed plugin can't make its findings
-      look remediated. Filtered runs (--plugin-id / --category /
-      --framework) no longer write to the findings history: they report
-      against it but change nothing, and are never pushed. New exit status
-      5: the push failed (the run itself is recorded and pushed next time).
+      not assessed on clients without Entra data.
+    - [v0.10.0] Requires schema v43. Each evaluation run has a lifecycle
+      (control_evidence_run.status 'running' -> 'complete', or 'aborted' if
+      interrupted) and a stored roster (control_evidence_run_plugin: each
+      finding plugin's pass / warn / fail / error / not_assessed result).
+      Filtered runs (--plugin-id / --category / --framework) no longer
+      write to the findings history: they report against it but change
+      nothing.
     - [v0.9.2] Requires schema v42 (Entra ID coverage round: plugins
       10020-10121 and 11022-11029). A plugin may declare
       PLUGIN["requires_sources"]: the Entra data sources
@@ -275,8 +216,7 @@ DESIGN:
       -- so they live on the plugin dict itself, not the SQL contract.
       Optional; omit or leave empty if no good source exists rather than
       including a weak one.
-    - detail ("Evidence" in console output and the eventual API payload)
-      and references are only shown for actual FAIL/WARN findings -- a
+    - detail ("Evidence" in console output and the workbook) and references are only shown for actual FAIL/WARN findings -- a
       clean PASS result has no triggering data point or remediation
       guidance to show.
     - Three independent, non-blended severity ratings per finding:
@@ -307,18 +247,12 @@ USAGE:
     python3 adaudit.py --framework PCI-DSS-4.0 "SOC 2"  # only plugins tagged for these frameworks
     python3 adaudit.py --plugins-dir ./plugins   # override plugin location
     python3 adaudit.py --fail-on warn            # exit 4 if any open WARN/FAIL finding
-    FD_ACTIVATION_KEY_FILE=/run/secrets/fd_activation_key python3 adaudit.py --push
-                                                 # evaluate, then push unpushed runs
-    python3 adaudit.py --push --api-url us --api-company-id 12 --api-key-file key.txt
-                                                 # the same with the older API key
-    python3 adaudit.py --push-only               # push the backlog, evaluate nothing
-    python3 adaudit.py --push --push-dry-run out/  # write the payloads, send nothing
-    python3 adaudit.py --push --no-excel --log-dir /data/logs  # unattended: log file, no workbook
+    python3 adaudit.py --report-dir reports --log-dir logs  # workbook and log file location
 
 EXIT STATUS ([v0.7.3]; always 0 before):
     0   Run completed and every selected plugin ran.
     1   Fatal error: no database connection, no successful collection
-        run to analyze, the Excel report couldn't be written, a secret
+        run to analyze, the Excel report couldn't be written, a password
         file that can't be read (or PGPASSWORD and PGPASSWORD_FILE both
         set), or an unexpected error. Results are missing or unusable.
     2   Command-line usage error (argparse's own convention).
@@ -330,16 +264,11 @@ EXIT STATUS ([v0.7.3]; always 0 before):
         one current (not remediated) finding is at or above that level.
         Without --fail-on, findings never affect the exit status --
         finding problems is a successful audit, not a failed run.
-    5   [v0.10.0] The push to FortifyData failed (network, API refusal,
-        count mismatch). The evaluation itself is recorded; unpushed runs
-        are sent, oldest first, on the next push. A new installation
-        waiting for approval (403) is not a failure: exit status is
-        unaffected.
     75  [v1.0.2] Not started: another adprofiler.py, entra_graph_collector.py
         or adaudit.py run holds the run lock (run_lock.py). Nothing was
         done; the logged message names the holder and how to clear it.
     130 Interrupted (Ctrl-C, or [v1.0.7] SIGTERM).
-    Precedence when several apply: 3, then 5, then 4 -- an incomplete run
+    Precedence when several apply: 3, then 4 -- an incomplete run
     can't vouch for its findings either way.
 """
 
@@ -352,16 +281,13 @@ import re
 from pathlib import Path
 from datetime import datetime, timezone
 
-import os
-
 import psycopg2
 import psycopg2.extras
 
-import adaudit_push
 import run_lock  # [v1.0.2] one run at a time, see run_lock.py
 import secret_input  # [v1.0.6] secrets from the environment, a file or a prompt
 
-VERSION = "1.0.11"
+VERSION = "1.0.11+standalone"
 
 # [test-candidate-branch] Always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
@@ -383,7 +309,6 @@ EXIT_OK = 0
 EXIT_FATAL = 1
 EXIT_INCOMPLETE = 3
 EXIT_FINDINGS = 4
-EXIT_PUSH_FAILED = 5
 EXIT_LOCKED = run_lock.EXIT_LOCKED  # 75
 EXIT_INTERRUPTED = 130
 
@@ -513,9 +438,8 @@ INTERRUPTED_BY = "Ctrl-C"
 
 
 def handle_sigterm(signum, frame):
-    """[v1.0.7] SIGTERM -- what `docker stop`, systemd and a supervising process
-    send -- is handled like Ctrl-C: the evaluation run is marked aborted
-    (never pushed), exit 130. It used to kill the process outright and leave
+    """[v1.0.7] SIGTERM (what `kill` and service managers send) is handled
+    like Ctrl-C: the evaluation run is marked aborted, exit 130. It used to kill the process outright and leave
     the run 'running'. A repeated SIGTERM is ignored so the cleanup can
     finish."""
     global INTERRUPTED_BY
@@ -755,7 +679,7 @@ def connect_postgres():
 # the SYSVOL (Group Policy content) tables and views, v40
 # ad_domain.tombstone_lifetime_source (plugin 4011), v41 partition
 # maintenance (no plugin change), v42 the Entra coverage round tables, v43
-# the evaluation run lifecycle, plugin roster and push state, v44 the
+# the evaluation run lifecycle and plugin roster, v44 the
 # dSHeuristics / msDS-Other-Settings / NetBIOS / scriptPath columns and the
 # SYSVOL script commands (plugins 1052, 4038, 4039, 9040-9042), v45 the
 # computer creator SID, DC SYSVOL subscriptions and users' Java attributes
@@ -814,10 +738,9 @@ def record_run_roster(conn, evidence_run_id, plugin_summaries, not_assessed_ids,
     """[v0.10.0] Stores the run's plugin roster (control_evidence_run_plugin):
     every finding plugin that ran, with its result, plus every plugin file
     that failed to load (as 'error'). A passing plugin whose source data was
-    not collected is 'not_assessed'. The push sends this roster with the run;
-    the API only closes as remediated the findings of plugins whose result
-    is clean, so an errored or not-assessed plugin cannot make its findings
-    look fixed."""
+    not collected is 'not_assessed'. It records which plugins actually
+    assessed the run, so an errored or not-assessed plugin cannot make its
+    findings look fixed."""
     rows = []
     for summary in plugin_summaries:
         rollup = summary["rollup"]
@@ -842,8 +765,8 @@ def record_run_roster(conn, evidence_run_id, plugin_summaries, not_assessed_ids,
 
 def mark_run_aborted(conn, evidence_run_id):
     """[v0.10.0] Best effort: an interrupted or failed evaluation run is
-    marked aborted so it is never pushed. If even this fails (database
-    gone), the run stays 'running', which is never pushed either."""
+    marked aborted. If even this fails (database gone), the run stays
+    'running'."""
     try:
         conn.rollback()
         with conn.cursor() as cur:
@@ -1031,7 +954,7 @@ def get_open_evidence_map(pg_cur, control_test_id, client_id):
 
 def kept_open_findings(pg_cur, control_test_id, client_id, plugin):
     """[v1.0.4] The open findings of a plugin that is NOT ASSESSED this run
-    (kept open, pushed as unchanged), in sync_evidence()'s finding shape,
+    (kept open, unchanged), in sync_evidence()'s finding shape,
     with kept_not_assessed = True."""
     return [{
         "plugin_id": plugin["plugin_id"], "plugin_version": plugin["version"],
@@ -1108,14 +1031,13 @@ def sync_evidence(pg_cur, evidence_run_id, control_test_id, client_id, rows, plu
     identity being inherited from a parent grouping. This is deliberate:
     a plugin run is commonly a MIX of new/changed/unchanged/remediated
     findings, not a single uniform state, so every individual finding
-    needs to be independently taggable -- and this is also exactly the
-    shape a future per-finding API push needs, so the console report and
-    that future consumer can share one data structure rather than two.
+    needs to be independently taggable; the console report and the
+    workbook share this one data structure.
 
     [v0.10.0] persist=False (filtered runs) computes the same labels against
     the open findings but writes nothing: a diagnostic run limited by
     --plugin-id/--category/--framework no longer changes the findings
-    history that pushed runs are reconstructed from.
+    history.
     """
     open_evidence = get_open_evidence_map(pg_cur, control_test_id, client_id)
     seen_identity_guids = set()
@@ -1334,9 +1256,7 @@ def print_report(plugin_summaries, all_findings):
                 # Every line is fully self-contained on purpose: its own
                 # status, plugin_id, version, change tag, and all three
                 # severities -- not inherited from the header above it.
-                # This matches exactly what a future per-finding API push
-                # would send as one record, so the console rendering and
-                # that eventual JSON payload share one underlying shape.
+                # The workbook writes the same record as one row.
                 sev_bits = [f"fd:{f['fd_severity']}"]
                 if f["stig_severity"]:
                     sev_bits.append(f"stig:{f['stig_severity']}")
@@ -1386,7 +1306,7 @@ def print_report(plugin_summaries, all_findings):
 def _compliance_result(summary, open_counts, not_assessed_plugin_ids):
     """A plugin's result on the compliance sheets. [v1.0.4] A NOT ASSESSED
     plugin that keeps open findings from its last assessment is failing or
-    warning by those findings (they are still open, and pushed)."""
+    warning by those findings (they are still open)."""
     if summary["rollup"] == "pass" and summary["plugin_id"] in not_assessed_plugin_ids:
         if open_counts["fail"]:
             return "fail"
@@ -1752,169 +1672,6 @@ def write_excel_report(plugin_summaries, all_findings, inventory_results, filena
 
 
 # ============================================================================
-# Push (adaudit_push.py)
-# ============================================================================
-
-def resolve_push_config(args, parser):
-    """[v0.10.0] None when no push was asked for.
-
-    [v1.0.8] Credentials, first match wins:
-      - the activation key from the FortifyData portal: --activation-key,
-        FD_ACTIVATION_KEY or the file named by FD_ACTIVATION_KEY_FILE
-        (secret_input.py). It carries the license key (sent as
-        "Authorization: LicenseKey"), the company id and the environment,
-        which picks the API server. --api-url / FD_API_URL still override
-        the server (testing against a local mock); --api-company-id /
-        FD_COMPANY_ID, if given, must match the key's company.
-      - the older API key (--api-key, FD_API_KEY, --api-key-file), with
-        --api-url and --api-company-id as before, until the platform stops
-        accepting it; a warning says so.
-      - neither: an interactive run prompts for the activation key; an
-        unattended one stops with a message.
-    A dry run needs no credentials; an activation key given to a dry run
-    is still checked and supplies the company id and server."""
-    pushing = args.push or args.push_only or args.push_run is not None
-    if args.push_dry_run and not pushing:
-        parser.error("--push-dry-run needs --push, --push-only or --push-run")
-    if not pushing:
-        return None
-
-    url_override = args.api_url or os.environ.get("FD_API_URL")
-    url_override = adaudit_push.API_SERVERS.get((url_override or "").lower(), url_override)
-    company = args.api_company_id
-    if company is None and os.environ.get("FD_COMPANY_ID"):
-        try:
-            company = int(os.environ["FD_COMPANY_ID"])
-        except ValueError:
-            parser.error("FD_COMPANY_ID must be an integer")
-
-    activation_given = bool(args.activation_key or os.environ.get("FD_ACTIVATION_KEY")
-                            or os.environ.get("FD_ACTIVATION_KEY_FILE"))
-    api_key_given = bool(args.api_key or os.environ.get("FD_API_KEY") or args.api_key_file)
-    if activation_given and api_key_given:
-        parser.error("give either the activation key (--activation-key, FD_ACTIVATION_KEY, "
-                     "FD_ACTIVATION_KEY_FILE) or the older API key (--api-key, FD_API_KEY, "
-                     "--api-key-file), not both")
-
-    def check_url(url):
-        if not (url.startswith("https://")
-                or re.match(r"http://(localhost|127\.0\.0\.1)(:\d+)?(/|$)", url)):
-            parser.error("the API URL must be https:// (or prod / eu / test); plain http is only "
-                         "accepted for localhost, for testing against a local mock")
-
-    common = {"dry_run_dir": args.push_dry_run, "gzip": not args.no_gzip,
-              "timeout": args.api_timeout}
-
-    # --- activation key (license) ----------------------------------------
-    if activation_given or (not api_key_given and not args.push_dry_run):
-        try:
-            text, source = secret_input.resolve_secret(
-                "FortifyData activation key", args.activation_key, "--activation-key",
-                "FD_ACTIVATION_KEY", "FortifyData activation key (from the portal): ")
-        except secret_input.SecretUnavailable as exc:
-            parser.error(f"pushing needs the activation key: {exc}")
-        if source == secret_input.FROM_OPTION:
-            print("[WARN] " + secret_input.option_warning("Activation key", "--activation-key",
-                                                          "FD_ACTIVATION_KEY"))
-        try:
-            lic = adaudit_push.parse_activation_key(text)
-        except adaudit_push.LicenseKeyError as exc:
-            parser.error(f"the activation key is not usable: {exc}. Copy it again from the "
-                         f"FortifyData portal")
-        if company is not None and company != lic.company_id:
-            parser.error(f"--api-company-id / FD_COMPANY_ID ({company}) does not match the "
-                         f"activation key's company ({lic.company_id}); omit it")
-        try:
-            url = lic.api_url(url_override)
-        except adaudit_push.LicenseKeyError as exc:
-            parser.error(f"{exc} (--api-url or FD_API_URL)")
-        check_url(url)
-        log(f"Push: activation key for company {lic.company_id}, environment "
-            f"{lic.environment or 'none (bare license key)'}"
-            + f" -> {url}"
-            + (" (overridden by --api-url / FD_API_URL)" if url_override else "")
-            + f"; key from the {secret_input.describe_source(source, '--activation-key', 'FD_ACTIVATION_KEY')}.")
-        return dict(common, url=url, company_id=lic.company_id, key=lic.license_key,
-                    auth_scheme="LicenseKey")
-
-    # --- dry run without credentials -------------------------------------
-    if args.push_dry_run and not api_key_given:
-        return dict(common, url=url_override or "https://dry-run.invalid",
-                    company_id=company or 0, key=None, auth_scheme="LicenseKey")
-
-    # --- older API key -----------------------------------------------------
-    url = url_override
-    if args.push_dry_run:
-        return dict(common, url=url or "https://dry-run.invalid", company_id=company or 0,
-                    key=None, auth_scheme="ApiKey")
-    if not url or company is None:
-        parser.error("pushing with an API key needs --api-url (or FD_API_URL) and "
-                     "--api-company-id (or FD_COMPANY_ID)")
-    check_url(url)
-    key = None
-    if args.api_key:
-        print("[WARN] API key supplied via --api-key is visible in shell history and process "
-              "listings. Prefer FD_API_KEY, --api-key-file, or the prompt.")
-        key = args.api_key
-    elif os.environ.get("FD_API_KEY"):
-        key = os.environ["FD_API_KEY"]
-    elif args.api_key_file:
-        try:
-            key = args.api_key_file.read_text(encoding="utf-8").splitlines()[0].strip()
-        except (OSError, IndexError) as exc:
-            parser.error(f"cannot read the API key from {args.api_key_file}: {exc}")
-    if not key:
-        parser.error("the API key is empty")
-    if key.lower().startswith("apikey "):
-        key = key[7:].strip()
-    print("[WARN] Pushing with the older API key. The FortifyData platform is moving to the "
-          "activation key from the portal (FD_ACTIVATION_KEY or FD_ACTIVATION_KEY_FILE).")
-    return dict(common, url=url, company_id=company, key=key, auth_scheme="ApiKey")
-
-def run_push(conn, client_id, sync_run_id, push_cfg, all_plugins, inventory_results, only_run_id):
-    """[v0.10.0] Pushes unpushed runs (or one run). Returns False when the
-    push failed; True when it finished or is waiting for the API to approve
-    a new installation (runs stay queued)."""
-    inventory_plugins = [p for p in all_plugins if p["plugin_type"] == "inventory"]
-
-    def inventory_provider():
-        if inventory_results is not None:
-            return inventory_results
-        results = []
-        for plugin in inventory_plugins:
-            rows = run_inventory_query(conn, plugin, client_id, sync_run_id)
-            if rows is None:
-                conn.rollback()
-            results.append((plugin, rows))
-        conn.commit()
-        return results
-
-    try:
-        api = adaudit_push.ApiClient(push_cfg["url"], push_cfg["company_id"], push_cfg["key"], log,
-                                     compress=push_cfg["gzip"], timeout=push_cfg["timeout"],
-                                     dry_run_dir=push_cfg["dry_run_dir"],
-                                     auth_scheme=push_cfg["auth_scheme"])
-        pushed, waiting = adaudit_push.push_runs(conn, client_id, api, all_plugins,
-                                                 inventory_provider, VERSION, log, only_run_id)
-    except ImportError as exc:
-        log(f"[ERROR] Push needs the 'requests' package (pip install -r requirements.txt): {exc}")
-        return False
-    except adaudit_push.PushError as exc:
-        conn.rollback()
-        log(f"[ERROR] Push stopped: {exc}")
-        return False
-    if push_cfg["dry_run_dir"]:
-        log(f"Push (dry run): {pushed} run(s) written to {push_cfg['dry_run_dir']}; nothing was "
-            f"sent and they are still queued.")
-    elif waiting:
-        log(f"Push: {pushed} run(s) pushed; the rest stay queued until FortifyData approves "
-            f"this installation (client_id {client_id}).")
-    else:
-        log(f"Push: {pushed} run(s) pushed.")
-    return True
-
-
-# ============================================================================
 # Main
 # ============================================================================
 
@@ -1943,9 +1700,6 @@ def main():
                          help="[v1.0.7] Directory for the Excel workbook "
                               "(adaudit-findings_<timestamp>.xlsx); created if missing. "
                               "Default: the current directory.")
-    parser.add_argument("--no-excel", action="store_true",
-                         help="[v1.0.7] Do not write the Excel workbook (the console "
-                              "report, the findings history and any push are unchanged).")
     parser.add_argument("--skip-entra", action="store_true",
                          help="[v1.0.9] The Entra ID data was not collected for this evaluation "
                               "(the Entra collection failed or was not run): the Entra checks "
@@ -1964,47 +1718,6 @@ def main():
                          help="PostgreSQL password. Prefer the PGPASSWORD or "
                               "PGPASSWORD_FILE environment variable, or omit it to be "
                               "prompted; an option is visible in process listings.")
-    push = parser.add_argument_group(
-        "pushing results to FortifyData",
-        "The activation key from the FortifyData portal carries the license, company id and "
-        "server: give it as FD_ACTIVATION_KEY or FD_ACTIVATION_KEY_FILE (or --activation-key); "
-        "a missing key is prompted for when running interactively. The older API key "
-        "(--api-key / FD_API_KEY / --api-key-file with --api-url and --api-company-id) is "
-        "still accepted for now.")
-    push.add_argument("--activation-key", default=None,
-                      help="[v1.0.8] Activation key from the FortifyData portal. Visible in "
-                           "process listings: prefer FD_ACTIVATION_KEY or "
-                           "FD_ACTIVATION_KEY_FILE.")
-    push.add_argument("--push", action="store_true",
-                      help="After evaluating, push every complete run not yet accepted by the "
-                           "API, oldest first (this run included).")
-    push.add_argument("--push-only", action="store_true",
-                      help="Push unpushed runs without evaluating anything (e.g. after a failed "
-                           "collection, or to drain a backlog).")
-    push.add_argument("--push-run", type=int, metavar="EVIDENCE_RUN_ID", default=None,
-                      help="Push just this evaluation run, even if already pushed (debugging an "
-                           "ingest problem). Nothing is evaluated.")
-    push.add_argument("--push-skip", type=int, metavar="EVIDENCE_RUN_ID", default=None,
-                      help="Mark this run as never to be pushed (a run the API keeps refusing), "
-                           "so later runs can go. Needs no API credentials.")
-    push.add_argument("--push-dry-run", metavar="DIR", default=None,
-                      help="With --push/--push-only/--push-run: write every request body to DIR "
-                           "as JSON instead of sending it. Push state is not changed; no API "
-                           "credentials are needed.")
-    push.add_argument("--api-url", default=None,
-                      help="API base URL, or prod / eu / test (env FD_API_URL).")
-    push.add_argument("--api-company-id", type=int, default=None,
-                      help="FortifyData company id the API key is scoped to (env FD_COMPANY_ID).")
-    push.add_argument("--api-key", default=None,
-                      help="API key. Visible in shell history and process listings: prefer "
-                           "FD_API_KEY, --api-key-file, or the prompt.")
-    push.add_argument("--api-key-file", type=Path, default=None,
-                      help="File holding the API key (first line). Keep it readable only by "
-                           "the account that runs adaudit.py.")
-    push.add_argument("--api-timeout", type=int, default=120,
-                      help="Seconds per API request (default 120).")
-    push.add_argument("--no-gzip", action="store_true",
-                      help="Send request bodies uncompressed (troubleshooting only).")
     args = parser.parse_args()
 
     if args.version:
@@ -2067,8 +1780,6 @@ def main():
         log(f"[ERROR] {exc}")
         return EXIT_LOCKED
 
-    push_cfg = resolve_push_config(args, parser)
-
     print("=" * 62)
     print(f"  adaudit.py v{VERSION} -- AD Security & Compliance Plugin Runner")
     print("=" * 62)
@@ -2085,23 +1796,6 @@ def main():
             f"compliance sheets:")
         for tag in sorted(unknown_tags):
             log(f"    - {tag} (plugin(s) {', '.join(str(i) for i in sorted(unknown_tags[tag]))})")
-
-    all_plugins = plugins
-
-    if args.push_skip is not None or args.push_only or args.push_run is not None:
-        conn = connect_postgres()
-        check_schema_version(conn)
-        client_id, run_id, client_name, completed_at = get_latest_client_and_run(conn)
-        if args.push_skip is not None:
-            try:
-                adaudit_push.skip_run(conn, args.push_skip, log)
-            except adaudit_push.PushError as exc:
-                log(f"[ERROR] {exc}")
-                return EXIT_FATAL
-            return EXIT_OK
-        log(f"Push only, for {client_name}: nothing is evaluated.")
-        ok = run_push(conn, client_id, run_id, push_cfg, all_plugins, None, args.push_run)
-        return EXIT_OK if ok else EXIT_PUSH_FAILED
 
     if args.plugin_id:
         plugins = [p for p in plugins if p["plugin_id"] in args.plugin_id]
@@ -2137,17 +1831,15 @@ def main():
     is_unfiltered_run = not args.plugin_id and not args.category and not args.framework
 
     # [v0.10.0] The run is 'running' until everything below is recorded, then
-    # 'complete'; an interrupted or failed run is marked 'aborted' and never
-    # pushed. Filtered runs write no findings history and are never pushed.
+    # 'complete'; an interrupted or failed run is marked 'aborted'. Filtered
+    # runs write no findings history. [standalone] Nothing is ever pushed:
+    # every run is recorded with push_status 'skipped'.
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO control_evidence_run (client_id, sync_run_id, status, is_filtered, push_status)
-            VALUES (%s, %s, 'running', %s, %s) RETURNING evidence_run_id;
-        """, (client_id, run_id, not is_unfiltered_run,
-              "pending" if is_unfiltered_run else "skipped"))
+            VALUES (%s, %s, 'running', %s, 'skipped') RETURNING evidence_run_id;
+        """, (client_id, run_id, not is_unfiltered_run))
         evidence_run_id = cur.fetchone()[0]
-        cur.execute("UPDATE control_evidence_run SET run_uuid = %s WHERE evidence_run_id = %s;",
-                    (str(adaudit_push.run_uuid_for(client_id, evidence_run_id)), evidence_run_id))
     conn.commit()
     run_finished = False
     try:
@@ -2322,22 +2014,13 @@ def main():
     # inventory plugins ran), not gated behind finding_plugins alone,
     # since an inventory-only filtered run (--category "User Accounts"
     # matching only 8001, say) should still get a workbook.
-    # [v1.0.7] --no-excel skips it (an unattended run whose results are
-    # pushed has no reader for it); --report-dir says where it goes.
-    if args.no_excel:
-        log("Excel workbook not written (--no-excel).")
-    elif finding_plugins or inventory_plugins:
+    # [v1.0.7] --report-dir says where it goes.
+    if finding_plugins or inventory_plugins:
         args.report_dir.mkdir(parents=True, exist_ok=True)
         excel_filename = str(args.report_dir / f"adaudit-findings_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
         write_excel_report(plugin_summaries, all_findings, inventory_results, excel_filename,
                            compliance)
         log(f"Wrote Excel findings report to {excel_filename}")
-
-    push_ok = True
-    if push_cfg is not None:
-        all_inventory = [p for p in all_plugins if p["plugin_type"] == "inventory"]
-        reuse = (inventory_results if len(inventory_plugins) == len(all_inventory) else None)
-        push_ok = run_push(conn, client_id, run_id, push_cfg, all_plugins, reuse, None)
 
     # Repeated at the very end so it's the last thing on screen, not
     # buried above the full report.
@@ -2354,11 +2037,6 @@ def main():
         for plugin in failed_inventory:
             log(f"    - inventory plugin {plugin['plugin_id']} ({plugin['name']}): query failed")
         return EXIT_INCOMPLETE
-
-    if not push_ok:
-        log(f"[ERROR] The push did not complete (exit status {EXIT_PUSH_FAILED}); this run's "
-            f"results are recorded locally and will be pushed next time.")
-        return EXIT_PUSH_FAILED
 
     if args.fail_on:
         threshold = STATUS_ORDER[args.fail_on]

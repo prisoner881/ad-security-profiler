@@ -1,8 +1,9 @@
-# Setting up access for the FortifyData AD audit collector
+# Setting up access for the AD security profiler
 
 This guide is for your Active Directory and Entra ID administrators. It
 explains what the collector needs to read your directory, and how to set it
-up. The collector runs unattended in your network, and only ever reads.
+up. The collector is a set of scripts run by hand from a machine in your
+network, and it only ever reads.
 
 ## 1. What the collector needs
 
@@ -62,7 +63,7 @@ Or with PowerShell (ActiveDirectory module):
 New-ADUser -Name "svc_adaudit" -SamAccountName "svc_adaudit" `
     -UserPrincipalName "svc_adaudit@corp.example.com" `
     -Path "OU=Service Accounts,DC=corp,DC=example,DC=com" `
-    -Description "FortifyData AD audit collector (read-only)" `
+    -Description "AD security profiler (read-only)" `
     -AccountPassword (Read-Host -AsSecureString "Password") `
     -Enabled $true -AccountNotDelegated $true
 ```
@@ -219,7 +220,7 @@ Graph application permissions needs *Privileged Role Administrator* or
 1. Sign in to <https://entra.microsoft.com>.
 2. Go to **Identity → Applications → App registrations → New
    registration**.
-   - **Name:** for example `FortifyData AD Audit Collector`.
+   - **Name:** for example `AD Security Profiler`.
    - **Supported account types:** *Accounts in this organizational
      directory only (Single tenant)*.
    - **Redirect URI:** leave empty. The app is never used interactively.
@@ -312,7 +313,7 @@ $roles = $graph.AppRoles | Where-Object {
     $_.Value -in $names -and $_.AllowedMemberTypes -contains "Application" }
 if ($roles.Count -ne $names.Count) { throw "Some permission names were not found" }
 
-$app = New-MgApplication -DisplayName "FortifyData AD Audit Collector" `
+$app = New-MgApplication -DisplayName "AD Security Profiler" `
     -SignInAudience AzureADMyOrg `
     -RequiredResourceAccess @{ ResourceAppId = $graph.AppId
         ResourceAccess = @($roles | ForEach-Object { @{ Id = $_.Id; Type = "Role" } }) }
@@ -362,18 +363,17 @@ The collector only makes outbound connections; nothing connects to it.
 | The domain controller | TCP/UDP 88 | Only if NTLM is blocked (section 2.7) |
 | Your DNS servers | 53 | Resolving the domain controller |
 | `login.microsoftonline.com`, `graph.microsoft.com` | TCP 443 | Entra ID collection |
-| The FortifyData API (`api.fortifydata.com`, or your region's) | TCP 443 | Sending results |
 
-An outbound web proxy is supported for the last two rows. If it inspects
-TLS, provide its CA certificate too (section 5).
+An outbound web proxy is supported for the last row. If it inspects TLS,
+provide its CA certificate too (section 5).
 
 ## 5. The details to provide
 
 ### 5.1 What to provide
 
 Once the account and, if wanted, the App Registration are set up, provide
-these values. Enter them in the FortifyData portal, or as your installation
-instructions describe. Never send a password or secret by email.
+these values to the person running the assessment, over a secure channel.
+Never send a password or secret by email.
 
 | Value | Example |
 |---|---|
@@ -392,8 +392,8 @@ instructions describe. Never send a password or secret by email.
 
 When you change the service account's password or replace the client
 secret, provide the new value the same way. It is used from the next
-collection on, with nothing to restart.
+collection on.
 
 A collection that fails because of a wrong or expired password is reported
-as such. The collector does not retry a wrong password over and over, so
-it will not lock the account out.
+as such. The collector tries the password once per run, so it will not
+lock the account out.

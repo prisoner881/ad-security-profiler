@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-schema_setup.py -- creates or upgrades the ad_intel database schema, unattended
+schema_setup.py -- creates or upgrades the ad_intel database schema
 ==============================================================================
 VERSION: 1.3
 
 adprofiler.py, entra_graph_collector.py and adaudit.py refuse to run against a
 schema other than the one they were built for, and until now the schema could
 only be set up by hand: `psql -f schema_init.sql` for a new database, or each
-missing `schema_migration_vNN.sql` in order for an existing one. A supervising
-process (a scheduler or container daemon) has nobody to do that, so this
-script does it:
+missing `schema_migration_vNN.sql` in order for an existing one. This script
+does it in one command:
 
 [1.2] The schema is a frozen baseline plus a chain of migrations:
 
@@ -37,8 +36,8 @@ chain must be complete: v51, v52, ... up to the target, no gap.
 saves the database with pg_dump (custom format) to
 DIR/adprofiler-v<from>-before-v<to>-<UTC time>.dump (mode 0600) and keeps the
 newest --backup-keep (default 3). If the backup fails, no migration is
-applied. A new database and a current one need no backup. The image carries
-pg_dump (PostgreSQL 17 client); restoring is described in docs/CONTAINER.md.
+applied. A new database and a current one need no backup. It needs pg_dump
+from the PostgreSQL 17 client tools; restoring is described in docs/SETUP.md.
 
 A migration whose header has the line
 
@@ -46,9 +45,9 @@ A migration whose header has the line
 
 needs one adprofiler.py run with --full-rescan afterwards, so that objects
 unchanged in AD get the new columns. With --rescan-file FILE, applying such
-a migration creates FILE; collector_daemon.py then runs the next collection
-with --full-rescan and removes the file once that run succeeds -- once, however
-many such migrations were applied.
+a migration creates FILE as a reminder: run the next collection with
+adprofiler.py --full-rescan, then delete FILE -- once, however many such
+migrations were applied. The script also prints a note saying so.
 
 Each file is sent to the server as one batch. A file without its own
 BEGIN/COMMIT then runs as one implicit transaction, applied completely or not
@@ -451,7 +450,7 @@ def run(args, password):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Create or upgrade the ad_intel PostgreSQL schema, unattended.")
+        description="Create or upgrade the ad_intel PostgreSQL schema.")
     parser.add_argument("--pg-host", default=None, help="PostgreSQL server hostname or IP.")
     parser.add_argument("--pg-port", type=int, default=5432, help="Default: 5432.")
     parser.add_argument("--pg-dbname", default="adprofiler", help="Default: adprofiler.")
@@ -465,15 +464,14 @@ def parse_args():
                              "migrations/ folder. Default: this script's directory.")
     parser.add_argument("--backup-dir", type=Path, default=None, metavar="DIR",
                         help="[1.3] Before migrating an existing database, save it with pg_dump "
-                             "to DIR (collector_daemon.py passes <state_dir>/backups). Without it "
-                             "no backup is taken.")
+                             "to DIR. Without it no backup is taken.")
     parser.add_argument("--backup-keep", type=int, default=3, metavar="N",
                         help="Backups to keep in --backup-dir (default 3; older ones are removed).")
     parser.add_argument("--pg-dump", default="pg_dump", metavar="PATH",
                         help="The pg_dump program (PostgreSQL 17 or later). Default: pg_dump.")
     parser.add_argument("--rescan-file", type=Path, default=None, metavar="FILE",
                         help="[1.2] Create FILE when an applied migration needs one adprofiler.py "
-                             "run with --full-rescan (collector_daemon.py passes this).")
+                             "run with --full-rescan.")
     parser.add_argument("--check", action="store_true",
                         help="Report what would be done; change nothing (exit 3 if needed).")
     parser.add_argument("--log-dir", type=Path, default=None, metavar="DIR",

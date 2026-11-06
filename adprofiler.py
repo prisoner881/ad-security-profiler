@@ -61,11 +61,9 @@ INPUT FORMAT (command line):
                          (below) or the prompt.
         --version        Print version and exit.
 
-    Secrets without a terminal [v1.0.7] (secret_input.py): each secret is
-    taken from its option, else its environment variable, else the file
-    named by <variable>_FILE (first line; a mounted Docker/Kubernetes
-    secret, or /dev/fd/N for a pipe from a supervising process), else a
-    hidden prompt when there is a terminal:
+    Secrets [v1.0.7] (secret_input.py): each secret is taken from its
+    option, else its environment variable, else the file named by
+    <variable>_FILE (first line), else a hidden prompt:
         AD_BIND_PASSWORD / AD_BIND_PASSWORD_FILE   LDAP (and SMB) bind password
         PGPASSWORD / PGPASSWORD_FILE               PostgreSQL password
     Without a terminal, a missing bind password stops the run (exit 1); a
@@ -127,9 +125,9 @@ DESIGN NOTES:
       scratch files.
     - Ctrl-C (SIGINT) is caught, the in-progress transaction is rolled
       back, the sync_run row is marked 'aborted', and the script exits
-      cleanly. [v1.0.8] SIGTERM (`docker stop`, systemd, a supervising
-      process) is handled the same way; it used to kill the process
-      outright and leave the sync_run row 'running'.
+      cleanly. [v1.0.8] SIGTERM (what `kill` and service managers send)
+      is handled the same way; it used to kill the process outright and
+      leave the sync_run row 'running'.
 
 ================================================================================
 """
@@ -802,8 +800,8 @@ INTERRUPTED_BY = "Ctrl-C"
 
 
 def handle_sigint(signum, frame):
-    """SIGINT (Ctrl-C) and, since v1.0.8, SIGTERM -- what `docker stop`, systemd
-    and a supervising process send -- roll the run back and exit 130. Without a
+    """SIGINT (Ctrl-C) and, since v1.0.8, SIGTERM -- what `kill` and service
+    managers send -- roll the run back and exit 130. Without a
     SIGTERM handler the process was killed outright, leaving its sync_run row
     'running'. A repeated SIGTERM is ignored so the rollback can finish."""
     global INTERRUPTED_BY
@@ -5470,8 +5468,8 @@ def main():
     # file in the current working directory. atexit guarantees the
     # file gets flushed and closed, and the real stdout restored, no
     # matter how main() below exits.
-    # [v1.0.8] --log-dir: where the log file goes (a supervising process keeps
-    # the logs of every run together, away from its working directory).
+    # [v1.0.8] --log-dir: where the log file goes (to keep the logs of every
+    # run together, away from the working directory).
     try:
         os.makedirs(args.log_dir, exist_ok=True)
     except OSError as exc:

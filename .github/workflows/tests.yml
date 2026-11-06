@@ -1,0 +1,56 @@
+# Runs the tests on every push and pull request. See docs/MAINTAINERS.md
+# ("Tests"). The schema tests run against a PostgreSQL 17 service.
+
+name: tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: ci-only-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: PostgreSQL 17 client tools (pg_dump, pg_restore)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y --no-install-recommends postgresql-client-17
+
+      - name: Dependencies
+        run: pip install --only-binary=":all:" -r requirements.txt
+
+      - name: Tests
+        env:
+          ADPROFILER_TEST_PGHOST: 127.0.0.1
+          ADPROFILER_TEST_PGPORT: "5432"
+          ADPROFILER_TEST_PGUSER: postgres
+          ADPROFILER_TEST_PGPASSWORD: ci-only-password
+          ADPROFILER_TEST_PGBIN: /usr/lib/postgresql/17/bin
+        run: python -m unittest discover -s tests -t . -v

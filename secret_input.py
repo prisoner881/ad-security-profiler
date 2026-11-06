@@ -1,6 +1,6 @@
 """
 secret_input.py -- where adprofiler.py, entra_graph_collector.py and
-adaudit.py get their secrets, with or without a terminal
+adaudit.py get their secrets
 ==============================================================================
 VERSION: 1.1
 
@@ -8,11 +8,9 @@ The three scripts need up to three secrets: the AD bind password
 (adprofiler.py), the Entra ID App Registration client secret
 (entra_graph_collector.py) and the PostgreSQL password (all three). They used
 to come from a command-line option or an interactive getpass prompt only.
-Neither works for a scheduler or a container: there is no terminal, so the
-prompt fails (getpass raises EOFError when standard input is not a terminal
-and has nothing to read), which leaves only the options -- and those are
-visible in shell history, in `ps` output and in a container's recorded
-command.
+An option is visible in shell history and in `ps` output, and a prompt is no
+use to a scheduled run (getpass raises EOFError when standard input is not a
+terminal and has nothing to read).
 
 resolve_secret() looks in this order and uses the first one found:
 
@@ -24,12 +22,8 @@ resolve_secret() looks in this order and uses the first one found:
        counts as not set.
     3. The file named by <variable>_FILE (AD_BIND_PASSWORD_FILE,
        ENTRA_APP_SECRET_FILE, PGPASSWORD_FILE): its first line, without the
-       line ending. Works with a Docker or Kubernetes secret mounted as a
-       file (e.g. /run/secrets/ad_bind_password) and with an inherited pipe
-       (/dev/fd/N): a supervising process can start the script with
-       AD_BIND_PASSWORD_FILE=/dev/fd/3 and write the secret into that pipe,
-       so the secret is never on disk, on a command line or in an
-       environment.
+       line ending. Keep such a file readable only by the account that
+       runs the scripts.
     4. An interactive prompt with hidden input, only when standard input is
        a terminal.
 
@@ -49,10 +43,9 @@ description of where it came from ("environment variable PGPASSWORD",
 CHANGELOG:
     1.0  First version (adprofiler.py 1.0.7, entra_graph_collector.py 1.0.5,
          adaudit.py 1.0.6).
-    1.1  For collector_daemon.py: resolve_secret(allow_prompt=False) never
-         prompts (a daemon started from a terminal must not stop and wait
-         for input), and read_secret_file() reads a secret from a file named
-         in a configuration file, with the same rules as <variable>_FILE.
+    1.1  resolve_secret(allow_prompt=False) never prompts, and
+         read_secret_file() reads a secret from a named file, with the same
+         rules as <variable>_FILE.
 """
 
 import getpass
@@ -146,11 +139,11 @@ def resolve_secret(what, option_value, option_name, env_var, prompt, required=Tr
     if not allow_prompt:
         raise SecretUnavailable(
             f"no {what} was given. Set {env_var}, or {env_file_var} to a file holding it "
-            f"(a mounted secret or /dev/fd/N)"
+            f"(first line)"
             + (f", or pass {option_name} (visible in process listings)" if option_name else ""))
     raise SecretUnavailable(
         f"no {what} was given and there is no terminal to prompt on. Set {env_var}, or "
-        f"{env_file_var} to a file holding it (a mounted secret or /dev/fd/N), or pass "
+        f"{env_file_var} to a file holding it (first line), or pass "
         f"{option_name} (visible in process listings)")
 
 

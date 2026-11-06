@@ -32,15 +32,11 @@ USB drive, secure file transfer, etc.):
 - `sysvol_collector.py` (used by `adprofiler.py --sysvol`)
 - `entra_graph_collector.py`
 - `adaudit.py`
-- `adaudit_push.py` (used by `adaudit.py --push`)
 - `run_lock.py` (used by all three scripts: one run at a time)
 - `secret_input.py` (used by all three scripts: passwords and secrets
   from the environment, a file or a prompt)
 - `schema_setup.py` (optional: creates or upgrades the database schema
   without `psql`, see section 5)
-- `collector_daemon.py`, `platform_client.py` and
-  `collector_daemon.example.toml` (optional: run everything unattended,
-  see section 9 and `DAEMON.md`)
 - `requirements.txt`
 - `schema_init.sql`
 - The `migrations/` folder (schema changes after v50; may be empty)
@@ -56,13 +52,9 @@ adprofiler/
     sysvol_collector.py
     entra_graph_collector.py
     adaudit.py
-    adaudit_push.py
     run_lock.py
     secret_input.py
     schema_setup.py
-    collector_daemon.py           (optional, section 9)
-    platform_client.py            (optional, section 9)
-    collector_daemon.example.toml (optional, section 9)
     requirements.txt
     schema_init.sql
     migrations/
@@ -118,8 +110,8 @@ function, and index all three scripts need. You'll be prompted for the
 PostgreSQL password unless it's already set via `PGPASSWORD` or a
 `.pgpass` file.
 
-**Alternatively, without `psql`** (and the way an unattended setup does
-it), run `schema_setup.py` from the same directory as the schema files:
+**Alternatively, without `psql`**, run `schema_setup.py` from the same
+directory as the schema files:
 
 ```
 python3 schema_setup.py --pg-host <your-postgres-host> --pg-user <your-postgres-user> \
@@ -150,7 +142,21 @@ the run lock, so no collection runs while the schema changes. Exit status:
 `0` current, `1` failed (the message says why and which version the database
 is at), `3` (with `--check`) setup needed, `75` run lock held, `130`
 interrupted. The PostgreSQL password comes from the same places as for the
-other scripts (section 7, "Passwords and secrets without a terminal").
+other scripts (section 7, "Passwords and secrets").
+
+**Backing up before an upgrade.** When new scripts bring schema migrations,
+add `--backup-dir <dir>` (needs `pg_dump` from the PostgreSQL 17 client
+tools). Before it migrates an existing database, `schema_setup.py` saves it
+to `<dir>/adprofiler-v<from>-before-v<to>-<UTC time>.dump` and keeps the
+newest 3 (`--backup-keep`). If the backup fails, nothing is migrated. To go
+back to a backup, restore it together with the scripts it belongs to:
+
+```
+psql -h <host> -U <user> -d <database> -c "DROP SCHEMA ad_intel CASCADE"
+pg_restore -h <host> -U <user> -d <database> --no-owner --exit-on-error <dir>/<file>.dump
+```
+
+Data collected since the backup is lost; the next run collects it again.
 
 ## 6. What you'll need before running anything
 
@@ -411,8 +417,8 @@ holds the run lock (see Troubleshooting). Add `--fail-on fail` (or
 `--fail-on warn`) to also get exit status `4` when there are open
 findings at that level.
 
-**Running the scripts unattended (a scheduler or supervising process):**
-run them one after another -- `adprofiler.py`, then
+**Running all three in one go** (for example from a shell script): run them
+one after another -- `adprofiler.py`, then
 `entra_graph_collector.py`, then `adaudit.py` -- and only start the next
 one when the previous one exited with status `0`. Any other exit status
 means that step did not complete, and its log file says why:
@@ -431,41 +437,34 @@ long time; every network request has its own timeout and retries, so a
 dead domain controller or Graph endpoint ends in a non-zero exit rather
 than a hang.
 
-For a supervising process or container (adprofiler.py 1.0.8,
-entra_graph_collector.py 1.0.6, adaudit.py 1.0.7):
+Stopping, logs and output (adprofiler.py 1.0.8, entra_graph_collector.py
+1.0.6, adaudit.py 1.0.7):
 
-- **Stopping a run:** SIGTERM (what `docker stop` and systemd send) is
-  handled like Ctrl-C: the run is rolled back or marked aborted and the
-  script exits `130`. A signal that arrives while a database statement or a
-  network call is running takes effect when it returns, so allow a generous
-  stop timeout (for example `stop_grace_period: 5m` in Docker Compose, or
-  `TimeoutStopSec=300` in systemd); a process killed outright leaves its run
-  marked as running.
+- **Stopping a run:** Ctrl-C (or SIGTERM, what `kill` sends) rolls the run
+  back or marks it aborted, and the script exits `130`. A signal that
+  arrives while a database statement or a network call is running takes
+  effect when it returns, so give it a moment; a process killed outright
+  (`kill -9`) leaves its run marked as running.
 - **Logs:** `--log-dir DIR` puts each run's log file in `DIR` (created if
   missing). `adprofiler.py` and `entra_graph_collector.py` always write one
   (default: the current directory); `adaudit.py` writes
   `adaudit-results_<timestamp>.log` only with `--log-dir`. The log files are
   never deleted by the scripts.
-- **Workbook:** `adaudit.py --no-excel` skips the Excel workbook (the
-  console report, the findings history and the push are unchanged);
-  `--report-dir DIR` says where it goes otherwise.
+- **Workbook:** `adaudit.py` always writes the Excel workbook;
+  `--report-dir DIR` says where it goes (default: the current directory).
 - **Schema:** `schema_setup.py` (section 5) brings the database to the
   scripts' schema version before a run.
 
-**Passwords and secrets without a terminal** (adprofiler.py 1.0.7,
-entra_graph_collector.py 1.0.5, adaudit.py 1.0.6): a scheduler, a container
-or a supervising process has no terminal to prompt on, and command-line
-options such as `--password` are visible to anyone who can list processes.
-Each secret is therefore taken from the first of these that is set:
+**Passwords and secrets** (adprofiler.py 1.0.7, entra_graph_collector.py
+1.0.5, adaudit.py 1.0.6): by default each script asks for its passwords at
+a hidden prompt. Command-line options such as `--password` also work but are
+visible to anyone who can list processes. Each secret is taken from the
+first of these that is set:
 
 1. its command-line option (works, with a warning);
 2. its environment variable;
 3. the file named by the same variable with `_FILE` appended -- the first
-   line of the file is used. This suits a Docker or Kubernetes secret
-   mounted as a file, and also a pipe: a supervising process can start the
-   script with, for example, `AD_BIND_PASSWORD_FILE=/dev/fd/3` and write the
-   password into file descriptor 3, so it never touches disk, a command
-   line or an environment;
+   line of the file is used;
 4. a hidden prompt, when the script is run from a terminal.
 
 | Secret | Option | Variable | File variable | Used by |
@@ -473,8 +472,6 @@ Each secret is therefore taken from the first of these that is set:
 | AD bind password (LDAP and SYSVOL) | `--password` | `AD_BIND_PASSWORD` | `AD_BIND_PASSWORD_FILE` | `adprofiler.py` |
 | Entra App Registration client secret | `--app-secret` | `ENTRA_APP_SECRET` | `ENTRA_APP_SECRET_FILE` | `entra_graph_collector.py` |
 | PostgreSQL password | `--pg-password` | `PGPASSWORD` | `PGPASSWORD_FILE` | all three |
-| FortifyData activation key | `--activation-key` | `FD_ACTIVATION_KEY` | `FD_ACTIVATION_KEY_FILE` | `adaudit.py --push` |
-| Older FortifyData API key | `--api-key` | `FD_API_KEY` | `--api-key-file` (option) | `adaudit.py --push` |
 
 - Set either the variable or its `_FILE` variant, not both (the script
   refuses to start).
@@ -490,90 +487,20 @@ Each secret is therefore taken from the first of these that is set:
 - Keep secret files readable only by the account that runs the scripts
   (`chmod 600`). An environment variable is visible to that account and to
   root (`/proc/<pid>/environ`) and is inherited by anything the script
-  starts; a file or a pipe is the better choice where it can be used.
+  starts; a file is the better choice where it can be used.
 
-Example, from a script or a scheduler:
+Example, from a shell script:
 
 ```
-export PGPASSWORD_FILE=/run/secrets/pg_password
-export AD_BIND_PASSWORD_FILE=/run/secrets/ad_bind_password
-export ENTRA_APP_SECRET_FILE=/run/secrets/entra_app_secret
+export PGPASSWORD_FILE=~/adprofiler/secrets/pg_password
+export AD_BIND_PASSWORD_FILE=~/adprofiler/secrets/ad_bind_password
+export ENTRA_APP_SECRET_FILE=~/adprofiler/secrets/entra_app_secret
 python3 adprofiler.py --dc-host dc01.corp.local --username svc_audit@corp.local --ssl \
     --pg-host db --pg-user adprofiler --pg-dbname adprofiler && \
 python3 entra_graph_collector.py --tenant-id <tenant> --app-id <app-id> \
     --domain-fqdn corp.local --pg-host db --pg-user adprofiler --pg-dbname adprofiler && \
 python3 adaudit.py --pg-host db --pg-user adprofiler --pg-dbname adprofiler
 ```
-
-**Optional -- push the results to FortifyData:**
-
-`adaudit.py` can send each run to the FortifyData platform instead of
-(or as well as) handing over the workbook. Add `--push`, with the
-**activation key** the FortifyData portal shows when the AD integration is
-enabled (one string, copied as is):
-
-```
-export FD_ACTIVATION_KEY_FILE=~/adprofiler/fd_activation_key.txt   # chmod 600
-python3 adaudit.py --pg-host <host> --pg-user <user> --pg-dbname <db> --push
-```
-
-- **The activation key is all that is needed** (adaudit.py 1.0.8): it
-  carries the license, the FortifyData company id and the region, which
-  picks the server. Give it as `FD_ACTIVATION_KEY`, as the file named by
-  `FD_ACTIVATION_KEY_FILE` (first line; a mounted secret or `/dev/fd/N`
-  also works), or `--activation-key` (visible in process listings). An
-  interactive run without one prompts for it. It is checked before
-  anything is sent, and never stored in the database or logged; the log
-  shows the company id and server it selected. `--api-url` /
-  `FD_API_URL` (`us`, `eu`, `test` or an `https://` URL) still overrides
-  the server; `--api-company-id` / `FD_COMPANY_ID`, if set, must match
-  the key's company.
-- **The older API key still works for now:** `--api-key`, `FD_API_KEY` or
-  `--api-key-file`, together with `--api-url` (`FD_API_URL`) and
-  `--api-company-id` (`FD_COMPANY_ID`). A warning says it is being
-  replaced. Give one or the other, not both.
-- **A refused key stops the push** and the runs stay queued (exit status
-  `5`): `401` means the key is unknown or malformed, or the AD integration
-  was switched off for the company in the portal; retrying will not help
-  until that is fixed.
-- **What is sent:** the run's findings (with their evidence), the
-  result of every check, the newest run's user / computer / group /
-  subnet inventory, and the list of checks. No passwords or other
-  secrets are ever collected, so none can be sent.
-- **The first push from a new installation is refused** until
-  FortifyData approves it. That is expected: `adaudit.py` says so,
-  exits normally, and keeps the runs queued; the next push after
-  approval sends them all.
-- **Other refusals stop the push** with a message that says what to
-  fix, and the runs stay queued: the key is not valid for the company id
-  (`KEY_NOT_SCOPED`: with an activation key, remove `--api-company-id`
-  / `FD_COMPANY_ID`; with an API key, check them and the key), the
-  domain was disabled by FortifyData (`DOMAIN_DISABLED`), or the
-  installation is not registered under this company id
-  (`DOMAIN_NOT_RESOLVED`: wrong company id, or registered under another
-  company -- contact FortifyData).
-- **Nothing is lost when the network is down.** Every complete run is
-  queued in the database and pushed, oldest first, by the next
-  `--push` (or `--push-only`, which pushes without evaluating -- useful
-  in a daily job after a failed collection). Exit status `5` means the
-  push did not finish; the results are still recorded locally.
-- `--push-dry-run <dir>` writes exactly what would be sent to `<dir>`
-  as JSON files and sends nothing (no credentials needed) -- a good way
-  to review what leaves the network.
-- Runs limited with `--plugin-id`, `--category` or `--framework` are
-  diagnostic: they are never pushed and no longer change the findings
-  history.
-- If the platform keeps rejecting one run, `--push-skip <run id>` (the
-  id is in the error message) lets the later runs go.
-- To drop every queued run instead (for example a test database whose
-  history should never reach the platform), mark them all skipped while
-  no script is running:
-  `UPDATE ad_intel.control_evidence_run SET push_status = 'skipped',
-  last_push_error = 'skipped by hand' WHERE push_status = 'pending';`
-  Local findings and history are unchanged. Later runs are labelled
-  relative to the last run the platform received, so it still learns
-  which findings were fixed in the meantime; for a clean start, use a new
-  database instead.
 
 ## 8. Reviewing results together
 
@@ -586,32 +513,6 @@ Once all three steps are complete, you'll have (in `~/adprofiler`):
 Send these back for review -- the Excel workbook is the main thing
 worth going through together; the two log files are there mainly for
 troubleshooting if anything looked wrong during collection.
-
-## 9. Running unattended: collector_daemon.py
-
-Sections 5 to 8 run the scripts by hand. `collector_daemon.py` runs them
-for you, every day, with no terminal: schema setup, AD collection, Entra
-collection, evaluation and (with an activation key) the push. It keeps
-running between runs, reports its health every 5 minutes, and logs
-everything. It needs Python 3.11 or later.
-
-```
-cp collector_daemon.example.toml collector.toml     # then edit it
-python3 collector_daemon.py --config collector.toml --check-config
-python3 collector_daemon.py --config collector.toml --once   # one run now
-python3 collector_daemon.py --config collector.toml          # the daemon
-```
-
-In local mode (the default) the AD and Entra settings and the schedule are
-in `collector.toml`. Each secret is a file named there
-(`password_file`, `client_secret_file`) or an environment variable, never
-inline. In FortifyData mode the platform supplies them, with the health
-check, from what the client enters in the portal. See `DAEMON.md` for the
-design, every setting, the health report and how to run it under systemd.
-
-**In containers** (the intended way for a client installation): the
-collector image and a PostgreSQL 17 container under docker compose, set up
-by `docker/install.sh`. See `CONTAINER.md`.
 
 ## Troubleshooting
 
@@ -653,8 +554,7 @@ by `docker/install.sh`. See `CONTAINER.md`.
   `migrations/` above the database's version, in order. A database
   older than v50 cannot be upgraded: create a new, empty database and
   run `schema_setup.py` against it. When a migration needs one
-  `adprofiler.py --full-rescan`, `schema_setup.py` says so (the daemon
-  does it by itself). Never
+  `adprofiler.py --full-rescan`, `schema_setup.py` says so. Never
   re-run `schema_init.sql` against a database that already has data in
   it -- that file is for a brand-new, empty database only, and can fail
   or leave things in a mixed state against one that isn't.

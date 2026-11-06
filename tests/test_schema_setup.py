@@ -217,7 +217,7 @@ class SchemaSetup(unittest.TestCase):
         self.assertIn("keep-me.txt", names)
         self.assertIn("adprofiler-v49-before-v50-20200103T000000Z.dump", names)
         dump = next(backups.glob("adprofiler-v50-before-v53-*.dump"))
-        # Restore as CONTAINER.md describes: drop the schema, pg_restore.
+        # Restore as docs/SETUP.md describes: drop the schema, pg_restore.
         self.assertEqual(self.version(), 53)
         conn = psycopg2.connect(host=HOST, port=PORT, user=USER, password=PASSWORD,
                                 dbname=self.db)

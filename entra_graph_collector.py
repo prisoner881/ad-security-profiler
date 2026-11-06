@@ -10,8 +10,7 @@ CHANGELOG:
             the name from when it read only mail attributes. The
             permission list is now kept in docs/PERMISSIONS.md (client-facing
             setup of the App Registration). No behaviour change.
-    1.0.6 - For running under a scheduler or container daemon: SIGTERM (what
-            `docker stop`, systemd and a supervising process send) is handled
+    1.0.6 - SIGTERM (what `kill` and service managers send) is handled
             like Ctrl-C -- the partial-run report says which tables were
             refreshed, exit 130 -- instead of killing the process outright.
             New --log-dir DIR puts the log file there (created if missing;
@@ -19,9 +18,7 @@ CHANGELOG:
 
     1.0.5 - Secrets without a terminal (secret_input.py). The client secret
             is taken from --app-secret, else ENTRA_APP_SECRET, else the file
-            named by ENTRA_APP_SECRET_FILE (first line; a mounted Docker or
-            Kubernetes secret, or /dev/fd/N for a pipe from a supervising
-            process), else a hidden prompt when there is a terminal; the
+            named by ENTRA_APP_SECRET_FILE (first line), else a hidden prompt when there is a terminal; the
             PostgreSQL password likewise from --pg-password, PGPASSWORD,
             PGPASSWORD_FILE or the prompt. Without a terminal, a missing
             client secret stops the run with exit 1 and a message naming
@@ -760,8 +757,8 @@ INTERRUPTED_BY = "Ctrl-C"
 
 
 def handle_sigterm(signum, frame):
-    """[v1.0.6] SIGTERM -- what `docker stop`, systemd and a supervising process
-    send -- is handled like Ctrl-C: the step in progress is abandoned, the
+    """[v1.0.6] SIGTERM -- what `kill` and service managers send -- is handled
+    like Ctrl-C: the step in progress is abandoned, the
     partial-run report says which tables were refreshed, exit 130. It used to
     kill the process outright with no report. A repeated SIGTERM is ignored so
     the report can be written."""

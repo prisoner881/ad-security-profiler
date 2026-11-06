@@ -359,8 +359,8 @@ COMMENT ON FUNCTION ad_intel.check_scd2_integrity() IS
     '(one open row per client and object_guid) and the edge tables (one open row per client and '
     'the key adprofiler.py diffs that table on). Should always return no rows; a row means a loader '
     'bug (a prior row not closed before a new one was opened). natural_key is <client_id>:<key>, '
-    'a NULL key column shown as -. Callable from any search_path (schema v50); collector_daemon.py '
-    'runs it after every collection run.';
+    'a NULL key column shown as -. Callable from any search_path (schema v50); run it after a '
+    'collection to check the history.';
 
 
 --
@@ -1179,7 +1179,7 @@ CREATE TABLE ad_intel.control_catalog (
 -- Name: COLUMN control_catalog.remediation; Type: COMMENT; Schema: ad_intel; Owner: -
 --
 
-COMMENT ON COLUMN ad_intel.control_catalog.remediation IS 'General remediation guidance for this control, synced from the plugin''s own "remediation" field on every adaudit.py run. Not shown in console output by design (would clutter it) -- present for the eventual per-finding API push and for direct querying meanwhile.';
+COMMENT ON COLUMN ad_intel.control_catalog.remediation IS 'General remediation guidance for this control, synced from the plugin''s own "remediation" field on every adaudit.py run. Not shown in console output by design (would clutter it) -- present for direct querying.';
 
 
 --
@@ -5495,7 +5495,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS control_evidence_run_run_uuid_uidx
     ON ad_intel.control_evidence_run (run_uuid) WHERE run_uuid IS NOT NULL;
 CREATE INDEX IF NOT EXISTS control_evidence_run_push_idx
     ON ad_intel.control_evidence_run (client_id, push_status, evidence_run_id);
--- The push reconstructs a run's finding set from history by run id.
+-- A run's finding set can be reconstructed from history by run id.
 CREATE INDEX IF NOT EXISTS idx_cef_client_run_from
     ON ad_intel.control_evidence_fact (client_id, evidence_run_id_valid_from);
 CREATE INDEX IF NOT EXISTS idx_cef_client_run_to
@@ -5505,23 +5505,18 @@ COMMENT ON COLUMN ad_intel.control_evidence_run.status IS
     '''running'' from the moment adaudit.py starts evaluating; ''complete'' once every selected '
     'plugin has run and its results, the roster, and retired / stale-plugin closures are '
     'recorded (a run in which some plugins errored is still complete -- the roster says which); '
-    '''aborted'' when the run was interrupted or failed before that. A run left ''running'' by a '
-    'crash is never pushed. (schema v43)';
+    '''aborted'' when the run was interrupted or failed before that; a crash can leave it '
+    '''running''. (schema v43)';
 COMMENT ON COLUMN ad_intel.control_evidence_run.is_filtered IS
     'TRUE for a diagnostic run limited by --plugin-id / --category / --framework. Since '
-    'adaudit.py 0.10.0 such runs do not write to control_evidence_fact and are never pushed. (schema v43)';
+    'adaudit.py 0.10.0 such runs do not write to control_evidence_fact. (schema v43)';
 COMMENT ON COLUMN ad_intel.control_evidence_run.run_uuid IS
-    'The run''s identity in the FortifyData API: UUIDv5 of client_id and evidence_run_id, set when '
-    'the run is created and never regenerated, so every retry (or a re-push after a database '
-    'restore) re-sends the same run. NULL for legacy runs. (schema v43)';
+    'Unused in the standalone edition (always NULL). (schema v43)';
 COMMENT ON COLUMN ad_intel.control_evidence_run.push_status IS
-    '''pending'' (not yet accepted by the API), ''pushed'' (the API accepted the run as COMPLETE), '
-    '''partial'' (the API closed it PARTIAL: declared and received counts disagreed; re-sent under '
-    'the same run_uuid on the next push), ''skipped'' (never pushed: filtered or aborted run, or '
-    'skipped by hand with --push-skip), ''expired'' (older than the API''s retention window when '
-    'its turn came), ''legacy'' (recorded before schema v43, no roster). (schema v43)';
+    'Unused in the standalone edition, which sends results nowhere: every run is recorded '
+    '''skipped''. (schema v43)';
 COMMENT ON COLUMN ad_intel.control_evidence_run.push_server_run_id IS
-    'The API''s own run id for this run (RunResponse.run_id), for cross-referencing. (schema v43)';
+    'Unused in the standalone edition (always NULL). (schema v43)';
 
 CREATE TABLE IF NOT EXISTS ad_intel.control_evidence_run_plugin (
     evidence_run_id  bigint NOT NULL REFERENCES ad_intel.control_evidence_run (evidence_run_id)
@@ -5550,8 +5545,7 @@ CREATE TABLE IF NOT EXISTS ad_intel.push_catalogue_state (
     pushed_at     timestamptz NOT NULL
 );
 COMMENT ON TABLE ad_intel.push_catalogue_state IS
-    'The plugin catalogue last accepted by each API server: fingerprint = sha256 of the sorted '
-    'plugin_id:version list. adaudit.py re-sends the catalogue only when it differs. (schema v43)';
+    'Unused in the standalone edition (always empty). (schema v43)';
 
 
 -- ============================================================================

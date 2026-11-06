@@ -1,333 +1,59 @@
 # Release Notes
 
-## Development branch (not yet released)
+## Standalone edition (2026-11-06)
 
-Changes on the `development` branch, which collects the work towards
-running the scripts unattended under a supervising process (scheduled runs
-in a container). They are not in `release` yet.
+The `standalone` branch: the scripts are run by hand, interactively, and the
+results are the console report and an Excel workbook. Nothing is sent
+anywhere.
 
-### Image pipeline: name, version, both architectures, backups (2026-11-05)
+### Components
 
-collector_daemon.py 1.2.0, schema_setup.py 1.3, image 1.2.0. Schema
-unchanged (v50).
+| Component | Version |
+|---|---|
+| `adprofiler.py` (Active Directory collector) | 1.0.10 |
+| `sysvol_collector.py` (used by `adprofiler.py --sysvol`) | 1.2 |
+| `entra_graph_collector.py` (Entra ID collector) | 1.0.7 |
+| `adaudit.py` (plugin runner and report writer) | 1.0.11+standalone |
+| `schema_setup.py` (creates or upgrades the schema) | 1.3 |
+| `run_lock.py` (one run at a time) | 1.1 |
+| `secret_input.py` (passwords from a prompt, an option or the environment) | 1.1 |
+| PostgreSQL schema (`schema_init.sql`) | v50 |
 
-- **The image is `fortifydata/collector-ad`** on Docker Hub, for
-  `linux/amd64` and `linux/arm64`:
-  - releases `vX.Y.Z` and `latest`;
-  - development builds `vX.Y.Z-dev.N` and `develop`.
-  `docker/compose.yaml` and `install.sh` default to `v1.2.0`.
-- **The image reports the version it was built as.**
-  - CI passes `COLLECTOR_VERSION` (`1.2.0`, or `1.2.0-dev.17`).
-  - The daemon reports it as the health report's `version`, in the
-    User-Agent and in `--version`. Outside an image it reports its own
-    `VERSION`.
-  - A `v` in `targetVersion` is ignored when comparing.
-- **CI** (`.github/workflows/collector-image.yml`, for FortifyData's
-  repository):
-  - runs the tests;
-  - builds both architectures and smoke-tests each one;
-  - pushes development builds from `development` and releases from a
-    `vX.Y.Z` tag, which must match `VERSION`.
-  The release process is in `MAINTAINERS.md`.
-- **A backup before every schema migration.**
-  - `schema_setup.py --backup-dir` dumps the database with `pg_dump`
-    before migrating it, to `<state_dir>/backups/` (mode `0600`). The
-    newest 3 are kept.
-  - If the backup fails, nothing is migrated.
-  - The image now includes the PostgreSQL 17 client tools.
-  - The restore steps are in `CONTAINER.md`, section 5.
-- **Tests** (`tests/`):
-  - activation keys;
-  - the schedule across daylight-saving changes;
-  - the health-check configuration mapping;
-  - the image version;
-  - every plugin loading;
-  - with a PostgreSQL 17 server, the schema chain: fresh, upgrade with
-    skipped versions, the refusals, the backup and its restore, and an
-    upgraded schema compared with a fresh one.
+### Changes since the 2026-11-01 plugin update
 
-### The platform's real collector API (2026-11-05)
+- **The Excel workbook is always written.** `adaudit.py` no longer sends
+  results anywhere: the push and all its options, and `--no-excel`, are
+  removed, and so is exit status 5. Evaluation runs are recorded with
+  `push_status` 'skipped'; the schema's other push columns are unused.
+- **Passwords** come from a hidden prompt by default. The command-line
+  option, the environment variable and the `_FILE` variant (a file holding
+  the password on its first line) also work (`SETUP.md`, section 7).
+- **Stopping cleanly:** Ctrl-C or SIGTERM rolls the run back or marks it
+  aborted, and the script exits 130.
+- **Logs and reports:** `--log-dir` puts each script's log file in a chosen
+  directory; `adaudit.py --report-dir` says where the workbook goes.
+- **A failed Entra collection need not hold up the AD results:**
+  `adaudit.py --skip-entra` makes the Entra checks NOT ASSESSED instead of
+  evaluating older Entra data as current. Their open findings stay open.
+- **The database integrity check works** (schema v50):
+  `check_scd2_integrity()` covers all 36 history tables; it failed for
+  every caller before, and reported false ACL duplicates.
+- **`schema_setup.py`** creates or upgrades the schema without `psql`.
+  `schema_init.sql` is the v50 baseline; later changes are migrations in
+  `migrations/`, applied in order. With `--backup-dir` it saves the database
+  with `pg_dump` before migrating it (`SETUP.md`, section 5).
+- **`PERMISSIONS.md`** is the setup guide for the client's administrators:
+  the AD service account, the Entra ID App Registration and network access.
+- **Documentation** is in `docs/`.
+- **Tests** (`tests/`): every plugin loads, and the schema chain is tested
+  against PostgreSQL 17. CI runs them on every push and pull request.
+- `tzdata` is no longer a requirement.
 
-collector_daemon.py 1.1.0, platform_client.py 2.0, adaudit.py 1.0.11
-(adaudit_push.py), image 1.1.0. Schema unchanged (v50). This follows the
-platform developer's documents 04 (answers) and 05 (configuration
-contract), and their follow-up answers.
+### Upgrading
 
-- **Activation key environments.**
-  - `e` is the platform's environment. Only `prod` (US production; `us` is
-    never issued), `eu` and `test` have an API server a collector can use.
-    **Before this change a real production key would have failed.**
-  - A key without `e` is refused. Any other environment, or a bare license
-    key, needs the API URL given explicitly.
-  - `--api-url` takes `prod`, `eu` and `test` as shortcuts.
-- **Activation and lease** use the real paths
-  (`/api/v1/integration/collector/activations/{instanceId}`):
-  - no request body;
-  - renewal answers `202` (previously treated as a failure);
-  - the lease length comes from `leaseExpiryDate`;
-  - a clock more than 2 minutes off the platform's is warned about.
-- **The configuration comes with the health check** (`POST
-  /api/v1/integration/collector/health`, every 5 minutes):
-  - the flat fields of document 05, `ldapPort` used as given;
-  - a portal change applies within 5 minutes;
-  - `configVersion` and the image `version` go back in the health report;
-  - nulls mean "not configured yet": no run, keep polling.
-- **Secrets stay in memory.**
-  - They arrive over TLS only, as the platform decided: the key pair and
-    the secret encryption are removed.
-  - The last configuration is cached on disk without its secrets. A
-    restart during a platform outage therefore waits for the platform
-    before running.
-- **Collector status:**
-  - `EXPIRED`, or a `404` from the health check (no collector, or
-    deleted): no scans, keep reporting;
-  - `FAILED`: ignored.
-- **Updates:** a newer `targetVersion` is logged and reported, together with
-  `autoUpgrade` and `imageName`. Installing it is the updater's job, still
-  to be built.
-- **Schedule offset:** scheduled runs start a per-installation random 0–30
-  minutes after the set time, so clients do not all start together.
-
-### Schema baseline and `migrations/` (2026-11-05)
-
-`schema_setup.py` 1.2, collector_daemon.py 1.0.4 (image 1.0.4). Schema
-unchanged (v50).
-
-- **The schema is now a frozen baseline plus a migration chain.**
-  - `schema_init.sql` is the v50 baseline and is never edited again.
-  - Every later change is one file in the new `migrations/` folder:
-    `schema_migration_v51.sql`, `v52`, and so on. It is empty for now.
-- **`schema_setup.py` plays the chain back:**
-  - a new database gets the baseline, then every migration in order;
-  - an existing database (v50 or later) gets every migration above its
-    version, so a client who skipped updates (v50 to v55) is brought up in
-    one run;
-  - it refuses a gap in the chain, a database older than v50, and a
-    migration file outside `migrations/`.
-- **Full rescans:** a migration that needs one says so in its header. The
-  daemon then runs the next collection with `--full-rescan`, once.
-- The rules for writing a migration are in `MAINTAINERS.md` ("Schema
-  changes").
-
-### Schema migration files removed (2026-11-05)
-
-`schema_setup.py` 1.1, adprofiler.py 1.0.10, adaudit.py 1.0.10,
-collector_daemon.py 1.0.3 (no change of its own; image 1.0.3). Schema
-unchanged (v50).
-
-- **`schema_migration_v30.sql` to `v50.sql` are removed.** They served
-  testing; a production installation starts from an empty database, which
-  `schema_init.sql` creates at v50.
-- **`schema_setup.py` 1.1:**
-  - It takes its target version from `schema_init.sql`.
-  - Migration files are optional. A later schema change ships as
-    `schema_migration_v51.sql` (and onward), and it applies those to an
-    installed database in order, as before.
-  - **A database older than v50 can no longer be upgraded.** For such a
-    database it says to create a new, empty one. This applies to test
-    databases from before this change; in the containers, use
-    `docker compose down -v`, then `up -d`.
-- **adprofiler.py and adaudit.py** no longer name migration files in their
-  messages. For a database that is behind, they say to run
-  `schema_setup.py`. For missing partitions, adprofiler.py says to run
-  `SELECT ad_intel.run_partition_maintenance();` as the schema owner.
-
-### Documentation moved to `docs/` (2026-11-05)
-
-All documents (`SETUP.md`, `RELEASE_NOTES.md`, `PERMISSIONS.md`,
-`DAEMON.md`, `CONTAINER.md`, `COMPLIANCE_TAGS.md`, `MAINTAINERS.md` and
-`changelog.txt`) are now in `docs/`. The scripts' messages and comments
-point there. The collector image carries the whole folder. No code
-change.
-
-### Entra failures, integrity check, permissions guide (2026-11-05)
-
-adprofiler.py 1.0.9, adaudit.py 1.0.9, entra_graph_collector.py 1.0.7,
-collector_daemon.py 1.0.2, schema v50 (`schema_migration_v50.sql`), new
-`PERMISSIONS.md`. Collector image 1.0.2.
-
-- **A failed Entra collection no longer blocks the AD results.** The daemon
-  evaluates and pushes the AD data, and the run ends with a warning.
-  - **New option:** `adaudit.py --skip-entra` makes the Entra checks NOT
-    ASSESSED and does not run them against the older Entra data kept in
-    the database. Their open findings stay open.
-  - **The bug it avoids:** evaluating anyway would have assessed the last
-    successful Entra collection as if it were current. adaudit.py already
-    handled SYSVOL data this way.
-  - **When Entra is not configured,** the daemon also passes
-    `--skip-entra`.
-- **The database integrity check works.**
-  - **What it does:** `check_scd2_integrity()` finds objects and edges with
-    more than one current row, which would be a collector bug.
-  - **What was wrong:** it failed for every caller (unqualified table
-    names), its ACL key was incomplete (false duplicates), and it covered 7
-    of the 36 history tables.
-  - **Schema v50** fixes all three. The daemon runs the check after every
-    collection and reports any duplicate in its health report.
-  - adprofiler.py 1.0.9 and adaudit.py 1.0.9 require v50, which the daemon
-    (`schema_setup.py`) applies automatically.
-- **`PERMISSIONS.md`** is the client's setup guide:
-  - the AD service account (`adprofiler.py`): what it needs, and how to
-    grant the two rights an ordinary domain user lacks;
-  - the Entra ID App Registration: portal steps, a PowerShell alternative,
-    every Graph permission and what it unlocks;
-  - network access.
-- **adprofiler.py 1.0.9 says when those two rights are missing.**
-  - AD answers an account that may not list `CN=Deleted Objects` with an
-    empty list, not an error. So 0 visible deleted objects now logs a
-    warning, and 0 visible fine-grained password policies logs a note.
-  - The capability probe no longer names a "View Deleted Objects"
-    extended right, which does not exist.
-  - SETUP.md no longer suggests dropping `--ssl`: plain LDAP sends the
-    password unencrypted and fails wherever LDAP signing is required.
-- `entra_graph_collector.py` 1.0.7 is named for what it collects ("Microsoft
-  Entra ID collector", no longer "email collector"). `schema_init.sql`'s
-  header is brought up to date.
-
-Upgrading: replace the scripts; `schema_setup.py` (or the daemon) applies v50.
-Without the daemon: `psql -f schema_migration_v50.sql`, or run
-`schema_setup.py`.
-
-### Container packaging (2026-11-05)
-
-collector_daemon.py 1.0.1; new `Dockerfile`, `.dockerignore`, `docker/`
-(`compose.yaml`, `collector.toml`, `install.sh`) and `CONTAINER.md`. The
-scripts, the schema and the plugins are unchanged.
-
-- **Two containers under docker compose:**
-  - the collector (`collector_daemon.py`, the scripts and plugins; Python
-    3.13);
-  - PostgreSQL 17, on an internal network with no outside access and no
-    published port.
-- **Hardened collector container:** non-root, read-only root filesystem,
-  no capabilities, `no-new-privileges`. Secrets are mounted from files,
-  logs are capped, and the healthcheck uses `--healthcheck`. The 5-minute
-  stop grace period lets a running step stop cleanly and the lease be
-  released.
-- **`docker/install.sh`** creates the installation directory:
-  configuration, secret files (it generates the database password), data
-  directories and `.env`. Run again for an upgrade, it never overwrites the
-  configuration or a secret.
-- **collector_daemon.py 1.0.1:** `--check-config` works while the daemon
-  runs (it no longer takes the one-process lock, and logs only to standard
-  error).
-
-### Unattended collector daemon (2026-11-05)
-
-New `collector_daemon.py` 1.0.0 and `platform_client.py` 1.0;
-`secret_input.py` 1.1; new `collector_daemon.example.toml` and `DAEMON.md`;
-`tzdata` added to `requirements.txt`. The scripts, the schema and the
-plugins are unchanged.
-
-- **`collector_daemon.py`** runs a client installation unattended. Once a
-  day, at a set time in a set time zone, it runs `schema_setup.py`,
-  `adprofiler.py`, `entra_graph_collector.py` (when configured) and
-  `adaudit.py` (with `--push` when an activation key is configured), each as
-  a child process. It never exits by itself. It reports its health every 5
-  minutes in `status.json` (and to the platform), and logs every step's
-  output.
-- **Secrets reach the scripts through pipes** (`<VAR>_FILE=/dev/fd/N`),
-  never on a command line or in a child's environment, and are never
-  logged or written to disk by the daemon.
-- **Failures are handled, not retried blindly.**
-  - A failed collection skips the evaluation and still pushes earlier runs.
-  - A failed run waits for the next scheduled time, unless its
-    configuration changes: a new password is tried at once, and a wrong one
-    is not retried into an account lockout.
-  - A held run lock postpones the run by 5 minutes.
-  - A failed push is retried hourly.
-  - A missed run is caught up on start.
-- **Two modes.**
-  - Local: the configuration and secrets come from the daemon's own TOML
-    file and secret files. Works today, including the push.
-  - FortifyData: lease, configuration with encrypted secrets, and health
-    through the platform. Its endpoints are provisional until the platform
-    developer specifies them; tested against a mock only.
-- `secret_input.py` 1.1: `resolve_secret(..., allow_prompt=False)` and
-  `read_secret_file()`, for the daemon. The scripts behave as before.
-
-### Push authentication by activation key (2026-11-05)
-
-adaudit.py 1.0.8, `adaudit_push.py` (contract 1.0, unchanged). No schema or
-plugin change.
-
-- **The push authenticates with the activation key** the client copies from
-  the FortifyData portal (the platform's documents 01 and 03): give it as
-  `FD_ACTIVATION_KEY`, the file named by `FD_ACTIVATION_KEY_FILE`, or
-  `--activation-key`. It is checked before anything is sent, sent as
-  `Authorization: LicenseKey <license key>`, and supplies the company id for
-  the request paths and the environment that picks the server. Request
-  paths, payloads and batching are unchanged.
-- Two details are assumptions until the platform developer confirms them:
-  an activation key without an environment means `us`, and both base64
-  alphabets (with or without padding) are accepted.
-- **A 401** (key unknown or malformed, or the AD integration switched off)
-  stops the push with a message saying so; the runs stay queued (exit 5).
-  With the activation key, a 403 without a reason is a refusal, no longer
-  read as "waiting for approval" (kept for the older API key only).
-- **The older API key still works**, with a warning, until the platform
-  stops accepting it. An interactive run without any key now prompts for the
-  activation key.
-
-### Ready for a supervising process (2026-11-05)
-
-adprofiler.py 1.0.8, entra_graph_collector.py 1.0.6, adaudit.py 1.0.7, new
-`schema_setup.py` 1.0. No schema change, no plugin change.
-
-- **SIGTERM is handled like Ctrl-C** in all three scripts (`docker stop`,
-  systemd and a supervising process send it): adprofiler.py rolls back and
-  marks its run aborted, entra_graph_collector.py reports which tables were
-  refreshed, adaudit.py marks its evaluation run aborted (never pushed); all
-  exit `130`. Before, the process was killed outright and its run row stayed
-  "running". A signal that arrives during a database statement or network
-  call takes effect when it returns: allow a generous stop timeout.
-- **`--log-dir DIR`** on all three scripts puts the log file in `DIR`.
-  `adaudit.py` now writes a log file too, but only with `--log-dir`.
-- **`adaudit.py --no-excel`** skips the workbook; **`--report-dir DIR`** says
-  where it goes.
-- **`schema_setup.py`** creates the schema on an empty database or applies
-  the missing migrations in order, without `psql`: each file is applied
-  completely or not at all, and its recorded version is checked. Tested
-  against PostgreSQL 17: a fresh install and an upgrade from v46 produce
-  identical schemas. See `SETUP.md`, section 5.
-
-Upgrading: replace the scripts and add `schema_setup.py` (optional; the
-scripts do not need it to run).
-
-### Secrets without a terminal (2026-11-05)
-
-adprofiler.py 1.0.7, entra_graph_collector.py 1.0.5, adaudit.py 1.0.6, new
-`secret_input.py` 1.0. No schema change, no plugin change.
-
-The AD bind password, the Entra ID client secret and the PostgreSQL
-password came only from a command-line option or an interactive prompt.
-Without a terminal the prompt failed with a traceback, which left the
-options, and those are visible in process listings and in a container's
-recorded command. Each secret is now taken from the first of:
-
-1. its option (`--password`, `--app-secret`, `--pg-password`), with a
-   warning, as before;
-2. its environment variable: `AD_BIND_PASSWORD`, `ENTRA_APP_SECRET`,
-   `PGPASSWORD`;
-3. the file named by `AD_BIND_PASSWORD_FILE`, `ENTRA_APP_SECRET_FILE` or
-   `PGPASSWORD_FILE` (first line): a mounted Docker or Kubernetes secret,
-   or `/dev/fd/N` for a pipe from a supervising process, so the secret
-   never touches disk, a command line or an environment;
-4. a hidden prompt, when there is a terminal.
-
-Without a terminal, a missing bind password or client secret stops the
-script with exit status 1 and a message naming the variables. A missing
-PostgreSQL password is left to the PostgreSQL client library (`~/.pgpass`,
-`PGPASSFILE`, or a password-less method). Setting a variable and its
-`_FILE` variant together is refused. `PGPASSWORD` was ignored before (the
-scripts always prompted). The logs say where each secret came from, never
-the secret. The FortifyData API key is unchanged (`--api-key`,
-`FD_API_KEY`, `--api-key-file`, which also accepts `/dev/fd/N`, or the
-prompt). See `SETUP.md`, "Passwords and secrets without a terminal".
-
-Upgrading: replace the scripts and **add `secret_input.py`** next to them;
-all three import it and fail to start without it. Interactive use is
-unchanged.
+Replace the scripts and `docs/`, and run `schema_setup.py` (it applies v50
+to an older database, or says to create a new one when the database is older
+than the v50 baseline allows).
 
 ## Plugin update (2026-11-01): security bulletin review
 
@@ -395,7 +121,6 @@ v48, v49); no plugin added or removed.
 | `sysvol_collector.py` (used by `adprofiler.py --sysvol`) | 1.2 |
 | `entra_graph_collector.py` (Entra ID collector) | 1.0.4 |
 | `adaudit.py` (plugin runner and report writer) | 1.0.5 |
-| `adaudit_push.py` (ingest API push contract) | contract 1.0 |
 | `run_lock.py` (one run at a time; new) | 1.1 |
 | PostgreSQL schema (`schema_init.sql`) | v49 |
 
@@ -433,7 +158,7 @@ v49):
   primary-group flag; 11027 uses the real time of the previous Entra
   collection; a delegated grant whose resource could not be looked up no
   longer churns the history; a changed STIG or tool reference is recorded;
-  the push sends a reopened finding with the date it reopened.
+  a reopened finding is dated from when it reopened.
 - **Plugin accuracy:** 9035 reads the KDC armoring level
   (`CbacAndArmorLevel`); 9020 and 9040 ignore the disabled half of a GPO;
   5020 accepts SYSVOL paths through the NetBIOS or a DC name; 1001 and 1002
@@ -489,7 +214,7 @@ schema v48):
   `.myOrganization`; 2024, 2025, 2027 and 2028 match "Windows Server(R)
   2008" hosts.
 - **adaudit.py counts the open findings of NOT ASSESSED plugins.** They are
-  kept open and pushed, but were left out of `--fail-on`, the console report
+  kept open, but were left out of `--fail-on`, the console report
   and the compliance sheets; they are now listed there, marked as kept from
   the last assessment.
 
@@ -525,10 +250,6 @@ Code review fixes, high severity (2026-10-30, adprofiler.py 1.0.3, adaudit.py
   locations, platforms, risk levels, a device filter or authentication
   flows no longer counts; the standard "Block legacy authentication" policy
   had been taken as MFA coverage for admin portals and excluded users.
-- **Push: findings fixed during a skipped run are now reported as fixed.**
-  Change labels are relative to the last run the platform received, not a
-  skipped or expired one, which had left such findings open on the platform
-  for good.
 
 Earlier 1.0.x changes:
 
@@ -559,12 +280,10 @@ Earlier 1.0.x changes:
 
 ### Exit status
 
-For a scheduler or supervising process: every script exits non-zero when it
-did not complete. adprofiler.py and entra_graph_collector.py: 0 success, 1
+Every script exits non-zero when it did not complete. adprofiler.py and entra_graph_collector.py: 0 success, 1
 failed, 75 not started (another run holds the run lock), 130 interrupted.
 adaudit.py: 0 complete, 1 fatal error, 3 complete but a plugin errored, 4
-findings at or above `--fail-on`, 5 push failed, 75 not started, 130
-interrupted.
+findings at or above `--fail-on`, 75 not started, 130 interrupted.
 
 ### Upgrading from 1.0 or an earlier 1.0.x
 
@@ -585,8 +304,8 @@ and adaudit.py 1.0.5 refuse to run against an older schema. No
 
 ## Release 1.0 (2026-10-22)
 
-The first release of ad-security-profiler, made from the `api-push` branch
-(since merged into `release`, the default branch) at the point where Entra ID
+The first release of ad-security-profiler, made from the development line
+(since merged into `release`) at the point where Entra ID
 coverage waves 1 and 2 were merged and verified against a live tenant.
 
 ### Components
@@ -597,7 +316,6 @@ coverage waves 1 and 2 were merged and verified against a live tenant.
 | `sysvol_collector.py` (used by `adprofiler.py --sysvol`) | 1.1 |
 | `entra_graph_collector.py` (Entra ID collector) | 1.0.0 |
 | `adaudit.py` (plugin runner and report writer) | 1.0.0 |
-| `adaudit_push.py` (ingest API push contract) | contract 1.0 |
 | PostgreSQL schema (`schema_init.sql`) | v46 |
 
 The version numbers change from adprofiler.py 0.9.1, entra_graph_collector.py
