@@ -16,7 +16,7 @@ anywhere.
 | `adaudit.py` (plugin runner and report writer) | 1.0.11+standalone |
 | `schema_setup.py` (creates or upgrades the schema) | 1.3 |
 | `run_lock.py` (one run at a time) | 1.1 |
-| `secret_input.py` (passwords from a prompt, an option or the environment) | 1.1 |
+| `secret_input.py` (passwords from a prompt, an option or the environment) | 1.1+standalone |
 | PostgreSQL schema (`schema_init.sql`) | v50 |
 
 ### Changes since the 2026-11-01 plugin update

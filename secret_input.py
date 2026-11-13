@@ -46,13 +46,15 @@ CHANGELOG:
     1.1  resolve_secret(allow_prompt=False) never prompts, and
          read_secret_file() reads a secret from a named file, with the same
          rules as <variable>_FILE.
+    1.1+standalone  Both 1.1 additions are removed: only the unattended
+         daemon used them, and the standalone edition has none.
 """
 
 import getpass
 import os
 import sys
 
-VERSION = "1.1"
+VERSION = "1.1+standalone"
 
 # A secret file larger than this is refused: a secret is a short string, and
 # a mistaken path (a log, a disk image) should not be read into memory.
@@ -68,14 +70,6 @@ NOT_GIVEN = "none"
 class SecretUnavailable(Exception):
     """A secret could not be obtained. The message says what to set; it never
     contains the secret."""
-
-
-def read_secret_file(path, described_as):
-    """[1.1] First line of the file (or pipe) at path, without its line
-    ending. described_as names where the path came from, for messages
-    ("the file named by [database] password_file"). Raises
-    SecretUnavailable."""
-    return _read_secret_file(described_as, path, prefix="")
 
 
 def _read_secret_file(env_file_var, path, prefix="the file named by "):
@@ -102,8 +96,7 @@ def _read_secret_file(env_file_var, path, prefix="the file named by "):
     return first_line
 
 
-def resolve_secret(what, option_value, option_name, env_var, prompt, required=True,
-                   allow_prompt=True):
+def resolve_secret(what, option_value, option_name, env_var, prompt, required=True):
     """Returns (secret, source) where source is one of FROM_OPTION, FROM_ENV,
     FROM_FILE, FROM_PROMPT or NOT_GIVEN (secret None; only when required is
     False). `what` names the secret in messages ("LDAP bind password"),
@@ -111,9 +104,7 @@ def resolve_secret(what, option_value, option_name, env_var, prompt, required=Tr
     environment variable ("AD_BIND_PASSWORD"; the file variant is env_var +
     "_FILE"), prompt the text of the interactive prompt. Raises
     SecretUnavailable when a required secret cannot be obtained, or when the
-    environment is contradictory or unreadable. [1.1] allow_prompt=False
-    skips the prompt even on a terminal; option_name may then be None (no
-    command-line option exists)."""
+    environment is contradictory or unreadable."""
     if option_value:
         return option_value, FROM_OPTION
 
@@ -129,18 +120,13 @@ def resolve_secret(what, option_value, option_name, env_var, prompt, required=Tr
         return _read_secret_file(env_file_var, env_file), FROM_FILE
 
     stdin = sys.stdin
-    if allow_prompt and stdin is not None and stdin.isatty():
+    if stdin is not None and stdin.isatty():
         try:
             return getpass.getpass(prompt), FROM_PROMPT
         except EOFError:
             pass  # the terminal closed: treat as not given
     if not required:
         return None, NOT_GIVEN
-    if not allow_prompt:
-        raise SecretUnavailable(
-            f"no {what} was given. Set {env_var}, or {env_file_var} to a file holding it "
-            f"(first line)"
-            + (f", or pass {option_name} (visible in process listings)" if option_name else ""))
     raise SecretUnavailable(
         f"no {what} was given and there is no terminal to prompt on. Set {env_var}, or "
         f"{env_file_var} to a file holding it (first line), or pass "
