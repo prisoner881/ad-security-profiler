@@ -1,5 +1,53 @@
 # Release Notes
 
+## Plugin update (2026-11-20, second part): research, tools and Microsoft changes
+
+From a review of security research, attack and audit tool releases,
+Microsoft's Entra announcements and threat intelligence, and government
+guidance published between 21 October and 20 November 2026 (sources:
+SpecterOps, Huntress, Proofpoint, Semperis, Microsoft Threat Intelligence,
+Microsoft support articles and Message Center notices, PingCastle, and
+independent Entra researchers). Each check reads data the collectors
+already store. No script, collection or schema change.
+
+### New plugins
+
+| Plugin | Checks |
+|---|---|
+| 1053 Password Age Reset Without a Password Change (pwdLastSet Refreshed) | The directory's replication metadata shows `pwdLastSet` written more than a day after the password itself (`unicodePwd`): the password age was reset (for example by ticking and unticking "must change password at next logon") without a new password, which fools expiry and password-age checks. High for an enabled privileged account, low for other enabled accounts. From PingCastle 4.1.2.0. |
+| 2047 Computer dNSHostName Does Not Match Its sAMAccountName | A computer's `dNSHostName` does not start with its own name: the attribute was edited, the Certifried technique for getting a certificate in another machine's name. Medium when the host name is another computer's name, low otherwise. Complements 2036. From PingCastle 4.1.2.0. |
+| 2048 iSCSI Target Server Host -- Confirm CHAP Authentication (Disk Theft) | A computer registered an `iSCSITarget` service principal name. Without CHAP, anyone who guesses an allowed initiator name can mount and read its virtual disks; SpecterOps (4 November) pulled a domain controller's NTDS.dit this way. High for a DC, Tier 0 or Hyper-V host. CHAP is set on the host, so it asks for confirmation. |
+| 9046 Group Policy Turns Off the 2026 Authentication Hardening | A linked GPO sets an opt-out value: `LdapSPNVerificationLevel` = 0 (KB5134907), `ClientAllowUnsignedNtlm` = 1 (KB5135557), `BlockNtlmv1SSO` = 0 (KB5066470) or AD FS `RemediateDkmAcl` = 0 (KB5121391, exploited CVE-2026-56155). High for the AD FS opt-out or the LDAP opt-out on DCs. Needs SYSVOL. |
+| 9047 Domain Controllers Accept Certificates Whose Revocation Cannot Be Checked | The DCs' Group Policy sets the KDC's `UseCachedCRLOnlyAndIgnoreRevocationUnknownErrors`: revoked logon certificates can keep working (Semperis "zombie certificates", October 2026). Needs SYSVOL. |
+| 10124 Vendor Application Known to Have Been Abused Across Tenants (ConnectWise / SkyKick) | A service principal of the seven ConnectWise Cloud Backup / Cloud Management (formerly SkyKick) applications, or of the vendor's tenant, is present. Their identities were used against more than a thousand tenants in October 2026. Critical while enabled. AppIds verified against SpecterOps and Huntress. |
+| 10125 Application Sign-Ins Not Covered by Conditional Access (Workload Identities) | This tenant's applications hold client secrets or certificates and no enabled Conditional Access policy targets service principals; stolen application secrets were used at scale in October-November 2026. Medium with Workload ID Premium, low without. |
+| 10126 Federated Credential Trusts a Repository by Name (Repository Recycling) | A GitHub Actions or GitLab federated credential matches the repository by name instead of its numeric ID, so a re-created repository could sign in as the application. High when the application is privileged. |
+| 10127 Third-Party Agent Blueprint Can Create Agent Identities (BluePhishing) | Another organisation's service principal holds `AgentIdentity.CreateAsManager` and can create agent identities that inherit its permissions (Proofpoint, 9 November). Granted automatically to blueprints until 4 November 2026. |
+| 10128 Microsoft Developer Tools Usable by Every User (AuthCodeFix / ConsentFix Phishing) | Azure CLI, Azure PowerShell or Visual Studio Code do not require user assignment; AuthCodeFix phishing steals sign-in codes through them. Low: a hardening recommendation. |
+
+### Changed plugins
+
+- **10075 v1.1 (dynamic group rules):** Microsoft retired the `memberOf`
+  operator on 3 November 2026; groups using it no longer update. Now high
+  when the group is used by Conditional Access or a privileged application,
+  medium otherwise (was low).
+- **10030 v1.2 (weak authentication methods):** SMS and voice findings carry
+  the retirement of Microsoft-provided SMS and voice delivery (1 February
+  2027; password reset in phases from that date).
+- **5023 v1.1 (DC November update):** also names the October fix for the
+  LDAP signing bypass CVE-2026-70229, which has a public exploit since 23
+  October.
+
+### Coverage
+
+405 active plugins (401 finding checks, 4 inventory reports) plus 5 retired
+stubs.
+
+### Upgrading
+
+Replace `plugins/`. No migration, no collection change; schema v50 as
+before. 2048 asks for CHAP to be confirmed and stands until waived.
+
 ## Plugin update (2026-11-20): November 2026 security advisories
 
 From a review of the Active Directory and Entra ID advisories published
@@ -24,11 +72,6 @@ not stored in AD (3013 covers DnsAdmins); the Entra Private Network
 Connector fix CVE-2026-109460 needs connector versions, which are not
 collected; CVE-2026-109469 and CVE-2026-109490 were fixed by Microsoft in
 the service.
-
-### Coverage
-
-395 active plugins (391 finding checks, 4 inventory reports) plus 5 retired
-stubs.
 
 ### Upgrading
 
