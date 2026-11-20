@@ -1,5 +1,41 @@
 # Release Notes
 
+## Plugin update (2026-11-20): November 2026 security advisories
+
+From a review of the Active Directory and Entra ID advisories published
+between 21 October and 20 November 2026 (November 2026 Patch Tuesday and
+the out-of-band Entra advisories), against the data the collectors already
+store. No script, collection or schema change.
+
+### New plugins
+
+| Plugin | Checks |
+|---|---|
+| 10123 Application Holds a Microsoft Graph Role-Removal Permission (CVE-2026-114162) | A service principal holds `RoleAssignmentSchedule.Remove.Directory` or `RoleEligibilitySchedule.Remove.Directory` on Microsoft Graph. CVE-2026-114162 (CVSS 9.1) lets such an application assign privileged roles, up to Global Administrator. Critical for an enabled application permission; high when the service principal is disabled or holds it only as a delegated grant. Microsoft first-party applications are excluded. |
+| 7010 Forest Trust Exposed to Cross-Forest Kerberos Elevation of Privilege (CVE-2026-122164) | An outbound or two-way forest trust lets the partner forest authenticate here; CVE-2026-122164 lets an attacker who controls the trusted forest raise an identity with access here to SYSTEM. High without Selective Authentication, medium with it. Counts the foreign principals present. Patch level is not visible, so it asks for the update to be confirmed. |
+| 4040 Object Name Contains PowerShell Command-Injection Characters (CVE-2026-123387) | An object's RDN, sAMAccountName or userPrincipalName carries a PowerShell payload shape (`$(`, a quote followed by `;`, `\|` or `&`, a separator followed by a command; high) or a backtick or line break (medium). CVE-2026-123387: a delegated user renames an object and a generated remediation script later runs the name as an administrator. Ordinary punctuation (O'Brien, R&D) is not reported. |
+| 9045 Outgoing NTLM Is Not Restricted by Group Policy (NTLM Hash Leak and Relay) | No linked GPO sets "Restrict NTLM: Outgoing NTLM traffic to remote servers" to audit or deny (medium), or it is only audited, or denied only in GPOs linked to OUs (low). The path of the Outlook NTLM hash leak CVE-2026-124194 (exploited in the wild) and NTLM spoofing CVE-2026-121680. Needs SYSVOL. |
+| 5023 Confirm the November 2026 Security Update on Domain Controllers | Lists the domain controllers to confirm for the November 2026 update: unauthenticated LDAP remote code execution (CVE-2026-119958, 9.8), Kerberos relay to SYSTEM (CVE-2026-85844, 9.8), AD DS remote code execution (CVE-2026-118146). Names DCs on an operating system that no longer receives updates. Stands until waived, like 5022 for AD FS. |
+
+Not turned into checks: the other November AD DS, Kerberos, AD CS, LSASS
+and DNS fixes are patch-only (5023 covers the domain controllers); the DNS
+remote code execution CVE-2026-81384 needs a DNS server plug-in, which is
+not stored in AD (3013 covers DnsAdmins); the Entra Private Network
+Connector fix CVE-2026-109460 needs connector versions, which are not
+collected; CVE-2026-109469 and CVE-2026-109490 were fixed by Microsoft in
+the service.
+
+### Coverage
+
+395 active plugins (391 finding checks, 4 inventory reports) plus 5 retired
+stubs.
+
+### Upgrading
+
+Replace `plugins/`. No migration, no collection change; schema v50 as
+before. 5023 and 7010 stand until waived (`exception_waiver`) once the
+update is confirmed.
+
 ## Standalone edition (2026-11-06)
 
 The `standalone` branch: the scripts are run by hand, interactively, and the
