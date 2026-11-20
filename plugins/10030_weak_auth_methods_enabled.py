@@ -29,14 +29,22 @@ groups". It is now low (warn) and says that no target groups were found,
 so the scope could not be determined; for Email OTP the detail adds
 allowExternalIdToUseEmailOtp, since an Email OTP configuration without
 targets is normally there for B2B guests' one-time-passcode sign-in.
+
+[v1.2] Microsoft is retiring its own SMS and voice delivery: Microsoft-
+provided SMS and voice for MFA retire on 2027-02-01 (a customer telephony
+provider takes over; "What's new in Microsoft Entra: November 2026"), and
+SMS / voice for self-service password reset retire in phases from
+2027-02-01 (Global Administrators and external users from 2027-07-01;
+MC1536049). The description, remediation and the detail of SMS and Voice
+findings carry the dates; severity is unchanged.
 """
 
 PLUGIN = {
     "plugin_id": 10030,
     "category": "Hybrid Identity",
     "name": "Weak Authentication Methods Enabled (SMS, Voice Call, Email OTP)",
-    "version": "1.1",
-    "revision_date": "2026-10-07",
+    "version": "1.2",
+    "revision_date": "2026-11-20",
     "control_id": "HYBRID-10030",
     "requires_sources": ["auth_methods_policy"],
     "framework_tags": [
@@ -59,6 +67,10 @@ PLUGIN = {
          "url": "https://github.com/cisagov/ScubaGear/blob/main/PowerShell/ScubaGear/baselines/aad.md"},
         {"title": "Microsoft: Manage authentication methods for Microsoft Entra ID",
          "url": "https://learn.microsoft.com/en-us/entra/identity/authentication/concept-authentication-methods-manage"},
+        {"title": "Microsoft: What's new in Microsoft Entra, November 2026 (Microsoft-provided SMS and voice retire 2027-02-01)",
+         "url": "https://techcommunity.microsoft.com/blog/microsoft-entra-blog/what's-new-in-microsoft-entra-november-2026/4556457"},
+        {"title": "Microsoft MC1536049: SMS and voice retire for self-service password reset",
+         "url": "https://mc.merill.net/message/MC1536049"},
         {"title": "Microsoft: SMS-based authentication",
          "url": "https://learn.microsoft.com/en-us/entra/identity/authentication/howto-authentication-sms-signin"},
     ],
@@ -69,7 +81,8 @@ PLUGIN = {
         "phishing. CISA SCuBA MS.AAD.3.5 says they SHALL be disabled. One finding per "
         "enabled method: high when it targets all users, medium when it targets "
         "selected groups, low when no target groups were found. The detail lists the include/exclude targets and whether SMS "
-        "is usable as a primary sign-in factor."
+        "is usable as a primary sign-in factor. Microsoft-provided SMS and voice delivery "
+        "retires on 1 February 2027 (and for password reset in phases from that date)."
     ),
     "remediation": (
         "Make sure users have registered a stronger method first (Microsoft "
@@ -82,7 +95,10 @@ PLUGIN = {
         "-AuthenticationMethodConfigurationId Sms -BodyParameter @{'@odata.type'="
         "'#microsoft.graph.smsAuthenticationMethodConfiguration'; state='disabled'}. "
         "Email OTP may still be needed for B2B guests without an identity provider; "
-        "if so, scope it to them."
+        "if so, scope it to them. Plan for 1 February 2027, when Microsoft stops "
+        "delivering SMS and voice codes itself: users still relying on them then lose MFA "
+        "and password reset unless a stronger method is registered (or a telephony "
+        "provider is configured)."
     ),
     "base_severity": "high",
     "query": """
@@ -142,7 +158,9 @@ PLUGIN = {
                 'exclude_targets', s.exclude_targets,
                 'no_include_targets', s.no_targets,
                 'allow_external_id_to_use_email_otp', s.external_id_email_otp,
-                'scuba_policy', 'MS.AAD.3.5'
+                'scuba_policy', 'MS.AAD.3.5',
+                'microsoft_delivery_retires', CASE WHEN lower(s.method_id) IN ('sms', 'voice')
+                                                   THEN '2027-02-01 (MFA; SSPR in phases from 2027-02-01)' END
             ) AS detail
         FROM scored s
     """,

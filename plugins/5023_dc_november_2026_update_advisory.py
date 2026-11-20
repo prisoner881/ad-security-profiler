@@ -15,6 +15,15 @@ directory to detect:
 and further AD DS fixes (CVE-2026-118148 elevation to SYSTEM,
 CVE-2026-118735, CVE-2026-119948, denial-of-service fixes).
 
+[v1.1] The cumulative update also carries the October 2026 fix for
+CVE-2026-70229 (AD DS, CVSS 8.1): SpecterOps ("Signed, Sealed, and
+Relayed", 2026-10-23) published a working bypass of LDAP signing -- an
+NTLM authentication relayed inside the attacker's own signed LDAP session
+on port 389 runs an attacker-chosen modification (RBCD, shadow
+credentials) as the victim, even with LDAP signing and channel binding
+required (plugins 9010 / 9011). The exploit ("LDAP Switcheroo") is in
+ntlmrelayx. A DC still without the October update is exposed.
+
 Patch level is not visible in the directory: the finding stands while the
 domain has domain controllers, as a prompt to confirm the update -- like
 plugin 5022 for AD FS and 6014 for NDES. Waive it (exception_waiver) once
@@ -34,7 +43,7 @@ PLUGIN = {
     "plugin_id": 5023,
     "category": "Domain",
     "name": "Confirm the November 2026 Security Update on Domain Controllers",
-    "version": "1.0",
+    "version": "1.1",
     "revision_date": "2026-11-20",
     "control_id": "DOMAIN-5023",
     "framework_tags": [
@@ -53,6 +62,7 @@ PLUGIN = {
         "CVE-2026-118148",
         "CVE-2026-118735",
         "CVE-2026-119948",
+        "CVE-2026-70229",
     ],
     "references": [
         {"title": "Microsoft Security Update Guide: CVE-2026-119958 (Windows LDAP Remote Code Execution)",
@@ -63,6 +73,8 @@ PLUGIN = {
          "url": "https://msrc.microsoft.com/update-guide/vulnerability/CVE-2026-118146"},
         {"title": "Microsoft Security Update Guide: CVE-2026-118148 (Active Directory Domain Services Elevation of Privilege)",
          "url": "https://msrc.microsoft.com/update-guide/vulnerability/CVE-2026-118148"},
+        {"title": "SpecterOps: Signed, Sealed, and Relayed -- Bypassing LDAP Signing Through Reauthentication (CVE-2026-70229, 2026-10-23)",
+         "url": "https://specterops.io/blog/2026/10/23/ldap-signing-bypass-ntlm-relay/"},
         {"title": "MITRE ATT&CK T1210: Exploitation of Remote Services",
          "url": "https://attack.mitre.org/techniques/T1210/"},
     ],
@@ -70,7 +82,9 @@ PLUGIN = {
         "The November 2026 Windows update fixed an unauthenticated LDAP remote code execution "
         "(CVE-2026-119958, CVSS 9.8), a Kerberos relay to SYSTEM on domain controllers "
         "(CVE-2026-85844, CVSS 9.8) and an AD DS remote code execution open to any authenticated "
-        "user (CVE-2026-118146, exploitation more likely), among other AD DS fixes. Patch level is "
+        "user (CVE-2026-118146, exploitation more likely), among other AD DS fixes; it also "
+        "carries October's fix for the LDAP signing bypass CVE-2026-70229, for which a public "
+        "exploit appeared on 23 October. Patch level is "
         "not visible in the directory: this lists the domain controllers to confirm, and stands "
         "until waived."
     ),
@@ -137,6 +151,7 @@ PLUGIN = {
                 'cves_critical', jsonb_build_array('CVE-2026-119958', 'CVE-2026-85844', 'CVE-2026-118146',
                                                    'CVE-2026-118148'),
                 'cves_other', jsonb_build_array('CVE-2026-118735', 'CVE-2026-119948'),
+                'october_2026_fix_included', 'CVE-2026-70229 (LDAP signing bypass, public exploit 2026-10-23)',
                 'note', 'Patch level is not visible in the directory. Waive this finding once every '
                         'domain controller is confirmed updated.'
             ) AS detail
