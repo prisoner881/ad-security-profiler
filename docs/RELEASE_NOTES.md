@@ -1,5 +1,92 @@
 # Release Notes
 
+## E-mail addresses and AD links (2026-11-24)
+
+Every e-mail address an account carries, on both sides, and more Entra ID
+accounts linked to their AD account. Needs schema v51 and one full rescan.
+
+### Components
+
+| Component | Version |
+|---|---|
+| `adprofiler.py` | 1.0.11 |
+| `entra_graph_collector.py` | 1.0.8 |
+| `adaudit.py` | 1.0.12 |
+| PostgreSQL schema | v51 (`migrations/schema_migration_v51.sql`) |
+
+Other components are unchanged. No new Graph or AD permission:
+`User.Read.All` covers the new Entra fields, and the two AD attributes are
+readable by any domain user.
+
+### Changes
+
+- **Entra addresses.** `entra_graph_collector.py` now also reads
+  `otherMails` (alternate addresses; for a guest, the address it was
+  invited with), `imAddresses` (Teams / SIP), `identities` (sign-in
+  identities: a guest's or external user's sign-in address) and
+  `onPremisesUserPrincipalName`. Before, only `mail` and `proxyAddresses`
+  were read.
+- **AD addresses.** `adprofiler.py` now also reads `otherMailbox` and
+  `targetAddress` (the routing address, e.g. `...mail.onmicrosoft.com` in
+  Exchange hybrid). The UPN now counts as an address on both sides.
+- **Exact links.** As before, an Entra account is linked to its AD account
+  when its on-premises SID matches. New: when the SID matches nothing, the
+  sync anchor (`onPremisesImmutableId`, normally the AD objectGUID) is
+  tried. `entra_user.on_prem_match_method` records which (`sid` or
+  `immutable_id`). The collector also stores where a synced account came
+  from (`onPremisesDomainName`, `onPremisesSamAccountName`), so an account
+  synced from a domain that was not collected can be identified.
+- **Likely links.** An Entra account with no exact link that shares an
+  e-mail address with an AD user is listed as a likely match (view
+  `v_entra_ad_address_match`). This is typically a separate cloud-only
+  admin account whose alternate address is the person's work address. A
+  shared address is not proof of the same person, so likely matches are
+  never stored as links and no plugin treats them as one.
+- **New views:** `v_ad_user_address` and `v_entra_user_address` list every
+  address of every account, one row per address and source; non-email
+  values (X500, X400, SIP proxy entries, guest `#EXT#` UPNs) are excluded.
+- **User inventory (8001 v1.3).** It lists every address from both sides:
+  - `email_address_sources` repeats each address with where it came from
+    (for example `AD otherMailbox`, `Entra otherMails`, `Entra sign-in
+    identity`);
+  - `linked_entra_accounts` names the linked Entra account and how it was
+    linked;
+  - `likely_entra_accounts` names unlinked Entra accounts that share an
+    address with the user.
+- **Platform push.** The USER inventory rows `adaudit_push.py` sends now
+  carry three more fields (`email_address_sources`,
+  `linked_entra_accounts`, `likely_entra_accounts`), and `email_addresses`
+  holds every address, UPNs included. Confirm the API accepts the extra
+  fields. Plugin 8005 is not one of the four pushed inventory types, so it
+  is not sent; it appears in the workbook only.
+- **New inventory: 8005, Entra Accounts Not Linked to AD.** Every Entra
+  account without an exact AD link: why (cloud-only, guest, or synced from
+  a domain not collected, with that domain\account), all its addresses with
+  their sources, and the AD users it shares an address with.
+- **Run summary.** The collector reports how many users were linked by the
+  sync anchor and how many unlinked users have a likely match.
+- **Schema checks.** The collector now refuses to run against a schema older
+  than v51, with the fix, before reading Graph. `adaudit.py` needs v51.
+
+### Coverage
+
+406 active plugins (401 finding checks, 5 inventory reports) plus 5 retired
+stubs.
+
+### Upgrading
+
+1. Replace the scripts and `plugins/`, and add `migrations/schema_migration_v51.sql`.
+2. Run `schema_setup.py`, preferably with `--backup-dir`. It applies v51
+   and says a full rescan is needed.
+3. Run `adprofiler.py` once with `--full-rescan`. Otherwise the new AD
+   columns stay empty for users that do not change.
+4. Run `entra_graph_collector.py`, then `adaudit.py`.
+
+Under `collector_daemon.py` (or the container) steps 2 and 3 happen on
+their own: the daemon runs `schema_setup.py` before each collection, and
+the next `adprofiler.py` run gets `--full-rescan` because v51 asks for one.
+Only the new scripts and the migration file need to be in place.
+
 ## Plugin update (2026-11-20, second part): research, tools and Microsoft changes
 
 From a review of security research, attack and audit tool releases,
