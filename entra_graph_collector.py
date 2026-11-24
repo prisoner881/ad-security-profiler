@@ -2,9 +2,27 @@
 """
 entra_graph_collector.py -- Microsoft Entra ID collector (Microsoft Graph)
 
-VERSION: 1.0.7
+VERSION: 1.0.8
 
 CHANGELOG:
+    1.0.8 - Every e-mail address of every user, and more links to AD
+            (schema v51; schema_setup.py applies it). The user read adds
+            otherMails (alternate addresses -- for a guest, the address it
+            was invited with), imAddresses (Teams / SIP), identities
+            (sign-in identities: a guest's or external user's sign-in
+            address), onPremisesUserPrincipalName, onPremisesImmutableId,
+            onPremisesSamAccountName and onPremisesDomainName, all under
+            User.Read.All as before. A user whose onPremisesSecurityIdentifier
+            matches no collected AD object is now also linked when its
+            onPremisesImmutableId (the sync source anchor, base64) decodes
+            to the objectGUID of a collected AD object;
+            entra_user.on_prem_match_method records which ('sid' or
+            'immutable_id'). Address-based LIKELY links (an unlinked Entra
+            account sharing an address with an AD user) are not stored as
+            links: the view v_entra_ad_address_match lists them, and the run
+            summary counts them. Refuses to run, with the fix, against a
+            schema older than v51.
+
     1.0.7 - Named for what it collects: "Microsoft Entra ID collector"
             (banner, --help, this docstring) instead of "email collector",
             the name from when it read only mail attributes. The
@@ -314,9 +332,14 @@ SCOPE, HONESTLY
     directory_object.object_sid for the same client -- exact SID
     comparison, no fuzzy matching on name or UPN (both can legitimately
     differ between the two systems, as this project has already found
-    in real client data). A user with no on-prem match is not an error;
-    it just means Graph doesn't consider that account synced from AD --
-    a genuinely cloud-only or guest account.
+    in real client data). [1.0.8] When the SID matches nothing, the
+    onPremisesImmutableId (sync source anchor) is decoded and matched
+    against directory_object.object_guid -- also exact. A user with no
+    on-prem match is not an error; it is a cloud-only or guest account,
+    or one synced from a domain that was not collected
+    (on_premises_domain_name says which). Such accounts that share an
+    e-mail address with an AD user are listed as LIKELY links by the view
+    v_entra_ad_address_match, never stored as entra_user.on_prem_object_guid.
 """
 
 import argparse
@@ -352,7 +375,11 @@ PG_DBNAME = "adprofiler"
 PG_USER = None
 PG_PASSWORD = None
 
-VERSION = "1.0.7"
+VERSION = "1.0.8"
+
+# [1.0.8] Lowest schema version this collector writes to: v51 added the
+# entra_user address and on-premises link columns.
+REQUIRED_SCHEMA_VERSION = 51
 
 # [v0.5.0] Retry policy shared by every Graph/token request (see
 # _send_with_retry()). 429 and transient 5xx responses, plus network
@@ -380,7 +407,11 @@ GRAPH_USER_SELECT = (
     # (fetch_sign_in_activity()).
     "displayName,createdDateTime,passwordPolicies,lastPasswordChangeDateTime,"
     "externalUserState,externalUserStateChangeDateTime,onPremisesLastSyncDateTime,"
-    "assignedPlans"
+    "assignedPlans,"
+    # [1.0.8] Every address a user carries, and where a synced user came
+    # from (schema v51). identities is returned only when selected.
+    "otherMails,imAddresses,identities,onPremisesUserPrincipalName,"
+    "onPremisesImmutableId,onPremisesSamAccountName,onPremisesDomainName"
 )
 GRAPH_PAGE_SIZE = 999  # Graph's own maximum for $top on /users, not a choice made here
 
@@ -1696,6 +1727,61 @@ def _assigned_services(user):
                    if p.get("capabilityStatus") == "Enabled" and p.get("service")})
 
 
+def immutable_id_to_guid(value):
+    """[1.0.8] onPremisesImmutableId -> the AD objectGUID it encodes, as the
+    string adprofiler.py stores (uuid bytes_le, like guid_bytes_to_str()),
+    or None. The anchor is base64 of the 16-byte objectGUID (or of
+    mS-DS-ConsistencyGuid, which Entra Connect seeds from it). Anything else
+    -- a custom anchor attribute, an anchor set by hand on a cloud account --
+    decodes to something other than 16 bytes, or to a GUID no AD object
+    has, and simply matches nothing."""
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        raw = base64.b64decode(value.strip(), validate=True)
+    except (ValueError, TypeError):
+        return None
+    if len(raw) != 16:
+        return None
+    return str(uuid.UUID(bytes_le=raw))
+
+
+def _str_list(value):
+    """A Graph string-collection property as a list of non-empty strings, or None."""
+    if not isinstance(value, list):
+        return None
+    items = [v for v in value if isinstance(v, str) and v.strip()]
+    return items or None
+
+
+def _identities(user):
+    """[1.0.8] identities[] reduced to signInType / issuer / issuerAssignedId."""
+    out = [{"signInType": i.get("signInType"), "issuer": i.get("issuer"),
+            "issuerAssignedId": i.get("issuerAssignedId")}
+           for i in (user.get("identities") or []) if isinstance(i, dict)]
+    return json.dumps(out) if out else None
+
+
+def check_schema_version(pg_conn):
+    """[1.0.8] Stops the run, with the fix, when the database's schema is
+    older than REQUIRED_SCHEMA_VERSION: the user insert would otherwise
+    fail on the first missing column after Graph had been read."""
+    with pg_conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('ad_intel.schema_migration_history') IS NOT NULL;")
+        if not cur.fetchone()[0]:
+            raise CollectorAbort("The database has no ad_intel.schema_migration_history table: it "
+                               "predates schema version tracking. Create a new, empty database "
+                               "and run schema_setup.py.")
+        cur.execute("SELECT max(version_number) FROM ad_intel.schema_migration_history;")
+        version = cur.fetchone()[0]
+    pg_conn.commit()
+    if version is None or version < REQUIRED_SCHEMA_VERSION:
+        raise CollectorAbort(f"The database schema is version {version}; this collector needs "
+                           f"version {REQUIRED_SCHEMA_VERSION} or later. Run schema_setup.py to "
+                           f"upgrade it, then run this collector again.")
+    return version
+
+
 def sync_entra_users(pg_conn, client_id, users):
     """Whole-snapshot replace for this client: delete, then bulk-insert
     fresh rows, both inside one transaction. A partial failure rolls
@@ -1706,6 +1792,7 @@ def sync_entra_users(pg_conn, client_id, users):
     now = datetime.now(timezone.utc)
     rows = []
     matched = 0
+    matched_by_anchor = 0
     # [v1.0.4] a user listed twice (Graph can repeat one across pages) broke
     # the insert on the primary key
     users = _dedupe([u for u in users if u.get("id")], ["id"])
@@ -1725,11 +1812,36 @@ def sync_entra_users(pg_conn, client_id, users):
             )
             sid_to_guid = dict(cur.fetchall())
 
+        # [1.0.8] Second, exact link: the sync source anchor, for users whose
+        # SID matched nothing (SID missing from Graph, or changed since the
+        # last sync, e.g. after a domain migration).
+        anchor_guids = {}
+        for u in users:
+            if not sid_to_guid.get(u.get("onPremisesSecurityIdentifier")):
+                guid = immutable_id_to_guid(u.get("onPremisesImmutableId"))
+                if guid:
+                    anchor_guids[u["id"]] = guid
+        known_guids = set()
+        if anchor_guids:
+            cur.execute(
+                "SELECT object_guid::text FROM directory_object "
+                "WHERE client_id = %s AND object_guid = ANY(%s::uuid[]);",
+                (client_id, list(set(anchor_guids.values()))),
+            )
+            known_guids = {r[0] for r in cur.fetchall()}
+
         for u in users:
             on_prem_sid = u.get("onPremisesSecurityIdentifier")
             on_prem_guid = sid_to_guid.get(on_prem_sid)
+            match_method = None
             if on_prem_guid:
                 matched += 1
+                match_method = "sid"
+            elif anchor_guids.get(u["id"]) in known_guids:
+                on_prem_guid = anchor_guids[u["id"]]
+                matched += 1
+                matched_by_anchor += 1
+                match_method = "immutable_id"
             rows.append((
                 client_id, u["id"], on_prem_guid, u.get("userPrincipalName"),
                 u.get("mail"), u.get("proxyAddresses") or None, u.get("accountEnabled"),
@@ -1741,6 +1853,10 @@ def sync_entra_users(pg_conn, client_id, users):
                 u.get("lastPasswordChangeDateTime"), u.get("externalUserState"),
                 u.get("externalUserStateChangeDateTime"), u.get("onPremisesLastSyncDateTime"),
                 _assigned_services(u),
+                # [1.0.8] schema v51 columns
+                _str_list(u.get("otherMails")), _str_list(u.get("imAddresses")), _identities(u),
+                u.get("onPremisesUserPrincipalName"), u.get("onPremisesImmutableId"),
+                u.get("onPremisesSamAccountName"), u.get("onPremisesDomainName"), match_method,
             ))
 
         cur.execute("DELETE FROM entra_user WHERE client_id = %s;", (client_id,))
@@ -1754,13 +1870,21 @@ def sync_entra_users(pg_conn, client_id, users):
                      on_premises_security_identifier, user_type, collected_at,
                      display_name, created_at, password_policies, last_password_change_at,
                      external_user_state, external_user_state_changed_at,
-                     on_premises_last_sync_at, assigned_services)
+                     on_premises_last_sync_at, assigned_services,
+                     other_mails, im_addresses, identities, on_premises_user_principal_name,
+                     on_premises_immutable_id, on_premises_sam_account_name,
+                     on_premises_domain_name, on_prem_match_method)
                 VALUES %s
                 """,
                 rows,
             )
+        # [1.0.8] Likely (address-based) links, for the run summary only.
+        cur.execute("SELECT count(DISTINCT entra_object_id) FROM v_entra_ad_address_match "
+                    "WHERE client_id = %s;", (client_id,))
+        likely = cur.fetchone()[0]
     pg_conn.commit()
-    return len(users), matched
+    return {"total": len(users), "matched": matched, "matched_by_anchor": matched_by_anchor,
+            "likely": likely}
 
 
 def sync_directory_role_members(pg_conn, client_id, role_members, collected_at=None):
@@ -3947,6 +4071,7 @@ def main():
         log_info("Connecting to PostgreSQL...")
         pg_conn = connect_postgres()
         log_success("Connected to PostgreSQL.")
+        check_schema_version(pg_conn)
 
         client_id = resolve_client_id(pg_conn, domain_fqdn=args.domain_fqdn, client_id_override=args.client_id)
         log_success(f"Resolved client record for "
@@ -3956,8 +4081,12 @@ def main():
         users = fetch_all_users(graph)
         log_success(f"Fetched {len(users)} user(s) from Graph.")
 
-        total, matched = sync_entra_users(pg_conn, client_id, users)
+        user_link = sync_entra_users(pg_conn, client_id, users)
+        total, matched = user_link["total"], user_link["matched"]
         completed_steps.append("users")
+        log_info(f"  {matched} user(s) linked to their AD account ({user_link['matched_by_anchor']} "
+                 f"through the sync anchor); {user_link['likely']} unlinked user(s) share an "
+                 f"e-mail address with an AD user (likely links)")
 
         log_header("Collecting Directory Role Membership from Microsoft Graph")
         role_members = fetch_directory_roles_with_members(graph)
@@ -4037,8 +4166,10 @@ def main():
         duration = (datetime.now(timezone.utc) - start_time).total_seconds()
         print(f"  {_C.WHITE}Duration:{_C.RESET}                     {duration:.1f}s")
         print(f"  {_C.WHITE}Users fetched from Graph:{_C.RESET}      {total}")
-        print(f"  {_C.GREEN}Matched to on-prem AD:{_C.RESET}         {matched}")
-        print(f"  {_C.YELLOW}Cloud-only/unmatched:{_C.RESET}          {total - matched}")
+        print(f"  {_C.GREEN}Matched to on-prem AD:{_C.RESET}         {matched}"
+              f" ({user_link['matched_by_anchor']} by sync anchor)")
+        print(f"  {_C.YELLOW}Cloud-only/unmatched:{_C.RESET}          {total - matched}"
+              f" ({user_link['likely']} with a likely AD match by e-mail address)")
         print(f"  {_C.WHITE}Directory role memberships:{_C.RESET}    {role_member_count}")
         print(f"  {_C.WHITE}Security Defaults enabled:{_C.RESET}     {security_defaults_enabled}")
         print(f"  {_C.WHITE}Conditional Access policies:{_C.RESET}   {ca_policy_count}")

@@ -4,7 +4,7 @@
  adprofiler.py -- Active Directory Security & Compliance Profiler (Collector)
 ================================================================================
 
-VERSION: 1.0.10
+VERSION: 1.0.11
 
 PURPOSE:
     Connects to an on-premise Active Directory Domain Controller via LDAP,
@@ -192,7 +192,7 @@ except ImportError:
     print("Install it with:  <path-to-venv>/bin/pip install -r requirements.txt")
     sys.exit(1)
 
-VERSION = "1.0.10"
+VERSION = "1.0.11"
 
 # [v0.7.7] The oldest collector version whose stored derived fields
 # (parsed / typed columns computed from raw attributes) are current. A
@@ -260,6 +260,9 @@ USER_ATTRS = [
     # [v0.8.0] Logon script (plugin 1052: scripts run from outside the
     # domain). Usually a name relative to NETLOGON; set on few accounts.
     "scriptPath",
+    # [v1.0.11] Alternate e-mail addresses (base schema), so that every
+    # address of a user is known (schema v51; v_ad_user_address).
+    "otherMailbox",
 ]
 
 # [v0.6.0] Attributes that hold a password in a recoverable form when
@@ -274,7 +277,10 @@ USER_ATTRS = [
 CLEARTEXT_PASSWORD_ATTRS = ("userPassword", "unixUserPassword", "msSFU30Password", "os400Password")
 _CLEARTEXT_PASSWORD_ATTRS_LOWER = {a.lower(): a for a in CLEARTEXT_PASSWORD_ATTRS}
 # [v0.6.0] Authentication policy silo/policy assignment (2012 R2 schema).
-USER_OPTIONAL_ATTRS = ("msDS-AssignedAuthNPolicySilo", "msDS-AssignedAuthNPolicy")
+USER_OPTIONAL_ATTRS = ("msDS-AssignedAuthNPolicySilo", "msDS-AssignedAuthNPolicy",
+                       # [v1.0.11] Exchange schema: the address mail is
+                       # routed to (hybrid: ...mail.onmicrosoft.com).
+                       "targetAddress")
 # [v0.6.0] dMSA (Windows Server 2025 schema): the BadSuccessor link and
 # migration state (plugin 5017).
 COMPUTER_OPTIONAL_ATTRS = ("msDS-ManagedAccountPrecededByLink", "msDS-DelegatedMSAState")
@@ -2096,7 +2102,9 @@ REQUIRED_SCHEMA_COLUMNS = {
                 # [v0.8.0, schema v44]
                 "script_path",
                 # [v0.9.0, schema v45]
-                "java_attributes"},
+                "java_attributes",
+                # [v1.0.11, schema v51]
+                "other_mailbox", "target_address"},
     "ad_group": {"object_guid", "client_id", "version_id", "valid_from", "valid_to",
                  "sam_account_name", "group_type", "admin_count",
                  "is_protected_group", "member_count_direct",
@@ -2268,7 +2276,7 @@ REQUIRED_IDENTITY_COLUMNS = {
 # the structural check remains the backstop for a schema altered
 # outside the approved migration files, where the version number could
 # claim to be current while the actual structure doesn't match it.
-EXPECTED_SCHEMA_VERSION = 50  # [v1.0.9] v50: check_scd2_integrity() fixed (v49: partition functions in UTC)
+EXPECTED_SCHEMA_VERSION = 51  # [v1.0.11] v51: e-mail address columns and views (v50: check_scd2_integrity() fixed)
 
 
 def check_schema_version(pg_conn):
@@ -3324,6 +3332,9 @@ def user_typed_columns(full):
         "script_path": _first_value(full.get("scriptPath")),  # [v0.8.0, schema v44]
         # [v0.9.0, schema v45]
         "java_attributes": full.get(JAVA_ATTRIBUTES_KEY) or None,
+        # [v1.0.11, schema v51]
+        "other_mailbox": _list_or_none(full.get("otherMailbox")),
+        "target_address": _first_value(full.get("targetAddress")),
     }
 
 
@@ -5734,7 +5745,7 @@ def main():
                             + [a for a in user_attrs + computer_attrs if a in USER_OPTIONAL_ATTRS + COMPUTER_OPTIONAL_ATTRS]
                             + [a for a in (SMARTCARD_HASH_ROLLING_ATTR, ENROLLMENT_SERVERS_ATTR)
                                if a in domain_attrs + enrollment_service_attrs])
-        log_info(f"Optional 0.6.0 attributes present in the schema: "
+        log_info(f"Optional attributes present in the schema: "
                  f"{', '.join(dict.fromkeys(optional_present)) or 'none'}")
 
         with pg_conn.cursor() as cur:

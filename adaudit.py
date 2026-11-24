@@ -2,7 +2,7 @@
 """
 adaudit.py -- AD Security & Compliance Plugin Runner
 ======================================================
-VERSION: 1.0.11+standalone
+VERSION: 1.0.12+standalone
 
 Companion to adprofiler.py. Where adprofiler.py collects AD data,
 adaudit.py analyzes it: discovers every plugin file in plugins/, runs each
@@ -32,6 +32,10 @@ DESIGN:
       as: (status, object_guid, stig_severity, stig_reference,
       tool_severity, tool_reference, fd_severity, summary, detail).
       Zero rows returned = clean pass, nothing to report.
+    - [v1.0.12] Needs schema v51 (REQUIRED_SCHEMA_VERSION): the user
+      inventory (plugin 8001 v1.3) and the new inventory of Entra accounts
+      not linked to AD (plugin 8005) read the e-mail address columns and
+      views v51 adds. No other change.
     - [v1.0.10] The schema migration files up to v50 were removed; the
       message for a database older than REQUIRED_SCHEMA_VERSION says to run
       schema_setup.py, or to create a new, empty database. No other change.
@@ -287,7 +291,7 @@ import psycopg2.extras
 import run_lock  # [v1.0.2] one run at a time, see run_lock.py
 import secret_input  # [v1.0.6] secrets from the environment, a file or a prompt
 
-VERSION = "1.0.11+standalone"
+VERSION = "1.0.12+standalone"
 
 # [test-candidate-branch] Always overwritten by main() from
 # --pg-host/--pg-port/--pg-dbname/--pg-user/--pg-password before
@@ -685,8 +689,9 @@ def connect_postgres():
 # computer creator SID, DC SYSVOL subscriptions and users' Java attributes
 # (plugins 2044-2046, 4021, 11001), v48 ad_gpo_sysvol.first_read_run_id
 # (plugin 11021; v47 changed no plugin input), v49
-# entra_change_baseline.previous_run_at (plugin 11027).
-REQUIRED_SCHEMA_VERSION = 50
+# entra_change_baseline.previous_run_at (plugin 11027), v51 the e-mail
+# address columns and views (plugins 8001, 8005).
+REQUIRED_SCHEMA_VERSION = 51
 
 # [v0.9.0] Data sources a client may not have collected: (table/view names a
 # plugin query mentions, probe returning TRUE when the client has the data,

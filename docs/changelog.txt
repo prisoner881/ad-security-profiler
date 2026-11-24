@@ -9,6 +9,25 @@ the script's own docstring now keeps a one-line summary per entry, this
 file keeps the complete detail (root causes, what was verified, why a
 decision was made a particular way) for anyone who wants it.
 
+    1.0.11 - Every e-mail address of a user (schema v51;
+             schema_setup.py applies it, then run once with
+             --full-rescan). Users are read with two more attributes:
+             otherMailbox (alternate addresses, base schema) and
+             targetAddress (the address mail is routed to, e.g. the
+             ...mail.onmicrosoft.com address in Exchange hybrid; an
+             Exchange schema attribute, requested only when the schema
+             has it). They are stored in ad_user.other_mailbox and
+             ad_user.target_address and feed the view v_ad_user_address,
+             which lists every address of every user (mail, SMTP
+             proxyAddresses, otherMailbox, an SMTP targetAddress, UPN) for
+             the user inventory (plugin 8001) and for linking Entra
+             accounts to AD users by shared address
+             (v_entra_ad_address_match). EXPECTED_SCHEMA_VERSION is 51 and
+             validate_schema() checks the two columns. Without
+             --full-rescan the columns stay empty for users that do not
+             change in AD. The log line listing optional schema attributes
+             no longer says "0.6.0".
+
     1.0.10 - The schema migration files up to v50 were removed (a
              production installation starts from an empty database; see
              schema_setup.py 1.1). The messages for a database that is
