@@ -396,8 +396,12 @@ before), and additionally writes a timestamped Excel workbook:
   counts. Which controls each check maps to is listed in
   `COMPLIANCE_TAGS.md`.
 - Separate inventory tabs (User Inventory, Computer Inventory, Group
-  Inventory, AD Subnet Inventory) with the full, unfiltered data those
-  plugins produce.
+  Inventory, AD Subnet Inventory, Entra Accounts Not Linked to AD) with the
+  full, unfiltered data those plugins produce. The User Inventory lists
+  every e-mail address of each user, from AD and from its Entra account,
+  with where each came from; the Entra tab lists accounts with no AD link
+  (cloud-only, guests, accounts synced from a domain not collected) and the
+  AD users they share an address with.
 
 To check only what a given framework covers, add `--framework` with its
 name or tag prefix (for example `--framework PCI-DSS-4.0 "SOC 2"`).

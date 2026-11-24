@@ -1,5 +1,171 @@
 # Release Notes
 
+## E-mail addresses and AD links (2026-11-24)
+
+Every e-mail address an account carries, on both sides, and more Entra ID
+accounts linked to their AD account. Needs schema v51 and one full rescan.
+
+### Components
+
+| Component | Version |
+|---|---|
+| `adprofiler.py` | 1.0.11 |
+| `entra_graph_collector.py` | 1.0.8 |
+| `adaudit.py` | 1.0.12 |
+| PostgreSQL schema | v51 (`migrations/schema_migration_v51.sql`) |
+
+Other components are unchanged. No new Graph or AD permission:
+`User.Read.All` covers the new Entra fields, and the two AD attributes are
+readable by any domain user.
+
+### Changes
+
+- **Entra addresses.** `entra_graph_collector.py` now also reads
+  `otherMails` (alternate addresses; for a guest, the address it was
+  invited with), `imAddresses` (Teams / SIP), `identities` (sign-in
+  identities: a guest's or external user's sign-in address) and
+  `onPremisesUserPrincipalName`. Before, only `mail` and `proxyAddresses`
+  were read.
+- **AD addresses.** `adprofiler.py` now also reads `otherMailbox` and
+  `targetAddress` (the routing address, e.g. `...mail.onmicrosoft.com` in
+  Exchange hybrid). The UPN now counts as an address on both sides.
+- **Exact links.** As before, an Entra account is linked to its AD account
+  when its on-premises SID matches. New: when the SID matches nothing, the
+  sync anchor (`onPremisesImmutableId`, normally the AD objectGUID) is
+  tried. `entra_user.on_prem_match_method` records which (`sid` or
+  `immutable_id`). The collector also stores where a synced account came
+  from (`onPremisesDomainName`, `onPremisesSamAccountName`), so an account
+  synced from a domain that was not collected can be identified.
+- **Likely links.** An Entra account with no exact link that shares an
+  e-mail address with an AD user is listed as a likely match (view
+  `v_entra_ad_address_match`). This is typically a separate cloud-only
+  admin account whose alternate address is the person's work address. A
+  shared address is not proof of the same person, so likely matches are
+  never stored as links and no plugin treats them as one.
+- **New views:** `v_ad_user_address` and `v_entra_user_address` list every
+  address of every account, one row per address and source; non-email
+  values (X500, X400, SIP proxy entries, guest `#EXT#` UPNs) are excluded.
+- **User inventory (8001 v1.3).** It lists every address from both sides:
+  - `email_address_sources` repeats each address with where it came from
+    (for example `AD otherMailbox`, `Entra otherMails`, `Entra sign-in
+    identity`);
+  - `linked_entra_accounts` names the linked Entra account and how it was
+    linked;
+  - `likely_entra_accounts` names unlinked Entra accounts that share an
+    address with the user.
+- **Platform push.** The USER inventory rows `adaudit_push.py` sends now
+  carry three more fields (`email_address_sources`,
+  `linked_entra_accounts`, `likely_entra_accounts`), and `email_addresses`
+  holds every address, UPNs included. Confirm the API accepts the extra
+  fields. Plugin 8005 is not one of the four pushed inventory types, so it
+  is not sent; it appears in the workbook only.
+- **New inventory: 8005, Entra Accounts Not Linked to AD.** Every Entra
+  account without an exact AD link: why (cloud-only, guest, or synced from
+  a domain not collected, with that domain\account), all its addresses with
+  their sources, and the AD users it shares an address with.
+- **Run summary.** The collector reports how many users were linked by the
+  sync anchor and how many unlinked users have a likely match.
+- **Schema checks.** The collector now refuses to run against a schema older
+  than v51, with the fix, before reading Graph. `adaudit.py` needs v51.
+
+### Coverage
+
+406 active plugins (401 finding checks, 5 inventory reports) plus 5 retired
+stubs.
+
+### Upgrading
+
+1. Replace the scripts and `plugins/`, and add `migrations/schema_migration_v51.sql`.
+2. Run `schema_setup.py`, preferably with `--backup-dir`. It applies v51
+   and says a full rescan is needed.
+3. Run `adprofiler.py` once with `--full-rescan`. Otherwise the new AD
+   columns stay empty for users that do not change.
+4. Run `entra_graph_collector.py`, then `adaudit.py`.
+
+Under `collector_daemon.py` (or the container) steps 2 and 3 happen on
+their own: the daemon runs `schema_setup.py` before each collection, and
+the next `adprofiler.py` run gets `--full-rescan` because v51 asks for one.
+Only the new scripts and the migration file need to be in place.
+
+## Plugin update (2026-11-20, second part): research, tools and Microsoft changes
+
+From a review of security research, attack and audit tool releases,
+Microsoft's Entra announcements and threat intelligence, and government
+guidance published between 21 October and 20 November 2026 (sources:
+SpecterOps, Huntress, Proofpoint, Semperis, Microsoft Threat Intelligence,
+Microsoft support articles and Message Center notices, PingCastle, and
+independent Entra researchers). Each check reads data the collectors
+already store. No script, collection or schema change.
+
+### New plugins
+
+| Plugin | Checks |
+|---|---|
+| 1053 Password Age Reset Without a Password Change (pwdLastSet Refreshed) | The directory's replication metadata shows `pwdLastSet` written more than a day after the password itself (`unicodePwd`): the password age was reset (for example by ticking and unticking "must change password at next logon") without a new password, which fools expiry and password-age checks. High for an enabled privileged account, low for other enabled accounts. From PingCastle 4.1.2.0. |
+| 2047 Computer dNSHostName Does Not Match Its sAMAccountName | A computer's `dNSHostName` does not start with its own name: the attribute was edited, the Certifried technique for getting a certificate in another machine's name. Medium when the host name is another computer's name, low otherwise. Complements 2036. From PingCastle 4.1.2.0. |
+| 2048 iSCSI Target Server Host -- Confirm CHAP Authentication (Disk Theft) | A computer registered an `iSCSITarget` service principal name. Without CHAP, anyone who guesses an allowed initiator name can mount and read its virtual disks; SpecterOps (4 November) pulled a domain controller's NTDS.dit this way. High for a DC, Tier 0 or Hyper-V host. CHAP is set on the host, so it asks for confirmation. |
+| 9046 Group Policy Turns Off the 2026 Authentication Hardening | A linked GPO sets an opt-out value: `LdapSPNVerificationLevel` = 0 (KB5134907), `ClientAllowUnsignedNtlm` = 1 (KB5135557), `BlockNtlmv1SSO` = 0 (KB5066470) or AD FS `RemediateDkmAcl` = 0 (KB5121391, exploited CVE-2026-56155). High for the AD FS opt-out or the LDAP opt-out on DCs. Needs SYSVOL. |
+| 9047 Domain Controllers Accept Certificates Whose Revocation Cannot Be Checked | The DCs' Group Policy sets the KDC's `UseCachedCRLOnlyAndIgnoreRevocationUnknownErrors`: revoked logon certificates can keep working (Semperis "zombie certificates", October 2026). Needs SYSVOL. |
+| 10124 Vendor Application Known to Have Been Abused Across Tenants (ConnectWise / SkyKick) | A service principal of the seven ConnectWise Cloud Backup / Cloud Management (formerly SkyKick) applications, or of the vendor's tenant, is present. Their identities were used against more than a thousand tenants in October 2026. Critical while enabled. AppIds verified against SpecterOps and Huntress. |
+| 10125 Application Sign-Ins Not Covered by Conditional Access (Workload Identities) | This tenant's applications hold client secrets or certificates and no enabled Conditional Access policy targets service principals; stolen application secrets were used at scale in October-November 2026. Medium with Workload ID Premium, low without. |
+| 10126 Federated Credential Trusts a Repository by Name (Repository Recycling) | A GitHub Actions or GitLab federated credential matches the repository by name instead of its numeric ID, so a re-created repository could sign in as the application. High when the application is privileged. |
+| 10127 Third-Party Agent Blueprint Can Create Agent Identities (BluePhishing) | Another organisation's service principal holds `AgentIdentity.CreateAsManager` and can create agent identities that inherit its permissions (Proofpoint, 9 November). Granted automatically to blueprints until 4 November 2026. |
+| 10128 Microsoft Developer Tools Usable by Every User (AuthCodeFix / ConsentFix Phishing) | Azure CLI, Azure PowerShell or Visual Studio Code do not require user assignment; AuthCodeFix phishing steals sign-in codes through them. Low: a hardening recommendation. |
+
+### Changed plugins
+
+- **10075 v1.1 (dynamic group rules):** Microsoft retired the `memberOf`
+  operator on 3 November 2026; groups using it no longer update. Now high
+  when the group is used by Conditional Access or a privileged application,
+  medium otherwise (was low).
+- **10030 v1.2 (weak authentication methods):** SMS and voice findings carry
+  the retirement of Microsoft-provided SMS and voice delivery (1 February
+  2027; password reset in phases from that date).
+- **5023 v1.1 (DC November update):** also names the October fix for the
+  LDAP signing bypass CVE-2026-70229, which has a public exploit since 23
+  October.
+
+### Coverage
+
+405 active plugins (401 finding checks, 4 inventory reports) plus 5 retired
+stubs.
+
+### Upgrading
+
+Replace `plugins/`. No migration, no collection change; schema v50 as
+before. 2048 asks for CHAP to be confirmed and stands until waived.
+
+## Plugin update (2026-11-20): November 2026 security advisories
+
+From a review of the Active Directory and Entra ID advisories published
+between 21 October and 20 November 2026 (November 2026 Patch Tuesday and
+the out-of-band Entra advisories), against the data the collectors already
+store. No script, collection or schema change.
+
+### New plugins
+
+| Plugin | Checks |
+|---|---|
+| 10123 Application Holds a Microsoft Graph Role-Removal Permission (CVE-2026-114162) | A service principal holds `RoleAssignmentSchedule.Remove.Directory` or `RoleEligibilitySchedule.Remove.Directory` on Microsoft Graph. CVE-2026-114162 (CVSS 9.1) lets such an application assign privileged roles, up to Global Administrator. Critical for an enabled application permission; high when the service principal is disabled or holds it only as a delegated grant. Microsoft first-party applications are excluded. |
+| 7010 Forest Trust Exposed to Cross-Forest Kerberos Elevation of Privilege (CVE-2026-122164) | An outbound or two-way forest trust lets the partner forest authenticate here; CVE-2026-122164 lets an attacker who controls the trusted forest raise an identity with access here to SYSTEM. High without Selective Authentication, medium with it. Counts the foreign principals present. Patch level is not visible, so it asks for the update to be confirmed. |
+| 4040 Object Name Contains PowerShell Command-Injection Characters (CVE-2026-123387) | An object's RDN, sAMAccountName or userPrincipalName carries a PowerShell payload shape (`$(`, a quote followed by `;`, `\|` or `&`, a separator followed by a command; high) or a backtick or line break (medium). CVE-2026-123387: a delegated user renames an object and a generated remediation script later runs the name as an administrator. Ordinary punctuation (O'Brien, R&D) is not reported. |
+| 9045 Outgoing NTLM Is Not Restricted by Group Policy (NTLM Hash Leak and Relay) | No linked GPO sets "Restrict NTLM: Outgoing NTLM traffic to remote servers" to audit or deny (medium), or it is only audited, or denied only in GPOs linked to OUs (low). The path of the Outlook NTLM hash leak CVE-2026-124194 (exploited in the wild) and NTLM spoofing CVE-2026-121680. Needs SYSVOL. |
+| 5023 Confirm the November 2026 Security Update on Domain Controllers | Lists the domain controllers to confirm for the November 2026 update: unauthenticated LDAP remote code execution (CVE-2026-119958, 9.8), Kerberos relay to SYSTEM (CVE-2026-85844, 9.8), AD DS remote code execution (CVE-2026-118146). Names DCs on an operating system that no longer receives updates. Stands until waived, like 5022 for AD FS. |
+
+Not turned into checks: the other November AD DS, Kerberos, AD CS, LSASS
+and DNS fixes are patch-only (5023 covers the domain controllers); the DNS
+remote code execution CVE-2026-81384 needs a DNS server plug-in, which is
+not stored in AD (3013 covers DnsAdmins); the Entra Private Network
+Connector fix CVE-2026-109460 needs connector versions, which are not
+collected; CVE-2026-109469 and CVE-2026-109490 were fixed by Microsoft in
+the service.
+
+### Upgrading
+
+Replace `plugins/`. No migration, no collection change; schema v50 as
+before. 5023 and 7010 stand until waived (`exception_waiver`) once the
+update is confirmed.
+
 ## Development branch (not yet released)
 
 Changes on the `development` branch, which collects the work towards

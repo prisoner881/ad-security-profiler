@@ -261,7 +261,7 @@ says `Application` for every permission.
 
 | Permission | What the collector reads with it | Licence needed |
 |---|---|---|
-| `User.Read.All` | Users, with their link to the on-prem account | – |
+| `User.Read.All` | Users, with their link to the on-prem account and every e-mail address they carry | – |
 | `RoleManagement.Read.Directory` | Directory roles and their holders, role definitions, custom-role assignments, PIM eligible and time-bound assignments | Entra ID P2 for the PIM data |
 | `Policy.Read.All` | Security Defaults, Conditional Access, authorization (user consent, guest) policy, authentication methods, cross-tenant access, admin consent requests, app management and federated token validation policies, named locations | Entra ID P1 for Conditional Access |
 | `Application.Read.All` | App registrations, service principals, their owners, credentials (expiry dates only) and federated identity credentials | – |
